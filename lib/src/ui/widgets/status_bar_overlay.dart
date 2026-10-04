@@ -2,75 +2,68 @@ import 'package:flutter/material.dart';
 
 import '../../agent/agent_status.dart';
 
-/// Translucent bar pinned to the top of the kiosk screen.
+/// Translucent status strip pinned to the top of the kiosk screen.
 ///
-/// Carries the live state and the preview switch. Turning the preview off does
-/// not stop capture, so a "采集进行中" chip stays visible to make that obvious
-/// to anyone standing in front of the camera.
+/// Informational only — the preview switch lives at the bottom of the screen
+/// (see `PreviewToggleButton`), because on Android the system status bar owns
+/// the top-right corner and swallowed the tap target.
+///
+/// The background deliberately extends under the system status bar while the
+/// content is pushed below it, so the strip reads as one continuous surface
+/// instead of leaving a bare gap at the very top.
 class StatusBarOverlay extends StatelessWidget {
-  const StatusBarOverlay({
-    super.key,
-    required this.status,
-    required this.onPreviewToggle,
-  });
+  const StatusBarOverlay({super.key, required this.status});
 
   final AgentStatus status;
-
-  /// Called with the *new* desired preview state.
-  final ValueChanged<bool> onPreviewToggle;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.55),
         borderRadius: const BorderRadius.vertical(bottom: Radius.circular(14)),
       ),
-      child: Row(
-        children: [
-          _connectionDot(),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  status.cameraName.isEmpty ? '摄像头未就绪' : status.cameraName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                  ),
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+          child: Row(
+            children: [
+              _connectionDot(),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      status.cameraName.isEmpty ? '摄像头未就绪' : status.cameraName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${status.resolutionLabel} · ${status.streamModeLabel} · '
+                      '${status.fps.toStringAsFixed(1)} fps',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  '${status.resolutionLabel} · ${status.streamModeLabel} · '
-                  '${status.fps.toStringAsFixed(1)} fps',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Colors.white70, fontSize: 12),
-                ),
-              ],
-            ),
+              ),
+              if (status.streaming) _captureChip(),
+            ],
           ),
-          if (status.streaming) _captureChip(),
-          const SizedBox(width: 6),
-          IconButton(
-            key: const Key('preview-toggle'),
-            tooltip: status.previewEnabled ? '关闭预览' : '开启预览',
-            onPressed: () => onPreviewToggle(!status.previewEnabled),
-            icon: Icon(
-              status.previewEnabled
-                  ? Icons.visibility_outlined
-                  : Icons.visibility_off_outlined,
-              color: Colors.white,
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -91,6 +84,8 @@ class StatusBarOverlay extends StatelessWidget {
     );
   }
 
+  /// Says what is actually happening: preview off does not stop capture, so
+  /// this chip stays visible either way.
   Widget _captureChip() {
     final label = status.previewEnabled ? '预览中' : '采集进行中';
     return Container(

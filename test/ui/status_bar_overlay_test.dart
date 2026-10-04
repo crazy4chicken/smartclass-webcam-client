@@ -2,31 +2,29 @@ import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:webcam_client/src/agent/agent_status.dart';
 import 'package:webcam_client/src/backend/backend_gateway.dart';
+import 'package:webcam_client/src/ui/widgets/preview_toggle_button.dart';
 import 'package:webcam_client/src/ui/widgets/status_bar_overlay.dart';
 
-void main() {
-  testWidgets('renders mode, fps, resolution and the preview toggle', (
-    tester,
-  ) async {
-    var toggled = false;
-    const status = AgentStatus(
-      connection: ConnectionState.connected,
-      fps: 2.0,
-      cameraName: 'Integrated Camera',
-      streaming: true,
-      autonomous: true,
-      resolutionLabel: '1280x720',
-      streamModeLabel: '视频·AVC',
-      previewEnabled: true,
-      backendId: 'camera_desktop',
-    );
+const _connected = AgentStatus(
+  connection: ConnectionState.connected,
+  fps: 2.0,
+  cameraName: 'Integrated Camera',
+  streaming: true,
+  autonomous: true,
+  resolutionLabel: '1280x720',
+  streamModeLabel: '视频·AVC',
+  previewEnabled: true,
+  backendId: 'camera_desktop',
+);
 
+void main() {
+  testWidgets('renders camera, resolution, mode and fps', (tester) async {
     await tester.pumpWidget(
-      MaterialApp(
+      const MaterialApp(
         home: Scaffold(
-          body: StatusBarOverlay(
-            status: status,
-            onPreviewToggle: (_) => toggled = true,
+          body: Align(
+            alignment: Alignment.topCenter,
+            child: StatusBarOverlay(status: _connected),
           ),
         ),
       ),
@@ -35,30 +33,30 @@ void main() {
     expect(find.textContaining('1280x720'), findsOneWidget);
     expect(find.textContaining('视频·AVC'), findsOneWidget);
     expect(find.textContaining('Integrated Camera'), findsOneWidget);
-
-    await tester.tap(find.byKey(const Key('preview-toggle')));
-    expect(toggled, isTrue);
   });
 
   testWidgets('keeps a recording indicator visible even when preview is off', (
     tester,
   ) async {
-    const status = AgentStatus(
-      connection: ConnectionState.connected,
-      fps: 2.0,
-      cameraName: 'cam',
-      streaming: true,
-      autonomous: false,
-      resolutionLabel: '1280x720',
-      streamModeLabel: '视频·AVC',
-      previewEnabled: false,
-      backendId: 'camera_desktop',
-    );
-
     await tester.pumpWidget(
-      MaterialApp(
+      const MaterialApp(
         home: Scaffold(
-          body: StatusBarOverlay(status: status, onPreviewToggle: (_) {}),
+          body: Align(
+            alignment: Alignment.topCenter,
+            child: StatusBarOverlay(
+              status: AgentStatus(
+                connection: ConnectionState.connected,
+                fps: 2.0,
+                cameraName: 'cam',
+                streaming: true,
+                autonomous: false,
+                resolutionLabel: '1280x720',
+                streamModeLabel: '视频·AVC',
+                previewEnabled: false,
+                backendId: 'camera_desktop',
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -66,34 +64,48 @@ void main() {
     expect(find.textContaining('采集进行中'), findsOneWidget);
   });
 
-  testWidgets('the toggle reports the desired new state, not the current one', (
-    tester,
-  ) async {
-    bool? requested;
-    const status = AgentStatus(
-      connection: ConnectionState.connected,
-      fps: 1.0,
-      cameraName: 'cam',
-      streaming: true,
-      autonomous: false,
-      resolutionLabel: '1280x720',
-      streamModeLabel: '视频·AVC',
-      previewEnabled: false,
-      backendId: 'camera_desktop',
-    );
+  testWidgets(
+    'content clears the system status bar while the background does not',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => MediaQuery(
+              // Simulate an Android status bar without clobbering size.
+              data: MediaQuery.of(context)
+                  .copyWith(padding: const EdgeInsets.only(top: 40)),
+              child: const Scaffold(
+                body: Align(
+                  alignment: Alignment.topCenter,
+                  child: StatusBarOverlay(status: _connected),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
 
+      final contentTop = tester.getTopLeft(find.textContaining('1280x720')).dy;
+      expect(
+        contentTop,
+        greaterThanOrEqualTo(40),
+        reason: 'the strip must not sit under the system status bar',
+      );
+    },
+  );
+
+  testWidgets('no longer hosts the preview switch', (tester) async {
     await tester.pumpWidget(
-      MaterialApp(
+      const MaterialApp(
         home: Scaffold(
-          body: StatusBarOverlay(
-            status: status,
-            onPreviewToggle: (value) => requested = value,
+          body: Align(
+            alignment: Alignment.topCenter,
+            child: StatusBarOverlay(status: _connected),
           ),
         ),
       ),
     );
 
-    await tester.tap(find.byKey(const Key('preview-toggle')));
-    expect(requested, isTrue);
+    expect(find.byKey(PreviewToggleButton.toggleKey), findsNothing);
   });
 }

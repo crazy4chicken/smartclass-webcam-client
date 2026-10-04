@@ -59,6 +59,18 @@ AgentCoordinator ── 单并发排他锁采集循环、命令路由、断线�
   直接跑 `tool/verify_pure.dart`。新增代码请保持这个边界。
 - **不引入 `permission_handler`**（原因见下）。
 
+界面上的两条硬约束（都是 Android 真机上踩出来的）：
+
+- **预览开关在底部**（`PreviewToggleButton`），顶部状态条只放信息。Android 的系统状态栏占着
+  右上角，放上面会被盖住、点不到。
+- **预览必须保持原始宽高比**：`CameraPreview` 内部用 `AspectRatio`，而
+  `Stack(fit: StackFit.expand)` 会传**紧约束**，`RenderAspectRatio` 遇到紧约束会直接返回
+  `constraints.smallest` —— 宽高比被无视，画面被拉伸变形。所以 `_PreviewArea` 外面套了一层
+  `Center`（`Center` 会把约束放松），画面按 contain 居中、留黑边。
+  手机竖屏下源是 9:16、屏约 9:20，用 contain 只留很窄的上下黑边；如果改成 cover，
+  要横向裁掉约 75% 的画面，人脸会直接被裁没，所以这里必须用 contain。
+
+
 ## 构建环境
 
 Windows 端需要 Visual Studio（Desktop development with C++ 工作负载）。

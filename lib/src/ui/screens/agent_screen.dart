@@ -7,11 +7,12 @@ import '../../backend/server_command.dart';
 import '../../capture/camera_backend.dart';
 import '../../capture/camera_service.dart';
 import '../widgets/camera_error_view.dart';
+import '../widgets/preview_toggle_button.dart';
 import '../widgets/recognition_hud.dart';
 import '../widgets/status_bar_overlay.dart';
 
-/// The kiosk screen: full-bleed preview, status bar on top, recognition bubble
-/// near the bottom.
+/// The kiosk screen: preview filling the screen, status strip on top, preview
+/// switch at the bottom, recognition bubble near the middle.
 ///
 /// When no camera is usable the whole screen becomes [CameraErrorView] — never
 /// a white screen and never a crash.
@@ -52,14 +53,24 @@ class AgentScreen extends StatelessWidget {
                 ),
                 Align(
                   alignment: Alignment.topCenter,
-                  child: StatusBarOverlay(
-                    status: status,
-                    onPreviewToggle: coordinator.setPreviewEnabled,
+                  child: StatusBarOverlay(status: status),
+                ),
+                // Bottom, not top: the Android system status bar sits in the
+                // top-right corner and swallowed this control's tap target.
+                Align(
+                  alignment: Alignment.bottomRight,
+                  child: SafeArea(
+                    top: false,
+                    minimum: const EdgeInsets.all(16),
+                    child: PreviewToggleButton(
+                      previewEnabled: status.previewEnabled,
+                      onToggle: coordinator.setPreviewEnabled,
+                    ),
                   ),
                 ),
                 if (faceResult != null)
                   Align(
-                    alignment: const Alignment(0, 0.6),
+                    alignment: const Alignment(0, 0.55),
                     child: RecognitionHud(result: faceResult),
                   ),
               ],
@@ -92,7 +103,12 @@ class _PreviewArea extends StatelessWidget {
     if (source case final CameraPreviewProvider provider) {
       final controller = provider.previewController;
       if (controller is CameraController && controller.value.isInitialized) {
-        return CameraPreview(controller);
+        // Center is load-bearing: it hands the child LOOSE constraints.
+        // CameraPreview wraps itself in an AspectRatio, and tight constraints
+        // (which `Stack(fit: StackFit.expand)` would otherwise impose) override
+        // that ratio and stretch the texture to the screen — which is exactly
+        // the "people look squashed" bug.
+        return Center(child: CameraPreview(controller));
       }
     }
 
