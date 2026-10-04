@@ -47,6 +47,8 @@ void registerCommonFallbacks() {
   );
   registerFallbackValue(PhotoMeta(cameraEnum: 0, ts: DateTime.utc(2026)));
   registerFallbackValue(Uint8List(0));
+  // Needed for `when(() => gateway.start(any()))`.
+  registerFallbackValue(testCredentials);
 }
 
 // --- mocktail mocks ---------------------------------------------------------

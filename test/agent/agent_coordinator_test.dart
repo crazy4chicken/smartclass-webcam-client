@@ -90,60 +90,60 @@ void main() {
   );
 
   group('command routing', () {
-    test(
-      'acks start_recording and pumps frames tagged with the stream id',
-      () async {
-        when(() => pump.frames).thenAnswer(
-          (_) => Stream.fromIterable([
-            CapturedFrame(
-              seq: 0,
-              ts: DateTime.utc(2026),
-              bytes: Uint8List.fromList([1]),
-            ),
-            CapturedFrame(
-              seq: 1,
-              ts: DateTime.utc(2026),
-              bytes: Uint8List.fromList([2]),
-            ),
-          ]),
-        );
-
-        final coordinator = build();
-        await coordinator.handleCommand(
-          const StartRecordingCommand(
-            id: '01J8ZKQ3B5N7P9R1T3V5X7Z9B1',
-            cameraEnum: 0,
-            streamId: '01J8ZKQ3B5N7P9R1T3V5X7Z9B2',
+    test('acks start_recording and pumps frames tagged with the stream id', () async {
+      when(() => pump.frames).thenAnswer(
+        (_) => Stream.fromIterable([
+          CapturedFrame(
+            seq: 0,
+            ts: DateTime.utc(2026),
+            bytes: Uint8List.fromList([1]),
           ),
-        );
-
-        final ack =
-            verify(() => gateway.send(captureAny())).captured.single
-                as AckMessage;
-        expect(ack.id, '01J8ZKQ3B5N7P9R1T3V5X7Z9B1');
-        expect(ack.ok, isTrue);
-
-        verify(
-          () => pump.start(
-            cameraEnum: 0,
-            streamId: '01J8ZKQ3B5N7P9R1T3V5X7Z9B2',
-            fps: any(named: 'fps'),
-            quality: any(named: 'quality'),
+          CapturedFrame(
+            seq: 1,
+            ts: DateTime.utc(2026),
+            bytes: Uint8List.fromList([2]),
           ),
-        ).called(1);
+        ]),
+      );
 
-        expect(coordinator.captureState, CaptureState.recording);
-        expect(coordinator.activeStreamId, '01J8ZKQ3B5N7P9R1T3V5X7Z9B2');
+      final coordinator = build();
+      await coordinator.handleCommand(
+        const StartRecordingCommand(
+          id: '01J8ZKQ3B5N7P9R1T3V5X7Z9B1',
+          cameraEnum: 0,
+          streamId: '01J8ZKQ3B5N7P9R1T3V5X7Z9B2',
+        ),
+      );
+      // Frame delivery is asynchronous even for a synchronous iterable, so let
+      // the stream drain before counting what was pushed.
+      await pumpEventQueue();
 
-        final frames = verify(
-          () => gateway.sendRecordingFrame(captureAny(), captureAny()),
-        ).captured;
-        final meta = frames.first as RecordingFrameMeta;
-        expect(meta.streamId, '01J8ZKQ3B5N7P9R1T3V5X7Z9B2');
-        expect(meta.cameraEnum, 0);
-        expect(frames, hasLength(4)); // two frames, each as meta + bytes
-      },
-    );
+      final ack =
+          verify(() => gateway.send(captureAny())).captured.single
+              as AckMessage;
+      expect(ack.id, '01J8ZKQ3B5N7P9R1T3V5X7Z9B1');
+      expect(ack.ok, isTrue);
+
+      verify(
+        () => pump.start(
+          cameraEnum: 0,
+          streamId: '01J8ZKQ3B5N7P9R1T3V5X7Z9B2',
+          fps: any(named: 'fps'),
+          quality: any(named: 'quality'),
+        ),
+      ).called(1);
+
+      expect(coordinator.captureState, CaptureState.recording);
+      expect(coordinator.activeStreamId, '01J8ZKQ3B5N7P9R1T3V5X7Z9B2');
+
+      final frames = verify(
+        () => gateway.sendRecordingFrame(captureAny(), captureAny()),
+      ).captured;
+      final meta = frames.first as RecordingFrameMeta;
+      expect(meta.streamId, '01J8ZKQ3B5N7P9R1T3V5X7Z9B2');
+      expect(meta.cameraEnum, 0);
+      expect(frames, hasLength(4)); // two frames, each as meta + bytes
+    });
 
     test(
       'stop_recording halts the pump and stops pushing immediately',

@@ -1,5 +1,18 @@
 # 跨平台摄像头边缘探针客户端 Implementation Plan
 
+> **⚠️ 已被取代（v1 方案）。** 本文假设的后端协议从未存在过，且**大部分已被推翻**：
+> 信令集（`register` / `heartbeat` / `cmd_*` / `state_sync` / `frame_meta` / `video_meta`）、
+> `CommandCodec`、`ClientSignal` / `ServerCommand`、`DeviceIdService`（UUIDv4）、
+> `VideoChunkRecorder`（mp4 分片）、`RecognitionHud` 均已删除；
+> `StreamMode` / `VideoCodec` 已换成 `CaptureCodec`；
+> 配置项 **`WS_URL` 已不存在**，现为 `BASE_URL` / `DEVICE_ID` / `DEVICE_TOKEN`。
+>
+> 现行方案见 `docs/superpowers/plans/2026-10-04-smartclass-backend-integration.md`，
+> 现行架构见 `README.md`。协议权威是后端仓库的 `smartclass-webcam-server/docs/protocol/`。
+>
+> 本文仍有效的是：摄像头四层抽象、绝对像素分辨率、采集严禁排队、
+> kiosk 生命周期姿态、预览开关语义。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 构建一个在 Windows / macOS / Linux / iOS / Android 上统一运行的**前台 kiosk 式**摄像头探针客户端。启动即用本地默认参数采集，通过 WebSocket 上报自身能力并接受后端下发的采集模式（静态帧 / 视频）、编码格式、启停、切摄、预览开关指令，把画面持续推送给后端 AI 模型（后端**需要时序信息**：活体检测、动作、轨迹），并展示人脸识别结果。**后端协议尚未定稿**，所有后端交互必须收敛在一个可整体替换的网关抽象之后。
@@ -21,7 +34,8 @@
 - **默认采集参数**：`mode = video`、`codec = avc`（H.264，**跨平台支持最广的一个，故为默认**）、`chunkSeconds = 3`、`previewEnabled = true`、1280×720、1.0 FPS（still 模式下）、JPEG 质量 80。
 - **HEVC 现实约束**：`camera_desktop` / `camera_avfoundation` / `camera_android_camerax` **三个实现都硬编码 H.264，无 codec 参数**。要拿到 HEVC 必须绕过插件录制器、自接原生编码器（iOS VideoToolbox / Android MediaCodec / Windows MF / Linux x265）。**v1 不实现 HEVC 编码**，只做能力位与降级回传；接口留好，后续接入只需替换 `VideoChunkRecorder` 实现。
 - **分辨率用绝对像素**：协议传 `width` / `height`，客户端选最接近的原生格式，并把**实际生效值**回传。
-- **后端地址**：编译期注入 `--dart-define WS_URL=`，默认 `ws://127.0.0.1:8080/ws`。
+- **后端地址**：编译期注入 `--dart-define BASE_URL=`，默认 `http://127.0.0.1:8080`。
+  （v1 原文是 `WS_URL` / `ws://…/ws`，**该变量已不存在**。）
 - **deviceId**：首次启动生成 UUIDv4 并持久化。
 - **不商用**：不实现鉴权与 TLS。网关必须保持可替换（接口不得泄漏 `web_socket_channel` 类型），以便后续插入 `wss://` 与 token。
 - **运行时策略**：全程 Wakelock；采集严禁排队，前次未结束即丢帧；`takePicture()` 落盘的临时文件必须读完即删。
@@ -148,7 +162,7 @@ git add . && git commit -m "chore: scaffold webcam_client with camera_desktop an
 
 **Interfaces:**
 - Produces:
-  - `AppConfig.wsUrl: String`（`String.fromEnvironment('WS_URL', defaultValue: 'ws://127.0.0.1:8080/ws')`）
+  - `AppConfig.baseUrl: String`（`String.fromEnvironment('BASE_URL', defaultValue: 'http://127.0.0.1:8080')`；v1 原文为 `wsUrl` / `WS_URL`，已不存在）
   - `AppConfig.defaultWidth = 1280`、`defaultHeight = 720`、`defaultQuality = 80`、`defaultFps = 1.0`、`defaultChunkSeconds = 3`、`defaultPreviewEnabled = true`、`heartbeatSeconds = 15`、`registerTimeoutSeconds = 5`
   - `DeviceIdService.getOrCreateDeviceId() -> Future<String>`
   - `enum StreamMode { still, video }`、`enum VideoCodec { avc, hevc }`

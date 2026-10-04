@@ -121,10 +121,11 @@ class StatusBarOverlay extends StatelessWidget {
     CaptureState.idle => '空闲',
   };
 
+  /// The capture state is **not** repeated here: the chip on the right already
+  /// says it, and duplicating it made the strip say `空闲` twice.
   String _detailLine() {
     final parts = <String>[_linkLabel, '${status.fps} fps'];
     if (status.framesSent > 0) parts.add('已推 ${status.framesSent} 帧');
-    if (!status.isLive) parts.add(_captureLabel);
     return parts.join(' · ');
   }
 

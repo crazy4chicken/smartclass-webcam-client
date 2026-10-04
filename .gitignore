@@ -42,3 +42,6 @@ doc/api/
 # The backend is a separate repository; keep it out of this one.
 # (Use `git submodule add` if it should be tracked here.)
 smartclass-webcam-server/
+
+# Scratch terminal dumps pasted into the workspace.
+output_temp.txt

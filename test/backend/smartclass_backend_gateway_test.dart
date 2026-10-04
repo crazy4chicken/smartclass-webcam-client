@@ -332,7 +332,13 @@ void main() {
     expect(harness.sink.records, isEmpty);
 
     await harness.gateway.start(testCredentials);
-    expect(harness.sink.records, isNotEmpty);
+    // Attaching sends nothing on its own — the idle `status` is on a 30-second
+    // timer, so a freshly attached link is silent until something happens.
+    expect(harness.sink.records, isEmpty);
+
+    // The same push that was dropped before now goes out.
+    harness.gateway.send(AckMessage(id: 'y', ok: true));
+    expect(harness.sink.records, hasLength(1));
 
     await harness.gateway.stop();
     unawaited(harness.incoming.close());

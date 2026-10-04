@@ -1,5 +1,14 @@
 # 跨平台摄像头 AI 识别边缘探针 (Flutter Agent) 实施方案
 
+> **⚠️ 已作废（v0 草案）。** 本文的技术选型**每一条都已被推翻**，仅作历史留档：
+> 摄像头走 `camera_windows` / `camera_macos` / `camera_linux`（已全部废弃，
+> 现统一用 `camera` + `camera_desktop`）；通信层 `WebSocketService`、
+> `ControlMessage` 模型、`DeviceIdService`（UUIDv4）均已删除；
+> 配置项 **`WS_URL` 已不存在**，现为 `BASE_URL` / `DEVICE_ID` / `DEVICE_TOKEN`。
+>
+> 现行方案见 `docs/superpowers/plans/2026-10-04-smartclass-backend-integration.md`，
+> 现行架构见 `README.md`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 构建一个在 Windows、macOS、Linux、iOS、Android 上统一运行的摄像头边缘探针客户端，启动后自动捕获画面、通过 WebSocket 将 JPEG 图片流传输到后端 AI 模型，并接收后端下发的动态调参、启停、切摄信令和人脸识别结果反馈。
@@ -96,7 +105,9 @@ Expected: FAIL with "ControlMessage not defined"
 
 - [ ] **Step 3: Implement `AppConfig`, `ControlMessage`, and `DeviceIdService`**
 
-1. 在 `lib/src/config/app_config.dart` 中使用 `String.fromEnvironment('WS_URL', defaultValue: 'ws://127.0.0.1:8080/ws')` 定义硬编码默认地址与采集初始常量。
+1. 在 `lib/src/config/app_config.dart` 中定义硬编码默认地址与采集初始常量。
+   （v0 原文用一个已废弃的环境变量，**该变量已不存在**，现为
+   `BASE_URL` + `DEVICE_ID` + `DEVICE_TOKEN`，见 `AppConfig`。）
 2. 在 `lib/src/models/control_message.dart` 中实现通用信令模型，支持安全字段解析和容错处理。
 3. 在 `lib/src/services/device_id_service.dart` 中利用 `shared_preferences` 和 `uuid` 实现设备 ID 的持久化生成。
 
