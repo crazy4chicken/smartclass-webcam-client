@@ -44,9 +44,11 @@ dependencies:
   # 2.0.210806.1, whose <experimental/coroutine> is now a hard error).
   wakelock_plus: ^1.8.1
   web_socket_channel: ^3.0.3
+  # Device registration is an HTTP GET (with a JSON body) against the
+  # smartclass-webcam-server device plane, so a real HTTP client is needed
+  # alongside the WebSocket.
+  http: ^1.6.0
   shared_preferences: ^2.5.5
-  uuid: ^4.6.0
-  cross_file: ^0.3.5+5
 
 dev_dependencies:
   flutter_test:

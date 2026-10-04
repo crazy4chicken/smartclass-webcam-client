@@ -3,14 +3,12 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
-import 'package:cross_file/cross_file.dart';
 
 import 'camera_backend.dart';
 import 'camera_resolution.dart';
 import 'camera_service.dart';
 import 'frame_source.dart';
 import 'frame_store.dart';
-import 'video_chunk_recorder.dart';
 
 /// Lists the platform's cameras. Injectable so [CameraPluginBackend] can be
 /// exercised without hardware.
@@ -103,16 +101,13 @@ class CameraPluginBackend implements CameraBackend {
     CameraLister? listCameras,
     FrameStore frameStore = const IoFrameStore(),
     CameraControllerFactory? controllerFactory,
-    CameraPluginVideoChunkRecorder? recorder,
   }) : _listCameras = listCameras ?? availableCameras,
        _frameStore = frameStore,
-       _controllerFactory = controllerFactory ?? _defaultControllerFactory,
-       _recorder = recorder;
+       _controllerFactory = controllerFactory ?? _defaultControllerFactory;
 
   final CameraLister _listCameras;
   final FrameStore _frameStore;
   final CameraControllerFactory _controllerFactory;
-  final CameraPluginVideoChunkRecorder? _recorder;
 
   @override
   String get id {
@@ -180,9 +175,6 @@ class CameraPluginBackend implements CameraBackend {
       controllerFactory: _controllerFactory,
     );
     await service.initialize();
-
-    // Late-bind the recorder so video chunks come from this camera.
-    _recorder?.host = service;
     return service;
   }
 }
@@ -192,8 +184,7 @@ class CameraPluginBackend implements CameraBackend {
 /// Rebuilds (reconfigure / switchCamera) are serialised and roll back to the
 /// last working configuration, so a bad command from the backend can never
 /// leave the probe without a camera.
-class _PluginCameraService
-    implements CameraService, RecorderHost, CameraPreviewProvider {
+class _PluginCameraService implements CameraService, CameraPreviewProvider {
   _PluginCameraService({
     required List<CameraDescription> cameras,
     required CaptureConfig config,
@@ -310,29 +301,6 @@ class _PluginCameraService
       // Preview is cosmetic; a failure here must not disturb capture.
     }
   }
-
-  // --- RecorderHost ---------------------------------------------------------
-
-  @override
-  Future<void> startRecording() async {
-    final controller = _controller;
-    if (controller == null) {
-      throw StateError('camera is not open');
-    }
-    await controller.startVideoRecording();
-  }
-
-  @override
-  Future<XFile> stopRecording() async {
-    final controller = _controller;
-    if (controller == null) {
-      throw StateError('camera is not open');
-    }
-    return controller.stopVideoRecording();
-  }
-
-  @override
-  Future<Uint8List> readFile(String path) => _frameStore.readAndDelete(path);
 
   // --- CameraPreviewProvider ------------------------------------------------
 

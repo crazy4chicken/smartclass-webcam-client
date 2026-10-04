@@ -1,172 +1,193 @@
 import 'dart:async';
-import 'dart:io';
+import 'dart:typed_data';
 
 import '../backend/backend_gateway.dart';
-import '../backend/client_signal.dart';
-import '../backend/server_command.dart';
+import '../backend/device_credentials.dart';
+import '../backend/protocol/device_command.dart';
+import '../backend/protocol/device_message.dart';
 import '../backend/unrecognized_command_log.dart';
 import '../capture/camera_backend.dart';
-import '../capture/camera_plugin_backend.dart';
 import '../capture/camera_provider.dart';
 import '../capture/camera_resolution.dart';
 import '../capture/camera_service.dart';
+import '../capture/frame_pump.dart';
 import '../capture/stream_settings.dart';
-import '../capture/video_chunk_recorder.dart';
-import '../config/app_config.dart';
-import '../identity/device_id_service.dart';
 import 'agent_status.dart';
 
-/// Owns the capture loop, the command router, state re-sync and local autonomy.
+/// Builds the pump for one recording.
+///
+/// A factory rather than an instance because a stream is created per
+/// `start_recording`, and a pump is bound to one stream for its whole life.
+typedef FramePumpFactory = FramePump Function();
+
+/// Owns the camera, the command router and the frame push.
+///
+/// The device is a **subordinate**: it pushes nothing until the server asks.
+/// The server's own words are that "frames sent after `stop_recording` are
+/// dropped even if the device has not yet processed the stop", so the pump must
+/// stop the instant the command lands — which is why [handleCommand] is the
+/// only entry point that starts or stops media.
 ///
 /// It only ever sees domain objects: the wire format lives behind
 /// [BackendGateway], and the camera behind [CameraProvider].
 class AgentCoordinator {
   AgentCoordinator({
-    required CameraProvider cameraProvider,
     required BackendGateway gateway,
-    required DeviceIdService deviceIdService,
-    VideoChunkRecorder? recorder,
-    StreamSettings? initialSettings,
-    Duration? registerTimeout,
-  }) : _cameraProvider = cameraProvider,
-       _gateway = gateway,
-       _deviceIdService = deviceIdService,
-       _recorder = recorder,
-       _settings = initialSettings ?? StreamSettings.defaults(),
-       _registerTimeout =
-           registerTimeout ??
-           const Duration(seconds: AppConfig.registerTimeoutSeconds);
+    required CameraProvider cameraProvider,
+    required FramePumpFactory pumpFactory,
+    DeviceCredentials? credentials,
+    CameraService? initialCamera,
+    String? initialBackendId,
+    CaptureConfig? config,
+    StreamSettings? settings,
+  }) : _gateway = gateway,
+       _cameraProvider = cameraProvider,
+       _pumpFactory = pumpFactory,
+       _credentials = credentials,
+       _camera = initialCamera,
+       _backendId = initialBackendId,
+       _config = config ?? CaptureConfig.defaults(),
+       _settings = settings ?? StreamSettings.defaults();
 
-  final CameraProvider _cameraProvider;
   final BackendGateway _gateway;
-  final DeviceIdService _deviceIdService;
-  final VideoChunkRecorder? _recorder;
-  final Duration _registerTimeout;
+  final CameraProvider _cameraProvider;
+  final FramePumpFactory _pumpFactory;
+  final DeviceCredentials? _credentials;
 
-  final StreamController<FaceResult> _faceResults =
-      StreamController<FaceResult>.broadcast();
-  final StreamController<double> _fpsUpdates =
-      StreamController<double>.broadcast();
   final StreamController<AgentStatus> _statuses =
       StreamController<AgentStatus>.broadcast();
-
-  StreamSettings _settings;
-  CaptureConfig _captureConfig = CaptureConfig.defaults();
 
   CameraService? _camera;
   CameraFailure? _failure;
   String? _backendId;
-  String? _deviceId;
 
-  /// Local defaults mean we start streaming immediately, before the backend
-  /// has said anything.
-  bool _streaming = true;
-  bool _autonomous = false;
+  CaptureConfig _config;
+  StreamSettings _settings;
+
+  LinkState _linkState = LinkState.idle;
+  CaptureState _captureState = CaptureState.idle;
+
+  /// The stream currently being fed, and the camera it belongs to.
+  String? _activeStreamId;
+  int? _recordingCameraEnum;
+
+  FramePump? _pump;
+  StreamSubscription<CapturedFrame>? _frameSub;
+
+  StreamSubscription<DeviceCommand>? _commandSub;
+  StreamSubscription<LinkState>? _linkSub;
+  StreamSubscription<String>? _errorSub;
+  StreamSubscription<CameraHealth>? _healthSub;
+
+  int _cameraEnum = 0;
+  int _framesSent = 0;
+  String? _lastError;
   bool _started = false;
   bool _paused = false;
-  bool _isRecording = false;
-  bool _isUploading = false;
-  bool _codecMismatchReported = false;
-
-  double _targetFps = AppConfig.defaultFps;
-  double _measuredFps = 0;
-  int _framesInWindow = 0;
-  int _chunksInWindow = 0;
-  int _frameId = 0;
-  int _chunkId = 0;
-  int _cameraIndex = 0;
-  ConnectionState _connectionState = ConnectionState.offline;
-
-  Timer? _captureTimer;
-  Timer? _fpsTimer;
-  Timer? _registerTimeoutTimer;
-  Timer? _autonomousRetryTimer;
-  StreamSubscription<ServerCommand>? _commandSub;
-  StreamSubscription<ConnectionState>? _connectionSub;
-  StreamSubscription<VideoChunk>? _chunkSub;
-  StreamSubscription<CameraHealth>? _healthSub;
 
   // --- read-only view -------------------------------------------------------
 
+  LinkState get linkState => _linkState;
+
+  CaptureState get captureState => _captureState;
+
+  String? get activeStreamId => _activeStreamId;
+
+  int get cameraEnum => _cameraEnum;
+
+  /// The frame rate announced to the server.
+  int get announcedFps => _settings.fps;
+
   StreamSettings get settings => _settings;
 
-  double get currentFps => _measuredFps;
-
-  bool get isStreaming => _streaming;
-
-  bool get isAutonomous => _autonomous;
-
-  String get cameraName => _camera?.descriptor.name ?? '';
-
-  String? get backendId => _backendId;
+  CameraService? get cameraService => _camera;
 
   CameraFailure? get failure => _failure;
 
-  CameraService? get cameraService => _camera;
+  String? get backendId => _backendId;
+
+  String get cameraName => _camera?.descriptor.name ?? '';
+
+  int get framesSent => _framesSent;
 
   UnrecognizedCommandLog get unrecognizedCommands =>
       _gateway.unrecognizedCommands;
 
-  Stream<FaceResult> get onFaceResult => _faceResults.stream;
-
-  Stream<double> get onFpsUpdate => _fpsUpdates.stream;
-
   Stream<AgentStatus> get onStatus => _statuses.stream;
 
   AgentStatus get status => AgentStatus(
-    connection: _connectionState,
-    fps: _measuredFps,
+    linkState: _linkState,
+    captureState: _captureState,
+    activeStreamId: _activeStreamId,
     cameraName: cameraName,
-    streaming: _streaming,
-    autonomous: _autonomous,
-    resolutionLabel: _effectiveResolution.label,
-    streamModeLabel: _streamModeLabel,
+    fps: _settings.fps,
     previewEnabled: _settings.previewEnabled,
-    backendId: _backendId ?? '',
+    framesSent: _framesSent,
+    lastError: _lastError,
   );
 
-  CameraResolution get _effectiveResolution =>
-      _camera?.appliedResolution ?? _captureConfig.resolution;
-
-  String get _streamModeLabel => _settings.mode == StreamMode.still
-      ? '静态帧'
-      : '视频·${_settings.codec.name.toUpperCase()}';
+  /// The payload for the gateway's periodic idle `status`.
+  ///
+  /// The server treats it as opaque and stores nothing, but it is what keeps
+  /// the 60-second read deadline from tripping and what an operator sees in
+  /// the server log while nothing is being recorded.
+  Map<String, Object?> reportStatus() => {
+    'active_camera': _cameraEnum,
+    'recording': _captureState == CaptureState.recording,
+    'stream_id': _activeStreamId,
+    'frames_sent': _framesSent,
+    'link': _linkState.name,
+  };
 
   // --- lifecycle ------------------------------------------------------------
 
-  /// Starts capturing on local defaults immediately — it does **not** wait for
-  /// the backend to answer.
   Future<void> start() async {
     if (_started) return;
     _started = true;
 
-    _deviceId = await _deviceIdService.getOrCreateDeviceId();
+    _commandSub = _gateway.commands.listen(
+      (command) => unawaited(handleCommand(command)),
+    );
+    _linkSub = _gateway.states.listen(_onLinkState);
+    _errorSub = _gateway.errors.listen(_onGatewayError);
 
-    _commandSub = _gateway.commands.listen(handleCommand);
-    _connectionSub = _gateway.connectionChanges.listen(_onConnectionState);
+    if (_camera == null) {
+      await _openCamera();
+    } else {
+      _bindHealth();
+    }
 
-    await _openCamera();
-    await _gateway.connect(AppConfig.wsUrl);
+    final credentials = _credentials;
+    if (credentials == null) {
+      // Never crash a kiosk over a missing configuration. The camera is open
+      // and previewing, and the status bar says exactly what is wrong.
+      _linkState = LinkState.failed;
+      _lastError =
+          '未配置设备凭据。请用 --dart-define=DEVICE_ID=… DEVICE_TOKEN=… 启动，'
+          '或先由运营侧下发凭据。';
+      _emitStatus();
+      return;
+    }
 
-    _sendRegister();
-    _startFpsWindow();
-    await _applyCurrentMode();
-
-    _registerTimeoutTimer = Timer(_registerTimeout, _enterAutonomousIfSilent);
+    // Nothing is pushed here on purpose: the device waits to be told.
+    await _gateway.start(credentials);
+    // The gateway may already have reached `live` synchronously; adopt whatever
+    // it settled on rather than assuming.
+    _linkState = _gateway.state;
     _emitStatus();
   }
 
-  /// Pauses capture, releases the camera and drops the connection.
+  /// Stops media, releases the camera and drops the link.
   ///
   /// iOS and Android forbid background camera use outright, so this is not
   /// optional politeness — it is the only correct behaviour.
   Future<void> pause() async {
     if (_paused) return;
     _paused = true;
-    _stopStillLoop();
-    await _stopVideoMode();
+    await _stopRecording();
     await _camera?.release();
-    await _gateway.disconnect();
+    await _gateway.stop();
+    _linkState = LinkState.idle;
     _emitStatus();
   }
 
@@ -174,44 +195,272 @@ class AgentCoordinator {
     if (!_paused) return;
     _paused = false;
     await _openCamera();
-    await _gateway.connect(AppConfig.wsUrl);
-    await _applyCurrentMode();
-    _startFpsWindow();
-    _sendRegister();
+    final credentials = _credentials;
+    if (credentials != null) {
+      await _gateway.start(credentials);
+      _linkState = _gateway.state;
+    }
     _emitStatus();
   }
 
   Future<void> stop() async {
-    _stopStillLoop();
-    _fpsTimer?.cancel();
-    _fpsTimer = null;
-    _registerTimeoutTimer?.cancel();
-    _registerTimeoutTimer = null;
-    _autonomousRetryTimer?.cancel();
-    _autonomousRetryTimer = null;
-
-    await _stopVideoMode();
+    await _stopRecording();
     await _commandSub?.cancel();
-    await _connectionSub?.cancel();
+    await _linkSub?.cancel();
+    await _errorSub?.cancel();
     await _healthSub?.cancel();
-    await _camera?.release();
-    await _gateway.disconnect();
+    _commandSub = null;
+    _linkSub = null;
+    _errorSub = null;
+    _healthSub = null;
 
+    await _camera?.release();
+    await _gateway.stop();
+    _linkState = LinkState.idle;
     _started = false;
     _emitStatus();
   }
 
   Future<void> dispose() async {
     await stop();
-    await _faceResults.close();
-    await _fpsUpdates.close();
     await _statuses.close();
+  }
+
+  /// Re-runs camera discovery. Wired to the retry button on the error screen.
+  Future<void> retryCamera() async {
+    await _openCamera();
+    _emitStatus();
+  }
+
+  /// Toggles the preview. Purely local — there is no server command for it,
+  /// and turning it off never stops the capture path.
+  Future<void> setPreviewEnabled(bool enabled) async {
+    _settings = _settings.copyWith(previewEnabled: enabled);
+    try {
+      await _camera?.setPreviewEnabled(enabled);
+    } catch (_) {
+      // Preview failure must not disturb capture.
+    }
+    _emitStatus();
+  }
+
+  // --- command routing ------------------------------------------------------
+
+  /// The single entry point for every server command.
+  ///
+  /// Every command that carries an `id` is acked, success or failure. Silent
+  /// failure is forbidden: the server never waits for an ack and never retries,
+  /// so an unacked command leaves an operator with no idea anything happened.
+  Future<void> handleCommand(DeviceCommand command) async {
+    try {
+      switch (command) {
+        case StartRecordingCommand():
+          await _startRecording(command);
+        case StopRecordingCommand():
+          await _stopRecordingCommand(command);
+        case TakePhotoCommand():
+          await _takePhoto(command);
+        case SwitchCameraCommand():
+          await _switchCamera(command);
+        case PingCommand():
+          // Answered by the gateway, which owns the transport-level pong.
+          break;
+      }
+    } catch (error) {
+      await _ack(command, ok: false, error: '$error');
+    }
+    _emitStatus();
+  }
+
+  Future<void> _startRecording(StartRecordingCommand command) async {
+    if (_captureState == CaptureState.recording) {
+      // The server also refuses a second active stream for the same camera, so
+      // agreeing here would only produce frames it drops.
+      await _ack(
+        command,
+        ok: false,
+        error: 'already recording stream ${_activeStreamId ?? '-'}',
+      );
+      return;
+    }
+
+    final camera = _camera;
+    if (camera == null || !camera.isInitialized) {
+      await _ack(
+        command,
+        ok: false,
+        error: 'camera ${command.cameraEnum} is not available',
+      );
+      return;
+    }
+
+    final pump = _pumpFactory();
+    _pump = pump;
+    // Subscribe before starting, so the first frames are not missed.
+    _frameSub = pump.frames.listen(_onCapturedFrame);
+
+    await pump.start(
+      cameraEnum: command.cameraEnum,
+      streamId: command.streamId,
+      fps: _settings.fps,
+      quality: _settings.quality,
+    );
+
+    _activeStreamId = command.streamId;
+    _recordingCameraEnum = command.cameraEnum;
+    _captureState = CaptureState.recording;
+    await _ack(command, ok: true);
+  }
+
+  Future<void> _stopRecordingCommand(StopRecordingCommand command) async {
+    // The stream id is not checked against the active one on purpose: whatever
+    // the server says to stop, we stop. Frames sent after the stop are dropped
+    // server-side, so continuing would be pure waste.
+    //
+    // A stop for an already-idle device is still `ok: true` — the server marks
+    // the stream completed as soon as it queues the command, so there is no
+    // failure for the device to report.
+    await _stopRecording();
+    await _ack(command, ok: true);
+  }
+
+  Future<void> _takePhoto(TakePhotoCommand command) async {
+    final camera = _camera;
+    if (camera == null || !camera.isInitialized) {
+      await _ack(
+        command,
+        ok: false,
+        error: 'camera ${command.cameraEnum} is not available',
+      );
+      return;
+    }
+
+    _captureState = CaptureState.capturingPhoto;
+    _emitStatus();
+
+    try {
+      final bytes = await camera.captureFrame(_settings.quality);
+      if (bytes == null || bytes.isEmpty) {
+        await _ack(command, ok: false, error: 'the camera returned no picture');
+        return;
+      }
+
+      _gateway.sendPhoto(
+        PhotoMeta(
+          cameraEnum: command.cameraEnum,
+          requestId: command.requestId,
+          // The camera plugin only ever emits JPEG.
+          contentType: 'image/jpeg',
+          ts: DateTime.now(),
+        ),
+        bytes,
+      );
+      await _ack(command, ok: true);
+    } finally {
+      // Never leave the state machine stuck in `capturingPhoto`.
+      if (_captureState == CaptureState.capturingPhoto) {
+        _captureState = _activeStreamId == null
+            ? CaptureState.idle
+            : CaptureState.recording;
+      }
+    }
+  }
+
+  Future<void> _switchCamera(SwitchCameraCommand command) async {
+    final camera = _camera;
+    if (camera == null) {
+      await _ack(command, ok: false, error: 'no camera is open');
+      return;
+    }
+    if (_captureState == CaptureState.recording) {
+      // Rebuilding the pipeline under a live stream would drop frames the
+      // server is still counting on.
+      await _ack(
+        command,
+        ok: false,
+        error: 'cannot switch camera while stream $_activeStreamId is active',
+      );
+      return;
+    }
+
+    try {
+      await camera.switchCamera(command.cameraEnum);
+      _cameraEnum = command.cameraEnum;
+      await _ack(command, ok: true);
+    } catch (error) {
+      await _ack(command, ok: false, error: '$error');
+    }
+  }
+
+  Future<void> _ack(
+    DeviceCommand command, {
+    required bool ok,
+    String? error,
+  }) async {
+    final id = command.id;
+    // `ping` is the only command without an id, and it is answered with a
+    // `pong`, not an `ack`.
+    if (id == null) return;
+    _gateway.send(AckMessage(id: id, ok: ok, error: error));
+  }
+
+  // --- media ----------------------------------------------------------------
+
+  void _onCapturedFrame(CapturedFrame frame) {
+    final streamId = _activeStreamId;
+    if (streamId == null || _captureState != CaptureState.recording) return;
+
+    _gateway.sendRecordingFrame(
+      RecordingFrameMeta(
+        cameraEnum: _recordingCameraEnum ?? _cameraEnum,
+        streamId: streamId,
+        seq: frame.seq,
+        ts: frame.ts,
+      ),
+      frame.bytes,
+    );
+    _framesSent++;
+  }
+
+  Future<void> _stopRecording() async {
+    final pump = _pump;
+    _pump = null;
+    await _frameSub?.cancel();
+    _frameSub = null;
+    _activeStreamId = null;
+    _recordingCameraEnum = null;
+    _captureState = CaptureState.idle;
+
+    try {
+      await pump?.stop();
+    } catch (_) {
+      // Stopping an already-dead pump is not an error worth surfacing.
+    }
+  }
+
+  // --- link -----------------------------------------------------------------
+
+  void _onLinkState(LinkState state) {
+    final wasLive = _linkState == LinkState.live;
+    _linkState = state;
+
+    if (state != LinkState.live && wasLive) {
+      // The server marks an interrupted stream `failed` and never resumes it
+      // under the old id, so there is nothing to keep pushing into.
+      unawaited(_stopRecording());
+    }
+    _emitStatus();
+  }
+
+  void _onGatewayError(String message) {
+    _lastError = message;
+    _emitStatus();
   }
 
   // --- camera ---------------------------------------------------------------
 
   Future<void> _openCamera() async {
-    final result = await _cameraProvider.open(_captureConfig);
+    final result = await _cameraProvider.open(_config);
     _camera = result.service;
     _backendId = result.backendId;
     _failure = result.failure;
@@ -219,9 +468,8 @@ class AgentCoordinator {
     final camera = _camera;
     if (camera == null) return;
 
-    _cameraIndex = camera.cameraIndex;
-    await _healthSub?.cancel();
-    _healthSub = camera.health.listen(_onCameraHealth);
+    _cameraEnum = camera.cameraIndex;
+    _bindHealth();
     try {
       await camera.setPreviewEnabled(_settings.previewEnabled);
     } catch (_) {
@@ -229,370 +477,20 @@ class AgentCoordinator {
     }
   }
 
-  /// Re-runs camera discovery. Wired to the retry button on the error screen.
-  Future<void> retryCamera() async {
-    await _openCamera();
-    if (_camera != null) {
-      await _applyCurrentMode();
-    }
-    _emitStatus();
+  void _bindHealth() {
+    final camera = _camera;
+    if (camera == null) return;
+    unawaited(_healthSub?.cancel());
+    _healthSub = camera.health.listen(_onCameraHealth);
   }
 
   void _onCameraHealth(CameraHealth health) {
     if (health == CameraHealth.lost) {
       _failure = const CameraFailure.deviceBusy();
+      // A camera that disappeared takes its stream with it.
+      unawaited(_stopRecording());
     }
     _emitStatus();
-  }
-
-  // --- capture loop ---------------------------------------------------------
-
-  /// One still-frame tick.
-  ///
-  /// Public so tests can drive it directly. The in-flight lock is claimed
-  /// **before** the first `await`, so a tick that arrives while the previous
-  /// upload is still running is dropped rather than queued.
-  Future<void> performCaptureTick() async {
-    if (!_streaming || _isUploading) return;
-
-    final camera = _camera;
-    if (camera == null || !camera.isInitialized) return;
-
-    _isUploading = true;
-    try {
-      final frame = await camera.captureFrame(_captureConfig.quality);
-      if (frame == null) return;
-
-      final resolution = camera.appliedResolution;
-      _gateway.sendFrameMeta(
-        FrameMeta(
-          frameId: ++_frameId,
-          deviceId: _deviceId ?? '',
-          timestampMs: DateTime.now().millisecondsSinceEpoch,
-          width: resolution.width,
-          height: resolution.height,
-          quality: _captureConfig.quality,
-        ),
-      );
-      _gateway.sendFrameBytes(frame);
-      _framesInWindow++;
-    } catch (_) {
-      // A dropped frame is expected; never rethrow into the loop.
-    } finally {
-      // Must release on every path, including the early return above.
-      _isUploading = false;
-    }
-  }
-
-  void _startStillLoop() {
-    _captureTimer?.cancel();
-    if (!_streaming) return;
-    final fps = _targetFps > 0 ? _targetFps : AppConfig.defaultFps;
-    final intervalMs = (1000 / fps).round().clamp(1, 60000);
-    _captureTimer = Timer.periodic(
-      Duration(milliseconds: intervalMs),
-      (_) => performCaptureTick(),
-    );
-  }
-
-  void _stopStillLoop() {
-    _captureTimer?.cancel();
-    _captureTimer = null;
-  }
-
-  Future<void> _applyCurrentMode() async {
-    if (_settings.mode == StreamMode.video && _recorder != null) {
-      final started = await _startVideoMode();
-      if (started) return;
-    }
-    _startStillLoop();
-  }
-
-  Future<bool> _startVideoMode() async {
-    final recorder = _recorder;
-    if (recorder == null) return false;
-
-    _stopStillLoop();
-    try {
-      await recorder.start(
-        codec: _settings.codec,
-        chunkSeconds: _settings.chunkSeconds,
-        config: _captureConfig,
-      );
-    } catch (_) {
-      return false;
-    }
-
-    _isRecording = true;
-    _codecMismatchReported = false;
-    await _chunkSub?.cancel();
-    _chunkSub = recorder.chunks.listen(_onVideoChunk);
-    return true;
-  }
-
-  Future<void> _stopVideoMode() async {
-    await _chunkSub?.cancel();
-    _chunkSub = null;
-    if (!_isRecording) return;
-    _isRecording = false;
-    try {
-      await _recorder?.stop();
-    } catch (_) {
-      // Stopping a dead recorder is not an error worth surfacing.
-    }
-  }
-
-  void _onVideoChunk(VideoChunk chunk) {
-    if (!_streaming) return;
-
-    _gateway.sendVideoMeta(
-      VideoMeta(
-        chunkId: ++_chunkId,
-        deviceId: _deviceId ?? '',
-        timestampMs: DateTime.now().millisecondsSinceEpoch,
-        codec: chunk.codec,
-        sequence: chunk.sequence,
-        durationMs: chunk.durationMs,
-        width: chunk.width,
-        height: chunk.height,
-      ),
-    );
-    _gateway.sendVideoBytes(chunk.bytes);
-    _chunksInWindow++;
-
-    // Report the degradation once per mode change, not once per chunk.
-    final requested = chunk.requestedCodec;
-    if (chunk.isCodecMismatch && requested != null && !_codecMismatchReported) {
-      _codecMismatchReported = true;
-      _gateway.sendSignal(
-        CapabilityMismatchSignal(
-          requested: requested.wireName,
-          applied: chunk.codec.wireName,
-          reason: 'the camera plugin can only encode AVC',
-        ),
-      );
-    }
-  }
-
-  void _startFpsWindow() {
-    _fpsTimer?.cancel();
-    _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      // In still mode this is frames per second; in video mode it is chunks
-      // per second, which is the only upload event there is.
-      final measured = _settings.mode == StreamMode.video
-          ? _chunksInWindow.toDouble()
-          : _framesInWindow.toDouble();
-      _framesInWindow = 0;
-      _chunksInWindow = 0;
-      _measuredFps = measured;
-      if (!_fpsUpdates.isClosed) {
-        _fpsUpdates.add(measured);
-      }
-      _emitStatus();
-    });
-  }
-
-  // --- command routing ------------------------------------------------------
-
-  /// Preview toggle entry point for the UI.
-  Future<void> setPreviewEnabled(bool enabled) =>
-      _handleSetPreview(SetPreviewCommand(enabled: enabled));
-
-  Future<void> handleCommand(ServerCommand command) async {
-    switch (command) {
-      case UpdateConfigCommand():
-        await _handleUpdateConfig(command);
-      case SetStreamModeCommand():
-        await _handleSetStreamMode(command);
-      case ControlStreamCommand():
-        await _handleControlStream(command);
-      case SwitchCameraCommand():
-        await _handleSwitchCamera(command);
-      case SetPreviewCommand():
-        await _handleSetPreview(command);
-      case FaceResultCommand():
-        if (!_faceResults.isClosed) {
-          _faceResults.add(command.result);
-        }
-    }
-    _emitStatus();
-  }
-
-  Future<void> _handleUpdateConfig(UpdateConfigCommand command) async {
-    _captureConfig = _captureConfig.copyWith(
-      width: command.width,
-      height: command.height,
-      quality: command.quality,
-    );
-    final fps = command.fps;
-    if (fps != null && fps > 0) {
-      _targetFps = fps;
-    }
-
-    final camera = _camera;
-    if (camera != null) {
-      try {
-        await camera.reconfigure(_captureConfig);
-      } catch (_) {
-        _reportMismatch(
-          '${command.width ?? '-'}x${command.height ?? '-'}',
-          _effectiveResolution.label,
-          'the camera rejected the requested format',
-        );
-      }
-    }
-
-    if (_settings.mode == StreamMode.still) {
-      _startStillLoop();
-    }
-  }
-
-  Future<void> _handleSetStreamMode(SetStreamModeCommand command) async {
-    final previous = _settings;
-    _settings = _settings.copyWith(
-      mode: command.mode,
-      codec: command.codec,
-      chunkSeconds: command.chunkSeconds,
-    );
-
-    if (_settings.mode == StreamMode.video) {
-      final started = await _startVideoMode();
-      if (started) return;
-
-      // Never leave the probe without a picture: fall back to still frames and
-      // tell the backend what actually happened.
-      _settings = previous.copyWith(mode: StreamMode.still);
-      _reportMismatch(
-        'video',
-        'still',
-        'video recording is unavailable on this device',
-      );
-      _startStillLoop();
-      return;
-    }
-
-    await _stopVideoMode();
-    _startStillLoop();
-  }
-
-  Future<void> _handleControlStream(ControlStreamCommand command) async {
-    _streaming = command.enabled;
-    if (!_streaming) {
-      _stopStillLoop();
-      await _stopVideoMode();
-      return;
-    }
-    await _applyCurrentMode();
-  }
-
-  Future<void> _handleSwitchCamera(SwitchCameraCommand command) async {
-    final camera = _camera;
-    if (camera == null) return;
-    try {
-      await camera.switchCamera(command.index);
-      _cameraIndex = command.index;
-    } catch (_) {
-      _reportMismatch(
-        'camera ${command.index}',
-        'camera $_cameraIndex',
-        'the camera could not be switched',
-      );
-    }
-  }
-
-  /// Toggles the preview only — the capture loop keeps running either way.
-  Future<void> _handleSetPreview(SetPreviewCommand command) async {
-    _settings = _settings.copyWith(previewEnabled: command.enabled);
-    try {
-      await _camera?.setPreviewEnabled(command.enabled);
-    } catch (_) {
-      // Preview failure must not disturb capture.
-    }
-  }
-
-  void _reportMismatch(String requested, String applied, String reason) {
-    _gateway.sendSignal(
-      CapabilityMismatchSignal(
-        requested: requested,
-        applied: applied,
-        reason: reason,
-      ),
-    );
-  }
-
-  // --- connection -----------------------------------------------------------
-
-  void _onConnectionState(ConnectionState state) {
-    _connectionState = state;
-    _emitStatus();
-  }
-
-  /// Called when the gateway comes back up.
-  ///
-  /// Every mutable setting is re-announced, because the backend has no idea
-  /// what changed while it was away.
-  Future<void> onGatewayConnectionChanged(ConnectionState state) async {
-    if (state != ConnectionState.connected) return;
-
-    final deviceId = _deviceId ??= await _deviceIdService.getOrCreateDeviceId();
-    _gateway.sendSignal(
-      RegisterSignal(deviceId: deviceId, capabilities: _buildCapabilities()),
-    );
-    _gateway.sendSignal(_buildStateSync());
-
-    // We are talking to the backend again, so local autonomy is over.
-    _autonomous = false;
-    _autonomousRetryTimer?.cancel();
-    _autonomousRetryTimer = null;
-    _emitStatus();
-  }
-
-  void _sendRegister() {
-    final deviceId = _deviceId;
-    if (deviceId == null) return;
-    _gateway.sendSignal(
-      RegisterSignal(deviceId: deviceId, capabilities: _buildCapabilities()),
-    );
-  }
-
-  void _enterAutonomousIfSilent() {
-    if (_autonomous) return;
-    _autonomous = true;
-    _autonomousRetryTimer = Timer.periodic(
-      const Duration(seconds: AppConfig.autonomousRetrySeconds),
-      (_) => _sendRegister(),
-    );
-    _emitStatus();
-  }
-
-  ClientCapabilities _buildCapabilities() {
-    final camera = _camera;
-    return ClientCapabilities(
-      platform: Platform.operatingSystem,
-      modes: const [StreamMode.still, StreamMode.video],
-      videoCodecs:
-          _recorder?.supportedCodecs.toList() ?? const [VideoCodec.avc],
-      maxFps: _targetFps,
-      hasPreview: true,
-      supportedResolutions: camera?.supportedResolutions ?? kNominalResolutions,
-      cameras: camera?.cameras.map((c) => c.name).toList() ?? const [],
-    );
-  }
-
-  StateSyncSignal _buildStateSync() {
-    final resolution = _effectiveResolution;
-    return StateSyncSignal(
-      width: resolution.width,
-      height: resolution.height,
-      quality: _captureConfig.quality,
-      fps: _targetFps,
-      cameraIndex: _cameraIndex,
-      streaming: _streaming,
-      mode: _settings.mode,
-      codec: _settings.codec,
-      chunkSeconds: _settings.chunkSeconds,
-      previewEnabled: _settings.previewEnabled,
-    );
   }
 
   void _emitStatus() {

@@ -3,50 +3,111 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:webcam_client/src/backend/backend_gateway.dart';
 import 'package:webcam_client/src/backend/mock_backend_gateway.dart';
-import 'package:webcam_client/src/backend/server_command.dart';
+import 'package:webcam_client/src/backend/protocol/device_command.dart';
+import 'package:webcam_client/src/backend/protocol/device_message.dart';
+
+import '../support/doubles.dart';
 
 void main() {
-  test('emits stream mode, preview and face result commands on cue', () async {
-    final gw = MockBackendGateway(
+  test('drives a full command cycle with server-issued ids', () async {
+    final gateway = MockBackendGateway(
       commandInterval: const Duration(milliseconds: 1),
     );
-    await gw.connect('ws://mock');
-    await expectLater(
-      gw.commands,
-      emitsThrough(predicate<ServerCommand>((c) => c is SetStreamModeCommand)),
-    );
-    await expectLater(
-      gw.commands,
-      emitsThrough(predicate<ServerCommand>((c) => c is SetPreviewCommand)),
-    );
-    await expectLater(
-      gw.commands,
-      emitsThrough(predicate<ServerCommand>((c) => c is FaceResultCommand)),
-    );
-    expect(gw.isConnected, isTrue);
-    await gw.disconnect();
+    await gateway.start(testCredentials);
+
+    final seen = <DeviceCommand>[];
+    await for (final command in gateway.commands.take(4)) {
+      seen.add(command);
+    }
+
+    final start = seen.whereType<StartRecordingCommand>().single;
+    final photo = seen.whereType<TakePhotoCommand>().single;
+
+    // The server mints 26-character ULIDs; the mock must too, otherwise
+    // "does the client echo them back verbatim?" proves nothing.
+    expect(start.streamId.length, 26);
+    expect(start.id!.length, 26);
+    expect(photo.requestId.length, 26);
+    expect(seen.whereType<StopRecordingCommand>(), isNotEmpty);
+    expect(seen.whereType<PingCommand>(), isNotEmpty);
   });
 
-  test('counts frames and video chunks it would have sent', () async {
-    final gw = MockBackendGateway();
-    await gw.connect('ws://mock');
-    gw.sendFrameBytes(Uint8List.fromList([1]));
-    gw.sendVideoBytes(Uint8List.fromList([2]));
-    gw.sendVideoBytes(Uint8List.fromList([3]));
-    expect(gw.frameCount, 1);
-    expect(gw.videoChunkCount, 2);
-    await gw.disconnect();
+  test('stop_recording names the stream that was started', () async {
+    final gateway = MockBackendGateway(
+      commandInterval: const Duration(milliseconds: 1),
+    );
+    await gateway.start(testCredentials);
+
+    final seen = <DeviceCommand>[];
+    await for (final command in gateway.commands.take(3)) {
+      seen.add(command);
+    }
+
+    expect(
+      seen.whereType<StopRecordingCommand>().single.streamId,
+      seen.whereType<StartRecordingCommand>().single.streamId,
+    );
   });
 
-  test('reports connected and offline transitions', () async {
-    final gw = MockBackendGateway();
-    final seen = <ConnectionState>[];
-    final sub = gw.connectionChanges.listen(seen.add);
-    await gw.connect('ws://mock');
-    await gw.disconnect();
+  test('records what the device would have uploaded', () async {
+    final gateway = MockBackendGateway();
+    await gateway.start(testCredentials);
+
+    gateway.sendRecordingFrame(
+      RecordingFrameMeta(
+        cameraEnum: 0,
+        streamId: 's',
+        seq: 1,
+        ts: DateTime.utc(2026),
+      ),
+      Uint8List.fromList([1]),
+    );
+    gateway.sendPhoto(
+      PhotoMeta(cameraEnum: 0, requestId: 'r', ts: DateTime.utc(2026)),
+      Uint8List.fromList([2]),
+    );
+    gateway.send(AckMessage(id: 'x', ok: true));
+
+    expect(gateway.recordedFrames, 1);
+    expect(gateway.recordedPhotos, 1);
+    expect(gateway.sentMessages, hasLength(1));
+    await gateway.stop();
+  });
+
+  test('the link is live while started and idle after stop', () async {
+    final gateway = MockBackendGateway();
+    expect(gateway.state, LinkState.idle);
+
+    await gateway.start(testCredentials);
+    expect(gateway.state, LinkState.live);
+
+    await gateway.stop();
+    expect(gateway.state, LinkState.idle);
+  });
+
+  test('reports its link transitions', () async {
+    final gateway = MockBackendGateway();
+    final seen = <LinkState>[];
+    final subscription = gateway.states.listen(seen.add);
+
+    await gateway.start(testCredentials);
+    await gateway.stop();
     await Future<void>.delayed(Duration.zero);
-    expect(seen, contains(ConnectionState.connected));
-    expect(seen, contains(ConnectionState.offline));
-    await sub.cancel();
+
+    expect(seen, contains(LinkState.live));
+    expect(seen, contains(LinkState.idle));
+    await subscription.cancel();
+  });
+
+  test('generateUlid produces a 26-character Crockford string', () {
+    final ulid = generateUlid();
+    expect(ulid.length, 26);
+    expect(RegExp(r'^[0-9A-HJKMNP-TV-Z]{26}$').hasMatch(ulid), isTrue);
+  });
+
+  test('generateUlid sorts by time', () {
+    final earlier = generateUlid(DateTime.utc(2026, 1, 1));
+    final later = generateUlid(DateTime.utc(2027, 1, 1));
+    expect(earlier.compareTo(later), lessThan(0));
   });
 }

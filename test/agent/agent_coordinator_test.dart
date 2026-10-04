@@ -4,315 +4,433 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:webcam_client/src/agent/agent_coordinator.dart';
+import 'package:webcam_client/src/agent/agent_status.dart';
 import 'package:webcam_client/src/backend/backend_gateway.dart';
-import 'package:webcam_client/src/backend/client_signal.dart';
-import 'package:webcam_client/src/backend/server_command.dart';
-import 'package:webcam_client/src/backend/unrecognized_command_log.dart';
+import 'package:webcam_client/src/backend/protocol/device_command.dart';
+import 'package:webcam_client/src/backend/protocol/device_message.dart';
 import 'package:webcam_client/src/capture/camera_backend.dart';
-import 'package:webcam_client/src/capture/camera_plugin_backend.dart';
 import 'package:webcam_client/src/capture/camera_provider.dart';
 import 'package:webcam_client/src/capture/camera_resolution.dart';
 import 'package:webcam_client/src/capture/camera_service.dart';
-import 'package:webcam_client/src/capture/stream_settings.dart';
-import 'package:webcam_client/src/capture/video_chunk_recorder.dart';
-import 'package:webcam_client/src/identity/device_id_service.dart';
+import 'package:webcam_client/src/capture/frame_pump.dart';
 
-class MockCameraService extends Mock implements CameraService {}
+import '../support/doubles.dart';
 
-class MockBackendGateway extends Mock implements BackendGateway {}
+/// A backend that always probes and opens successfully.
+class _StubBackend implements CameraBackend {
+  _StubBackend(this.service);
 
-class MockVideoChunkRecorder extends Mock implements VideoChunkRecorder {}
-
-class _FakeDeviceIdService extends DeviceIdService {
-  @override
-  Future<String> getOrCreateDeviceId() async => 'test-device';
-}
-
-class _FixedBackend implements CameraBackend {
-  _FixedBackend(this._service);
-
-  final CameraService _service;
+  final CameraService service;
 
   @override
-  String get id => 'test_backend';
+  String get id => 'stub';
 
   @override
-  Future<BackendProbe> probe() async =>
-      const BackendProbe(available: true, maxFps: 30, supportsPreview: true);
-
-  @override
-  Future<CameraService> open(CaptureConfig config) async => _service;
-}
-
-AgentCoordinator _build(
-  CameraService camera,
-  BackendGateway gateway, {
-  VideoChunkRecorder? recorder,
-  Duration? registerTimeout,
-}) {
-  when(() => camera.isInitialized).thenReturn(true);
-  when(() => camera.appliedResolution)
-      .thenReturn(const CameraResolution(width: 1280, height: 720));
-  when(() => camera.descriptor)
-      .thenReturn(const CameraDescriptor(name: 'Test Camera', index: 0));
-  when(() => camera.cameras).thenReturn(const []);
-  when(() => camera.cameraIndex).thenReturn(0);
-  when(() => camera.supportedResolutions).thenReturn(kNominalResolutions);
-  when(() => camera.previewEnabled).thenReturn(true);
-  when(() => camera.health)
-      .thenAnswer((_) => const Stream<CameraHealth>.empty());
-  when(() => camera.initialize()).thenAnswer((_) async {});
-  when(() => camera.release()).thenAnswer((_) async {});
-  when(() => camera.setPreviewEnabled(any())).thenAnswer((_) async {});
-  when(() => camera.reconfigure(any())).thenAnswer((_) async {});
-  when(() => camera.switchCamera(any())).thenAnswer((_) async {});
-  when(() => camera.captureFrame(any()))
-      .thenAnswer((_) async => Uint8List.fromList([1, 2, 3]));
-
-  when(() => gateway.commands)
-      .thenAnswer((_) => const Stream<ServerCommand>.empty());
-  when(() => gateway.connectionChanges)
-      .thenAnswer((_) => const Stream<ConnectionState>.empty());
-  when(() => gateway.unrecognizedCommands)
-      .thenReturn(UnrecognizedCommandLog(sink: null));
-  when(() => gateway.connect(any())).thenAnswer((_) async {});
-  when(() => gateway.disconnect()).thenAnswer((_) async {});
-
-  if (recorder != null) {
-    when(() => recorder.supportedCodecs).thenReturn({VideoCodec.avc});
-    when(() => recorder.chunks)
-        .thenAnswer((_) => const Stream<VideoChunk>.empty());
-    when(
-      () => recorder.start(
-        codec: any(named: 'codec'),
-        chunkSeconds: any(named: 'chunkSeconds'),
-        config: any(named: 'config'),
-      ),
-    ).thenAnswer((_) async {});
-    when(() => recorder.stop()).thenAnswer((_) async {});
-  }
-
-  return AgentCoordinator(
-    cameraProvider: CameraProvider(backends: [_FixedBackend(camera)]),
-    gateway: gateway,
-    deviceIdService: _FakeDeviceIdService(),
-    recorder: recorder,
-    registerTimeout: registerTimeout ?? const Duration(seconds: 5),
+  Future<BackendProbe> probe() async => const BackendProbe(
+    available: true,
+    devices: [],
+    supportedResolutions: [],
+    maxFps: 30,
+    supportsPreview: true,
   );
+
+  @override
+  Future<CameraService> open(CaptureConfig config) async => service;
 }
 
 void main() {
-  setUpAll(() {
-    // mocktail resolves fallbacks by `is`-check, so one concrete signal covers
-    // the whole ClientSignal parameter type.
-    registerFallbackValue(const HeartbeatSignal(deviceId: 'fallback'));
-    registerFallbackValue(Uint8List(0));
-    registerFallbackValue(
-      const FrameMeta(
-        frameId: 0,
-        deviceId: '',
-        timestampMs: 0,
-        width: 0,
-        height: 0,
-        quality: 0,
+  setUpAll(registerCommonFallbacks);
+
+  late MockGateway gateway;
+  late MockCameraService camera;
+  late MockFramePump pump;
+
+  setUp(() {
+    gateway = MockGateway();
+    camera = MockCameraService();
+    pump = MockFramePump();
+
+    when(() => gateway.commands).thenAnswer((_) => const Stream.empty());
+    when(() => gateway.states).thenAnswer((_) => const Stream.empty());
+    when(() => gateway.errors).thenAnswer((_) => const Stream.empty());
+    when(() => gateway.state).thenReturn(LinkState.live);
+    when(() => gateway.start(any())).thenAnswer((_) async {});
+    when(() => gateway.stop()).thenAnswer((_) async {});
+
+    when(() => camera.isInitialized).thenReturn(true);
+    when(() => camera.cameraIndex).thenReturn(0);
+    when(
+      () => camera.descriptor,
+    ).thenReturn(const CameraDescriptor(name: 'Integrated Camera', index: 0));
+    when(() => camera.health).thenAnswer((_) => const Stream.empty());
+    when(() => camera.switchCamera(any())).thenAnswer((_) async {});
+    when(() => camera.setPreviewEnabled(any())).thenAnswer((_) async {});
+    when(() => camera.release()).thenAnswer((_) async {});
+
+    when(() => pump.frames).thenAnswer((_) => const Stream.empty());
+    when(
+      () => pump.start(
+        cameraEnum: any(named: 'cameraEnum'),
+        streamId: any(named: 'streamId'),
+        fps: any(named: 'fps'),
+        quality: any(named: 'quality'),
       ),
-    );
-    registerFallbackValue(
-      const VideoMeta(
-        chunkId: 0,
-        deviceId: '',
-        timestampMs: 0,
-        codec: VideoCodec.avc,
-        sequence: 0,
-        durationMs: 0,
-        width: 0,
-        height: 0,
-      ),
-    );
-    registerFallbackValue(CaptureConfig.defaults());
-    registerFallbackValue(VideoCodec.avc);
+    ).thenAnswer((_) async {});
+    when(() => pump.stop()).thenAnswer((_) async {});
   });
 
-  test('drops the second frame while the first upload is in flight', () async {
-    final camera = MockCameraService();
-    final gw = MockBackendGateway();
-    final co = _build(camera, gw);
-    when(() => camera.captureFrame(any())).thenAnswer((_) async {
-      await Future<void>.delayed(const Duration(milliseconds: 200));
-      return Uint8List.fromList([1, 2, 3]);
-    });
-
-    final f1 = co.performCaptureTick();
-    final f2 = co.performCaptureTick();
-    await Future.wait([f1, f2]);
-
-    verify(() => camera.captureFrame(any())).called(1);
-    verify(() => gw.sendFrameBytes(any())).called(1);
-  });
-
-  test(
-    'releases the in-flight lock in finally even when capture throws',
-    () async {
-      final camera = MockCameraService();
-      final co = _build(camera, MockBackendGateway());
-      when(() => camera.captureFrame(any()))
-          .thenThrow(StateError('camera died'));
-
-      await expectLater(co.performCaptureTick(), returnsNormally);
-      await co.performCaptureTick();
-
-      verify(() => camera.captureFrame(any())).called(2);
-    },
+  /// A coordinator holding an already-open camera, the way bootstrap builds it.
+  AgentCoordinator build({CameraService? service}) => AgentCoordinator(
+    gateway: gateway,
+    cameraProvider: CameraProvider(backends: [_StubBackend(service ?? camera)]),
+    pumpFactory: () => pump,
+    credentials: testCredentials,
+    initialCamera: service ?? camera,
+    initialBackendId: 'stub',
   );
 
-  test('sends frame_meta before every binary frame', () async {
-    final camera = MockCameraService();
-    final gw = MockBackendGateway();
-    final co = _build(camera, gw);
-    when(() => camera.captureFrame(any()))
-        .thenAnswer((_) async => Uint8List.fromList([1]));
+  group('command routing', () {
+    test(
+      'acks start_recording and pumps frames tagged with the stream id',
+      () async {
+        when(() => pump.frames).thenAnswer(
+          (_) => Stream.fromIterable([
+            CapturedFrame(
+              seq: 0,
+              ts: DateTime.utc(2026),
+              bytes: Uint8List.fromList([1]),
+            ),
+            CapturedFrame(
+              seq: 1,
+              ts: DateTime.utc(2026),
+              bytes: Uint8List.fromList([2]),
+            ),
+          ]),
+        );
 
-    await co.performCaptureTick();
-
-    verifyInOrder([
-      () => gw.sendFrameMeta(any()),
-      () => gw.sendFrameBytes(any()),
-    ]);
-  });
-
-  test(
-    'video mode uploads chunks with video_meta and reports codec mismatch',
-    () async {
-      final gw = MockBackendGateway();
-      final recorder = MockVideoChunkRecorder();
-      final co = _build(MockCameraService(), gw, recorder: recorder);
-      when(() => recorder.chunks).thenAnswer(
-        (_) => Stream<VideoChunk>.fromIterable([
-          VideoChunk(
-            bytes: Uint8List.fromList([1]),
-            codec: VideoCodec.avc,
-            requestedCodec: VideoCodec.hevc,
-            sequence: 0,
-            durationMs: 3000,
-            width: 1280,
-            height: 720,
+        final coordinator = build();
+        await coordinator.handleCommand(
+          const StartRecordingCommand(
+            id: '01J8ZKQ3B5N7P9R1T3V5X7Z9B1',
+            cameraEnum: 0,
+            streamId: '01J8ZKQ3B5N7P9R1T3V5X7Z9B2',
           ),
-        ]),
-      );
+        );
 
-      co.handleCommand(
-        const SetStreamModeCommand(
-          mode: StreamMode.video,
-          codec: VideoCodec.hevc,
+        final ack =
+            verify(() => gateway.send(captureAny())).captured.single
+                as AckMessage;
+        expect(ack.id, '01J8ZKQ3B5N7P9R1T3V5X7Z9B1');
+        expect(ack.ok, isTrue);
+
+        verify(
+          () => pump.start(
+            cameraEnum: 0,
+            streamId: '01J8ZKQ3B5N7P9R1T3V5X7Z9B2',
+            fps: any(named: 'fps'),
+            quality: any(named: 'quality'),
+          ),
+        ).called(1);
+
+        expect(coordinator.captureState, CaptureState.recording);
+        expect(coordinator.activeStreamId, '01J8ZKQ3B5N7P9R1T3V5X7Z9B2');
+
+        final frames = verify(
+          () => gateway.sendRecordingFrame(captureAny(), captureAny()),
+        ).captured;
+        final meta = frames.first as RecordingFrameMeta;
+        expect(meta.streamId, '01J8ZKQ3B5N7P9R1T3V5X7Z9B2');
+        expect(meta.cameraEnum, 0);
+        expect(frames, hasLength(4)); // two frames, each as meta + bytes
+      },
+    );
+
+    test(
+      'stop_recording halts the pump and stops pushing immediately',
+      () async {
+        final coordinator = build();
+        await coordinator.handleCommand(
+          const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: 's'),
+        );
+        await coordinator.handleCommand(
+          const StopRecordingCommand(id: 'b', cameraEnum: 0, streamId: 's'),
+        );
+
+        verify(() => pump.stop()).called(1);
+        expect(coordinator.captureState, CaptureState.idle);
+        expect(coordinator.activeStreamId, isNull);
+
+        // Both commands were acked; nothing was silently dropped.
+        final acks = verify(() => gateway.send(captureAny())).captured
+            .cast<AckMessage>();
+        expect(acks.map((a) => a.id), ['a', 'b']);
+        expect(acks.every((a) => a.ok), isTrue);
+      },
+    );
+
+    test(
+      'a second start_recording is refused rather than double-pumped',
+      () async {
+        final coordinator = build();
+        await coordinator.handleCommand(
+          const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: 's1'),
+        );
+        await coordinator.handleCommand(
+          const StartRecordingCommand(id: 'b', cameraEnum: 0, streamId: 's2'),
+        );
+
+        final acks = verify(() => gateway.send(captureAny())).captured
+            .cast<AckMessage>();
+        expect(acks.last.id, 'b');
+        expect(acks.last.ok, isFalse);
+        expect(acks.last.error, isNotNull);
+        expect(coordinator.activeStreamId, 's1');
+        verify(
+          () => pump.start(
+            cameraEnum: any(named: 'cameraEnum'),
+            streamId: any(named: 'streamId'),
+            fps: any(named: 'fps'),
+            quality: any(named: 'quality'),
+          ),
+        ).called(1);
+      },
+    );
+
+    test('take_photo uploads one photo carrying the request id', () async {
+      when(() => camera.captureFrame(any()))
+          .thenAnswer((_) async => Uint8List.fromList([0xFF, 0xD8]));
+
+      final coordinator = build();
+      await coordinator.handleCommand(
+        const TakePhotoCommand(
+          id: 'c',
+          cameraEnum: 0,
+          requestId: '01J8ZKQ3B5N7P9R1T3V5X7Z9B3',
         ),
       );
-      await pumpEventQueue();
 
-      verify(() => gw.sendVideoMeta(any())).called(greaterThan(0));
-      verify(() => gw.sendVideoBytes(any())).called(greaterThan(0));
-      verify(() => gw.sendSignal(any(that: isA<CapabilityMismatchSignal>())))
-          .called(1);
-    },
-  );
+      final meta =
+          verify(() => gateway.sendPhoto(captureAny(), captureAny()))
+                  .captured
+                  .first
+              as PhotoMeta;
+      expect(meta.requestId, '01J8ZKQ3B5N7P9R1T3V5X7Z9B3');
+      expect(meta.contentType, 'image/jpeg');
+      expect(meta.cameraEnum, 0);
 
-  test(
-    'preview command toggles the camera service, not the capture loop',
-    () async {
-      final camera = MockCameraService();
-      final co = _build(camera, MockBackendGateway());
+      final ack =
+          verify(() => gateway.send(captureAny())).captured.single
+              as AckMessage;
+      expect(ack.ok, isTrue);
+      expect(coordinator.captureState, CaptureState.idle);
+    });
 
-      co.handleCommand(const SetPreviewCommand(enabled: false));
-      await pumpEventQueue();
+    test('a command the device cannot run is acked with ok false, never '
+        'dropped', () async {
+      when(() => camera.isInitialized).thenReturn(false);
 
-      verify(() => camera.setPreviewEnabled(false)).called(1);
-      expect(co.settings.previewEnabled, isFalse);
-      expect(co.isStreaming, isTrue);
-    },
-  );
-
-  test('routes each command type to the right collaborator', () async {
-    final camera = MockCameraService();
-    final co = _build(camera, MockBackendGateway());
-
-    co.handleCommand(
-      const UpdateConfigCommand(width: 640, height: 480, fps: 4),
-    );
-    co.handleCommand(const ControlStreamCommand(enabled: false));
-    co.handleCommand(const SwitchCameraCommand(index: 1));
-    await pumpEventQueue();
-
-    verify(() => camera.reconfigure(any())).called(1);
-    expect(co.isStreaming, isFalse);
-    verify(() => camera.switchCamera(1)).called(1);
-  });
-
-  test('face results are forwarded to the UI stream', () async {
-    final co = _build(MockCameraService(), MockBackendGateway());
-
-    final expectation = expectLater(
-      co.onFaceResult,
-      emits(predicate<FaceResult>((r) => r.name == '张三')),
-    );
-    co.handleCommand(
-      FaceResultCommand(
-        result: const FaceResult(name: '张三', status: 'approved'),
-      ),
-    );
-    await expectation;
-  });
-
-  test('re-syncs every mutable setting after a reconnect', () async {
-    final gw = MockBackendGateway();
-    final camera = MockCameraService();
-    final co = _build(camera, gw);
-
-    await co.onGatewayConnectionChanged(ConnectionState.connected);
-    await pumpEventQueue();
-
-    verify(() => gw.sendSignal(any(that: isA<RegisterSignal>())))
-        .called(greaterThan(0));
-    final sync =
-        verify(() => gw.sendSignal(captureAny(that: isA<StateSyncSignal>())))
-                .captured
-                .single
-            as StateSyncSignal;
-    expect(sync.mode, StreamMode.video);
-    expect(sync.codec, VideoCodec.avc);
-    expect(sync.previewEnabled, isTrue);
-    expect(sync.width, 1280);
-    expect(sync.height, 720);
-  });
-
-  test(
-    'goes autonomous when no command arrives within the register timeout',
-    () async {
-      final co = _build(
-        MockCameraService(),
-        MockBackendGateway(),
-        registerTimeout: const Duration(milliseconds: 10),
+      final coordinator = build();
+      await coordinator.handleCommand(
+        const TakePhotoCommand(id: 'd', cameraEnum: 0, requestId: 'r'),
       );
 
-      await co.start();
-      await Future<void>.delayed(const Duration(milliseconds: 40));
+      final ack =
+          verify(() => gateway.send(captureAny())).captured.single
+              as AckMessage;
+      expect(ack.id, 'd');
+      expect(ack.ok, isFalse);
+      expect(ack.error, isNotNull);
+    });
 
-      expect(co.isAutonomous, isTrue);
-      expect(co.isStreaming, isTrue);
+    test('switch_camera reconfigures the active camera and acks', () async {
+      final coordinator = build();
+      await coordinator.handleCommand(
+        const SwitchCameraCommand(id: 'e', cameraEnum: 1),
+      );
 
-      await co.stop();
-    },
-  );
+      verify(() => camera.switchCamera(1)).called(1);
+      expect(coordinator.cameraEnum, 1);
 
-  test('pause releases the camera and drops the connection', () async {
-    final camera = MockCameraService();
-    final gw = MockBackendGateway();
-    final co = _build(camera, gw);
+      final ack =
+          verify(() => gateway.send(captureAny())).captured.single
+              as AckMessage;
+      expect(ack.ok, isTrue);
+    });
 
-    await co.start();
-    await co.pause();
+    test('switch_camera is refused while a stream is live', () async {
+      final coordinator = build();
+      await coordinator.handleCommand(
+        const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: 's'),
+      );
+      await coordinator.handleCommand(
+        const SwitchCameraCommand(id: 'e', cameraEnum: 1),
+      );
 
-    verify(() => camera.release()).called(greaterThan(0));
-    verify(() => gw.disconnect()).called(greaterThan(0));
+      verifyNever(() => camera.switchCamera(any()));
+      final acks = verify(() => gateway.send(captureAny())).captured
+          .cast<AckMessage>();
+      expect(acks.last.id, 'e');
+      expect(acks.last.ok, isFalse);
+    });
 
-    await co.stop();
+    test(
+      'a camera failure during switch is acked rather than thrown',
+      () async {
+        when(() => camera.switchCamera(any()))
+            .thenThrow(StateError('camera 1 is busy'));
+
+        final coordinator = build();
+        await coordinator.handleCommand(
+          const SwitchCameraCommand(id: 'e', cameraEnum: 1),
+        );
+
+        final ack =
+            verify(() => gateway.send(captureAny())).captured.single
+                as AckMessage;
+        expect(ack.ok, isFalse);
+        expect(ack.error, contains('busy'));
+      },
+    );
+
+    test('ping is not acked — the gateway already answered it', () async {
+      final coordinator = build();
+      await coordinator.handleCommand(const PingCommand(ts: 't'));
+      verifyNever(() => gateway.send(any()));
+    });
+  });
+
+  group('link behaviour', () {
+    test('start() opens the camera and the link but pushes nothing', () async {
+      final coordinator = build();
+      await coordinator.start();
+
+      verify(() => gateway.start(testCredentials)).called(1);
+      expect(coordinator.captureState, CaptureState.idle);
+      expect(coordinator.activeStreamId, isNull);
+      verifyNever(() => gateway.sendRecordingFrame(any(), any()));
+    });
+
+    test('missing credentials fail the link instead of crashing', () async {
+      final coordinator = AgentCoordinator(
+        gateway: gateway,
+        cameraProvider: CameraProvider(backends: [_StubBackend(camera)]),
+        pumpFactory: () => pump,
+        initialCamera: camera,
+      );
+
+      await coordinator.start();
+
+      expect(coordinator.linkState, LinkState.failed);
+      expect(coordinator.status.lastError, isNotNull);
+      verifyNever(() => gateway.start(any()));
+    });
+
+    test('losing the link aborts the recording', () async {
+      final states = StreamController<LinkState>();
+      when(() => gateway.states).thenAnswer((_) => states.stream);
+
+      final coordinator = build();
+      await coordinator.start();
+      await coordinator.handleCommand(
+        const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: 's'),
+      );
+      expect(coordinator.captureState, CaptureState.recording);
+
+      // The server marks an interrupted stream failed and never resumes it, so
+      // there is nothing left to push into.
+      states.add(LinkState.backoff);
+      await pumpEventQueue();
+
+      expect(coordinator.captureState, CaptureState.idle);
+      expect(coordinator.activeStreamId, isNull);
+      verify(() => pump.stop()).called(1);
+
+      unawaited(states.close());
+    });
+
+    test('a gateway error surfaces in the status', () async {
+      final errors = StreamController<String>();
+      when(() => gateway.errors).thenAnswer((_) => errors.stream);
+
+      final coordinator = build();
+      await coordinator.start();
+
+      errors.add('单帧超过 16 MiB');
+      await pumpEventQueue();
+
+      expect(coordinator.status.lastError, contains('16 MiB'));
+      unawaited(errors.close());
+    });
+
+    test('pause stops media, releases the camera and drops the link', () async {
+      final coordinator = build();
+      await coordinator.start();
+      await coordinator.handleCommand(
+        const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: 's'),
+      );
+      await coordinator.pause();
+
+      verify(() => pump.stop()).called(1);
+      verify(() => camera.release()).called(1);
+      verify(() => gateway.stop()).called(1);
+      expect(coordinator.captureState, CaptureState.idle);
+      expect(coordinator.activeStreamId, isNull);
+    });
+  });
+
+  group('status', () {
+    test('carries the announced rate and the live stream', () async {
+      final coordinator = build();
+      await coordinator.handleCommand(
+        const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: 's'),
+      );
+
+      final status = coordinator.status;
+      expect(status.captureState, CaptureState.recording);
+      expect(status.activeStreamId, 's');
+      expect(status.cameraName, 'Integrated Camera');
+      expect(status.fps, coordinator.announcedFps);
+      expect(status.fps, greaterThan(0));
+    });
+
+    test(
+      'the preview toggle is local and never touches the capture state',
+      () async {
+        final coordinator = build();
+        await coordinator.setPreviewEnabled(false);
+
+        verify(() => camera.setPreviewEnabled(false)).called(1);
+        expect(coordinator.settings.previewEnabled, isFalse);
+        // Turning the preview off must not stop the device answering commands.
+        expect(coordinator.captureState, CaptureState.idle);
+      },
+    );
+
+    test('reportStatus is what the gateway sends as an idle status', () async {
+      final coordinator = build();
+      await coordinator.handleCommand(
+        const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: 's'),
+      );
+
+      final report = coordinator.reportStatus();
+      expect(report['recording'], isTrue);
+      expect(report['stream_id'], 's');
+      expect(report['active_camera'], 0);
+    });
+
+    test('status updates are emitted to listeners', () async {
+      final coordinator = build();
+      final seen = <AgentStatus>[];
+      final subscription = coordinator.onStatus.listen(seen.add);
+
+      await coordinator.handleCommand(
+        const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: 's'),
+      );
+      await pumpEventQueue();
+
+      expect(seen, isNotEmpty);
+      expect(seen.last.captureState, CaptureState.recording);
+      await subscription.cancel();
+    });
   });
 }

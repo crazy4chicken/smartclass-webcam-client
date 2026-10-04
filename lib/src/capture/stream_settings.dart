@@ -1,80 +1,97 @@
 import '../config/app_config.dart';
 
-/// How the client feeds the backend: discrete still frames or timed video
-/// chunks. Decided by the backend via `cmd_set_stream_mode`, never assumed.
-enum StreamMode {
-  still,
-  video;
-
-  static StreamMode? tryParse(String? raw) {
-    switch (raw) {
-      case 'still':
-        return StreamMode.still;
-      case 'video':
-        return StreamMode.video;
-      default:
-        return null;
-    }
-  }
-
-  String get wireName => name;
-}
-
-/// Video container codec.
+/// The codecs this client can produce, named exactly as the wire expects.
 ///
-/// v1 can only *encode* [avc] because every camera plugin implementation
-/// hardcodes H.264. [hevc] exists so the capability bit and the degradation
-/// path are already in place; requesting it yields `capability_mismatch`.
-enum VideoCodec {
-  avc,
-  hevc;
+/// The vocabulary is a closed set shared with the server: `h264`, `h265`,
+/// `mjpeg`, `mpeg4`, `vp8`, `vp9`, `av1`, all exact lowercase. There is no
+/// alias handling anywhere — `hevc` is H.265's other name but is **rejected**
+/// by the server, so [wireName] must never produce it.
+///
+/// This is deliberately a separate enum from the backend layer's `WireCodec`:
+/// the capture layer must not depend on the wire protocol, and the two are
+/// only kept honest by asserting that their names match.
+enum CaptureCodec {
+  h265,
+  h264,
+  mjpeg,
+  mpeg4,
+  vp8,
+  vp9,
+  av1;
 
-  static VideoCodec? tryParse(String? raw) {
-    switch (raw) {
-      case 'avc':
-        return VideoCodec.avc;
-      case 'hevc':
-        return VideoCodec.hevc;
-      default:
-        return null;
-    }
-  }
-
+  /// The exact string that must appear on the wire.
   String get wireName => name;
+
+  /// Selection order, best first.
+  ///
+  /// `mjpeg` is the guaranteed floor rather than a compromise: `takePicture()`
+  /// already produces JPEG, so one `recording.frame` per picture is exactly
+  /// what the server's `mjpeg` definition asks for. The two video codecs above
+  /// it need an encoder this client does not ship yet.
+  static const List<CaptureCodec> preference = <CaptureCodec>[
+    CaptureCodec.h265,
+    CaptureCodec.h264,
+    CaptureCodec.mjpeg,
+  ];
+
+  /// True for codecs whose output is one self-contained picture per frame.
+  bool get isIntraOnly => this == CaptureCodec.mjpeg;
+
+  static CaptureCodec? tryParse(Object? raw) {
+    if (raw is! String) return null;
+    for (final codec in CaptureCodec.values) {
+      if (codec.wireName == raw) return codec;
+    }
+    return null;
+  }
 }
 
-/// The full mutable capture configuration agreed with the backend.
+/// The capture configuration agreed with the server.
+///
+/// There is no stream *mode* any more: the server has exactly one media shape
+/// (one encoded frame per `recording.frame`), and the choice between stills
+/// and video is expressed by the codec, not by a separate mode flag.
 class StreamSettings {
   const StreamSettings({
-    required this.mode,
     required this.codec,
-    required this.chunkSeconds,
+    required this.fps,
+    required this.quality,
     required this.previewEnabled,
   });
 
-  final StreamMode mode;
-  final VideoCodec codec;
-  final int chunkSeconds;
+  /// What the client will actually encode.
+  final CaptureCodec codec;
+
+  /// Declared frame rate. Must be a positive **integer**: the server rejects a
+  /// JSON fraction like `29.97` outright, and snapshots this value into the
+  /// stream's `metadata.fps` to estimate segment durations.
+  final int fps;
+
+  /// JPEG quality (1-100). Advisory only — the camera plugin encodes the JPEG
+  /// itself and exposes no quality knob.
+  final int quality;
+
+  /// Preview is a purely local concern; the server has no command for it.
   final bool previewEnabled;
 
-  /// Defaults are chosen for maximum cross-platform support: AVC is the only
-  /// codec all three camera plugin implementations can produce.
+  /// Defaults assume the floor: `mjpeg` is available on every platform, so the
+  /// pipeline works before any codec probe has run.
   factory StreamSettings.defaults() => const StreamSettings(
-    mode: StreamMode.video,
-    codec: VideoCodec.avc,
-    chunkSeconds: AppConfig.defaultChunkSeconds,
+    codec: CaptureCodec.mjpeg,
+    fps: AppConfig.defaultFps,
+    quality: AppConfig.defaultQuality,
     previewEnabled: AppConfig.defaultPreviewEnabled,
   );
 
   StreamSettings copyWith({
-    StreamMode? mode,
-    VideoCodec? codec,
-    int? chunkSeconds,
+    CaptureCodec? codec,
+    int? fps,
+    int? quality,
     bool? previewEnabled,
   }) => StreamSettings(
-    mode: mode ?? this.mode,
     codec: codec ?? this.codec,
-    chunkSeconds: chunkSeconds ?? this.chunkSeconds,
+    fps: fps ?? this.fps,
+    quality: quality ?? this.quality,
     previewEnabled: previewEnabled ?? this.previewEnabled,
   );
 
@@ -82,16 +99,16 @@ class StreamSettings {
   bool operator ==(Object other) =>
       identical(this, other) ||
       other is StreamSettings &&
-          other.mode == mode &&
           other.codec == codec &&
-          other.chunkSeconds == chunkSeconds &&
+          other.fps == fps &&
+          other.quality == quality &&
           other.previewEnabled == previewEnabled;
 
   @override
-  int get hashCode => Object.hash(mode, codec, chunkSeconds, previewEnabled);
+  int get hashCode => Object.hash(codec, fps, quality, previewEnabled);
 
   @override
   String toString() =>
-      'StreamSettings(${mode.name}/${codec.name}, ${chunkSeconds}s, '
+      'StreamSettings(${codec.wireName}, ${fps}fps, q$quality, '
       'preview=$previewEnabled)';
 }

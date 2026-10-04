@@ -68,35 +68,49 @@ flutter run -d <device-id>
 
 首次会下 Gradle 9.3.1 + AGP 9.1.0，比较慢。
 
-## 5. 后端地址（关键，不然连不上）
+## 5. 后端地址与设备凭据（关键，不然连不上）
 
-默认 `WS_URL` 是 `ws://127.0.0.1:8080/ws`。**在手机上 `127.0.0.1` 指的是手机自己**，
+`BASE_URL` 默认是 `http://127.0.0.1:8080`，**在手机上 `127.0.0.1` 指的是手机自己**，
 所以要么做端口反向映射，要么指定电脑的局域网 IP。
 
-**推荐：adb reverse（不用改 URL）**
+注意客户端**不是自主推流的**：它注册成功、挂载 WebSocket 之后什么都不推，
+要等运营侧 `POST /api/devices/{id}/recording/start` 下发 `start_recording` 才开始。
+所以注册必须成功，否则后端根本不知道该设备在线。
+
+**推荐：adb reverse（不用改地址）**
 
 ```powershell
 adb reverse tcp:8080 tcp:8080
 ```
 
-这样手机的 `localhost:8080` 会转发到电脑的 `8080`，默认 URL 直接可用。
+这样手机的 `localhost:8080` 会转发到电脑的 `8080`，默认 `BASE_URL` 直接可用。
 （注意：`adb reverse` 在拔插线/重启 adb 后要重做。）
 
 **或者：同一 Wi-Fi 下用局域网 IP**
 
 ```powershell
-flutter run -d <device-id> --dart-define=WS_URL=ws://192.168.x.x:8080/ws
+flutter run -d <device-id> `
+  --dart-define=BASE_URL=http://192.168.x.x:8080 `
+  --dart-define=DEVICE_ID=01J8ZK9WQ7X3YV0M4N5P6Q7R8S `
+  --dart-define=DEVICE_TOKEN=wdt_...
 ```
 
-后端还没起也没关系：没有后端时客户端进入**本地自治模式**，用本地默认参数继续采集，
-所以第 4 步就能验证编译、摄像头、预览、HUD 是否正常。
+`DEVICE_ID` / `DEVICE_TOKEN` 由管理面 `POST /api/devices` 下发（**不是客户端生成的**）。
+首次启动后它们会写进 `shared_preferences`，之后不用再传。
+
+**只想验证编译 / 摄像头 / 预览**：加 `--dart-define=USE_MOCK_BACKEND=true`，
+用内置假后端跑，不需要服务端也不需要凭据。这种模式下客户端会走完整的命令周期
+（`start_recording` → `take_photo` → `stop_recording` → `ping`）。
+
+没有后端 / 凭据缺失时客户端**不会崩**：摄像头照常打开并预览，状态条显示
+「链路失败」+ 具体原因。
 
 ## 6. 明文流量已放行
 
 `android/app/src/main/AndroidManifest.xml` 的 `<application>` 上有
 `android:usesCleartextTraffic="true"`。**这个是必需的**：targetSdk 36 默认禁明文，
-而网关是 `ws://`，不加的话连接会被系统直接拒掉、且现象很隐蔽。
-将来如果上 TLS，把这个属性和 `AppConfig.wsUrl` 的 `ws://` 默认值一起去掉。
+而注册与网关都是 `http://` / `ws://`，不加的话连接会被系统直接拒掉、且现象很隐蔽。
+将来如果上 TLS，把这个属性和 `AppConfig.baseUrl` 的 `http://` 默认值一起去掉。
 
 ## 7. 权限与运行时行为
 
@@ -124,27 +138,25 @@ flutter build apk --release --split-per-abi
 | `SDK location not found` / `Failed to find target with hash string 'android-36'` | SDK 没装好，或 `local.properties` 还指向旧路径 → 回到第 1、2 步 |
 | `NDK not configured` / 提示缺 NDK | `sdkmanager "ndk;28.2.13676358"`（版本来自 Flutter 的 `ndkVersion`） |
 | `flutter devices` 看不到手机 | 换数据线/换 USB 口（要数据线不是充电线）；`adb kill-server && adb devices`；手机上重新确认授权弹窗 |
-| 界面出来但一直"离线"、状态条灰点 | 正常 —— 后端协议还没对接，见下 |
 | `flutter doctor` 报 license not accepted | `sdkmanager --licenses` 手动同意 |
+| 状态条显示「链路失败」+「未配置设备凭据」 | 没传 `DEVICE_ID` / `DEVICE_TOKEN`，或存储里的旧值不是 ULID 已被忽略 |
+| 状态条显示「链路失败」+ 401 | 令牌被轮换或设备被删除。**重试没用**，需要运营侧重发凭据 |
+| 状态条一直「重连中」 | 服务端没起、地址不对、或 `adb reverse` 掉了（拔插线后会失效） |
+| 状态条「已连接 / 空闲」，后端却收不到东西 | 正常：设备是从属的，要等运营侧 `POST .../recording/start` |
+| 后端日志有 segment 但下游解不开 | v1 用 `mjpeg`，一个 `recording.frame` 就是一张 JPEG；按 4 字节长度前缀切分即可 |
 
-## 10. 重要：当前客户端连不上真后端
+## 10. 真后端联调步骤
 
-后端仓库已在 `smartclass-webcam-server/`（Go，v0.2.0），协议文档在
-`smartclass-webcam-server/docs/protocol/`。它和当前客户端实现**对不上**：
+服务端默认监听 `:8080`。协议权威文档在 `smartclass-webcam-server/docs/protocol/`。
 
-| 当前客户端 | 真后端 |
-| --- | --- |
-| 自己生成 UUIDv4 当 deviceId | device_id 是后端 `POST /api/devices` 发的 **26 位 ULID** |
-| 直连 `ws://host:port/ws` | 先 `GET /ws/register`（HTTP，`Authorization: Bearer wdt_...`）拿**一次性 ticket**，再连 `ws://host:port/ws/device/{ticket}` |
-| `register` / `heartbeat` | `ping` / `pong`，设备侧还要回 `ack` / `status` / `error` |
-| `cmd_update_config` / `cmd_set_stream_mode` / `cmd_set_preview` … | `switch_camera` / `start_recording` / `stop_recording` / `take_photo`（**没有**改分辨率、改 fps、开关预览、切 still/video 的命令） |
-| `frame_meta` + JPEG | `recording.frame` / `photo.photo`，二进制带 payload header |
-| codec 名 `avc` / `hevc` | 闭集 `h264` / `h265` / `mjpeg` / `mpeg4` / `vp8` / `vp9` / `av1`（**不接受 `hevc` 这个别名**） |
+1. 起服务端（见 `smartclass-webcam-server/docs/guide/getting-started`）。
+2. 管理面 `POST /api/devices` 建设备，拿到 `device_id` 与 `wdt_` token。
+3. `flutter run -d <device-id> --dart-define=BASE_URL=… --dart-define=DEVICE_ID=… --dart-define=DEVICE_TOKEN=…`
+4. 状态条应显示「已连接 / 空闲」。
+5. 运营侧 `POST /api/devices/{id}/recording/start` → 状态条变「采集中」并显示 `stream_id`；
+   约 5 秒后服务端出现第一个 segment。
+6. `POST /api/devices/{id}/photo` → 照片列表出现一条，`request_id` 与命令一致。
+7. `POST /api/devices/{id}/recording/stop` → 客户端立刻停推，stream 变 `completed`。
+8. 断网再恢复 → 状态条进「重连中」，恢复后**重新注册**（register 调用次数 +1）。
 
-服务端默认监听 `:8080`。ticket 一次性，重复 attach 会以
-`1008 "ticket already attached"` 关闭且该 ticket 作废；没有 session resume。
-
-所以现在跑起来能验证**编译 / 摄像头 / 预览 / UI**，但不会注册成功，
-后端下发的东西都会进 `UnrecognizedCommandLog`（控制台可见）。
-按方案的设计，接真协议只需要重写 `CommandCodec` 与 `BackendGateway` 的连接流程
-（因为多了 HTTP 预注册拿 ticket 这一步），上层协调器与 UI 不用动。
+`1008`（ticket 已被挂载）会自动重新注册；`1006` 是被新连接替换时的正常关闭，不是故障。

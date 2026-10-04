@@ -3,16 +3,20 @@ import 'package:flutter/material.dart';
 
 import '../../agent/agent_coordinator.dart';
 import '../../agent/agent_status.dart';
-import '../../backend/server_command.dart';
 import '../../capture/camera_backend.dart';
 import '../../capture/camera_service.dart';
 import '../widgets/camera_error_view.dart';
 import '../widgets/preview_toggle_button.dart';
-import '../widgets/recognition_hud.dart';
 import '../widgets/status_bar_overlay.dart';
 
 /// The kiosk screen: preview filling the screen, status strip on top, preview
-/// switch at the bottom, recognition bubble near the middle.
+/// switch at the bottom.
+///
+/// Recognition results are deliberately **not** shown here. The smartclass
+/// device protocol has no server-to-device result message (`face`/`recogni` do
+/// not exist anywhere in the backend), so there is nothing to render; the
+/// separate recognition service reads recordings through the management plane
+/// instead.
 ///
 /// When no camera is usable the whole screen becomes [CameraErrorView] — never
 /// a white screen and never a crash.
@@ -37,45 +41,34 @@ class AgentScreen extends StatelessWidget {
           );
         }
 
-        return StreamBuilder<FaceResult>(
-          stream: coordinator.onFaceResult,
-          builder: (context, faceSnapshot) {
-            final faceResult = faceSnapshot.data;
-            return Stack(
-              fit: StackFit.expand,
-              children: [
-                ColoredBox(
-                  color: Colors.black,
-                  child: _PreviewArea(
-                    service: service,
-                    previewEnabled: status.previewEnabled,
-                  ),
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            ColoredBox(
+              color: Colors.black,
+              child: _PreviewArea(
+                service: service,
+                previewEnabled: status.previewEnabled,
+              ),
+            ),
+            Align(
+              alignment: Alignment.topCenter,
+              child: StatusBarOverlay(status: status),
+            ),
+            // Bottom, not top: the Android system status bar sits in the
+            // top-right corner and swallowed this control's tap target.
+            Align(
+              alignment: Alignment.bottomRight,
+              child: SafeArea(
+                top: false,
+                minimum: const EdgeInsets.all(16),
+                child: PreviewToggleButton(
+                  previewEnabled: status.previewEnabled,
+                  onToggle: coordinator.setPreviewEnabled,
                 ),
-                Align(
-                  alignment: Alignment.topCenter,
-                  child: StatusBarOverlay(status: status),
-                ),
-                // Bottom, not top: the Android system status bar sits in the
-                // top-right corner and swallowed this control's tap target.
-                Align(
-                  alignment: Alignment.bottomRight,
-                  child: SafeArea(
-                    top: false,
-                    minimum: const EdgeInsets.all(16),
-                    child: PreviewToggleButton(
-                      previewEnabled: status.previewEnabled,
-                      onToggle: coordinator.setPreviewEnabled,
-                    ),
-                  ),
-                ),
-                if (faceResult != null)
-                  Align(
-                    alignment: const Alignment(0, 0.55),
-                    child: RecognitionHud(result: faceResult),
-                  ),
-              ],
-            );
-          },
+              ),
+            ),
+          ],
         );
       },
     );

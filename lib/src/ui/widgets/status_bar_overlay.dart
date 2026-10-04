@@ -1,12 +1,17 @@
 import 'package:flutter/material.dart';
 
 import '../../agent/agent_status.dart';
+import '../../backend/backend_gateway.dart';
 
 /// Translucent status strip pinned to the top of the kiosk screen.
 ///
 /// Informational only — the preview switch lives at the bottom of the screen
 /// (see `PreviewToggleButton`), because on Android the system status bar owns
 /// the top-right corner and swallowed the tap target.
+///
+/// What it shows is the **link**, not the camera: the device is a subordinate
+/// of the server, so an operator's first question is always "is it connected,
+/// and is it pushing?" rather than "what resolution is it capturing".
 ///
 /// The background deliberately extends under the system status bar while the
 /// content is pushed below it, so the strip reads as one continuous surface
@@ -15,6 +20,9 @@ class StatusBarOverlay extends StatelessWidget {
   const StatusBarOverlay({super.key, required this.status});
 
   final AgentStatus status;
+
+  /// Key for tests.
+  static const Key streamLineKey = Key('status-stream-line');
 
   @override
   Widget build(BuildContext context) {
@@ -29,7 +37,7 @@ class StatusBarOverlay extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
           child: Row(
             children: [
-              _connectionDot(),
+              _linkDot(),
               const SizedBox(width: 10),
               Expanded(
                 child: Column(
@@ -48,8 +56,7 @@ class StatusBarOverlay extends StatelessWidget {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      '${status.resolutionLabel} · ${status.streamModeLabel} · '
-                      '${status.fps.toStringAsFixed(1)} fps',
+                      _detailLine(),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -57,10 +64,36 @@ class StatusBarOverlay extends StatelessWidget {
                         fontSize: 12,
                       ),
                     ),
+                    if (status.activeStreamId != null) ...[
+                      const SizedBox(height: 1),
+                      Text(
+                        'stream ${status.activeStreamId}',
+                        key: streamLineKey,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white60,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                    if (status.isFailed && status.lastError != null) ...[
+                      const SizedBox(height: 1),
+                      Text(
+                        status.lastError!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Color(0xFFFF8A80),
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
-              if (status.streaming) _captureChip(),
+              const SizedBox(width: 8),
+              _captureChip(),
             ],
           ),
         ),
@@ -68,15 +101,42 @@ class StatusBarOverlay extends StatelessWidget {
     );
   }
 
-  Widget _connectionDot() {
-    final Color color;
-    if (status.isConnected) {
-      color = const Color(0xFF4CAF50);
-    } else if (status.isReconnecting) {
-      color = const Color(0xFFFFB300);
-    } else {
-      color = const Color(0xFF9E9E9E);
-    }
+  /// `已连接` / `重连中` / `未连接` / `链路失败`.
+  ///
+  /// The wording matters: an operator has to be able to tell "retrying, wait"
+  /// apart from "broken, intervene", and a rejected credential can never fix
+  /// itself.
+  String get _linkLabel => switch (status.linkState) {
+    LinkState.live => '已连接',
+    LinkState.registering => '注册中',
+    LinkState.attaching => '连接中',
+    LinkState.backoff => '重连中',
+    LinkState.failed => '链路失败',
+    LinkState.idle => '未连接',
+  };
+
+  String get _captureLabel => switch (status.captureState) {
+    CaptureState.recording => '采集中',
+    CaptureState.capturingPhoto => '拍照中',
+    CaptureState.idle => '空闲',
+  };
+
+  String _detailLine() {
+    final parts = <String>[_linkLabel, '${status.fps} fps'];
+    if (status.framesSent > 0) parts.add('已推 ${status.framesSent} 帧');
+    if (!status.isLive) parts.add(_captureLabel);
+    return parts.join(' · ');
+  }
+
+  Widget _linkDot() {
+    final Color color = switch (status.linkState) {
+      LinkState.live => const Color(0xFF4CAF50),
+      LinkState.backoff ||
+      LinkState.registering ||
+      LinkState.attaching => const Color(0xFFFFB300),
+      LinkState.failed => const Color(0xFFE53935),
+      LinkState.idle => const Color(0xFF9E9E9E),
+    };
     return Container(
       width: 10,
       height: 10,
@@ -84,23 +144,29 @@ class StatusBarOverlay extends StatelessWidget {
     );
   }
 
-  /// Says what is actually happening: preview off does not stop capture, so
-  /// this chip stays visible either way.
+  /// Says what is actually happening: preview off does not stop capture, and
+  /// the device is idle until the server asks for something.
   Widget _captureChip() {
-    final label = status.previewEnabled ? '预览中' : '采集进行中';
+    final bool busy = status.captureState.isBusy;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(
-        color: const Color(0xFFC62828).withValues(alpha: 0.85),
+        color: busy
+            ? const Color(0xFFC62828).withValues(alpha: 0.85)
+            : Colors.white.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.fiber_manual_record, size: 10, color: Colors.white),
+          Icon(
+            busy ? Icons.fiber_manual_record : Icons.pause_circle_outline,
+            size: 10,
+            color: Colors.white,
+          ),
           const SizedBox(width: 6),
           Text(
-            label,
+            _captureLabel,
             style: const TextStyle(
               color: Colors.white,
               fontSize: 12,

@@ -1,53 +1,84 @@
 import 'dart:typed_data';
 
-import 'client_signal.dart';
-import 'server_command.dart';
+import 'device_credentials.dart';
+import 'protocol/device_command.dart';
+import 'protocol/device_message.dart';
 import 'unrecognized_command_log.dart';
 
-/// State of the link to the backend.
-enum ConnectionState {
-  /// Socket is open and heartbeats are flowing.
-  connected,
+/// Where the link to the backend currently is.
+///
+/// The device holds exactly one live session at a time, so the states form a
+/// loop rather than a set: `idle → registering → attaching → live`, and any
+/// close sends it to `backoff` before it re-registers from scratch.
+///
+/// There is **no session resume**: a ticket is single-use and dies with its
+/// connection, so [backoff] always leads back through a fresh registration
+/// rather than a reconnect.
+enum LinkState {
+  /// Never started, or deliberately stopped.
+  idle,
 
-  /// Socket dropped; a backoff retry is scheduled.
-  reconnecting,
+  /// `GET /ws/register` is in flight, minting a ticket.
+  registering,
 
-  /// Deliberately closed (app backgrounded or shutting down).
-  offline,
+  /// Upgrading the WebSocket at `websocket_path` with the ticket.
+  attaching,
+
+  /// Attached: commands flow, media may be pushed.
+  live,
+
+  /// The link dropped and a jittered exponential retry is scheduled.
+  backoff,
+
+  /// Terminal. The credential was rejected (`401`), which retrying cannot fix.
+  failed;
+
+  bool get isConnected => this == LinkState.live;
+
+  bool get isTerminal => this == LinkState.failed;
 }
 
-/// The single seam between this app and the backend.
+/// The single seam between this app and `smartclass-webcam-server`.
 ///
-/// Nothing above this interface knows about WebSockets, JSON, or reconnect
-/// policy. That keeps a not-yet-finalised protocol — and a future `wss://`
-/// with auth — replaceable without touching the coordinator.
-///
-/// Note the interface deliberately does **not** leak `WebSocketChannel`.
+/// Nothing above this interface knows about HTTP registration, tickets,
+/// WebSocket framing or reconnect policy. The interface deliberately does
+/// **not** leak `WebSocketChannel`, `http.Client` or JSON: swapping the
+/// transport must not reach the coordinator.
 abstract interface class BackendGateway {
-  Future<void> connect(String url);
+  /// Registers and attaches. Resolves as soon as the attempt is under way —
+  /// the link keeps retrying in the background.
+  Future<void> start(DeviceCredentials credentials);
 
-  Future<void> disconnect();
+  /// Deliberately closes the link and cancels every retry.
+  Future<void> stop();
 
-  /// Sends a control signal (register, heartbeat, state_sync, ...).
-  void sendSignal(ClientSignal signal);
+  /// Commands from the server, already parsed. `ping` is answered inside the
+  /// gateway and never appears here.
+  Stream<DeviceCommand> get commands;
 
-  /// Sends the `frame_meta` text frame that must precede a JPEG binary frame.
-  void sendFrameMeta(FrameMeta meta);
+  /// Link transitions, for the status bar.
+  Stream<LinkState> get states;
 
-  /// Sends raw JPEG bytes as a binary frame.
-  void sendFrameBytes(Uint8List bytes);
+  /// Human-readable problems that have no other route to an operator: a
+  /// rejected token, a frame above the 16 MiB limit, a malformed registration
+  /// response.
+  ///
+  /// The protocol deliberately tells the device nothing about dropped frames
+  /// or refused commands, so this local surface is the only feedback there is.
+  Stream<String> get errors;
 
-  /// Sends the `video_meta` text frame that must precede an mp4 chunk.
-  void sendVideoMeta(VideoMeta meta);
+  /// Sends one control message (`ack` / `pong` / `status` / `error`).
+  void send(DeviceMessage message);
 
-  /// Sends raw mp4 chunk bytes as a binary frame.
-  void sendVideoBytes(Uint8List bytes);
+  /// Sends one `recording.frame`: a JSON header plus one encoded video frame.
+  void sendRecordingFrame(RecordingFrameMeta meta, Uint8List bytes);
 
-  Stream<ServerCommand> get commands;
+  /// Sends one `photo.photo`: a JSON header plus one image.
+  void sendPhoto(PhotoMeta meta, Uint8List bytes);
 
-  Stream<ConnectionState> get connectionChanges;
+  LinkState get state;
 
-  bool get isConnected;
-
+  /// Local record of inbound messages we could not understand. Never sent
+  /// back to the server.
   UnrecognizedCommandLog get unrecognizedCommands;
 }

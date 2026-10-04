@@ -1,9 +1,13 @@
 # webcam_client
 
-前台 kiosk 式跨平台摄像头边缘探针客户端。启动即用本地默认参数采集，通过 WebSocket 把画面
-推给后端 AI 模型，并接受后端下发的采集模式 / 编码 / 启停 / 切摄 / 预览指令。
+前台 kiosk 式跨平台摄像头边缘探针客户端，接入 **`smartclass-webcam-server`** 的设备协议。
 
-实现依据：`docs/superpowers/plans/2026-10-04-camera-edge-probe.md`（T0–T9）。
+设备是**从属角色**：它不主动推流。运营侧在管理面 `POST /api/devices/{id}/recording/start`
+之后，服务端才下发 `start_recording`，客户端此时才开始推帧；`stop_recording` 一到立刻停。
+
+实现依据：`docs/superpowers/plans/2026-10-04-smartclass-backend-integration.md`（T1–T8）。
+**协议权威文档**是后端仓库的 `smartclass-webcam-server/docs/protocol/`
+（index / registration / transport / control / media），本客户端逐条对齐。
 
 ## 平台
 
@@ -15,61 +19,102 @@ Windows / macOS / Linux / iOS / Android 单代码库覆盖。桌面三端由 `ca
 
 ```bash
 flutter pub get
-flutter run -d windows            # 或 macos / linux / android / ios
 
-# 脱机自测（不连真后端，用内置假后端）
+# 脱机自测：内置假后端，不需要服务端也不需要凭据
 flutter run -d windows --dart-define=USE_MOCK_BACKEND=true
 
-# 指定后端地址
-flutter run -d windows --dart-define=WS_URL=ws://192.168.1.10:8080/ws
+# 接真后端（BASE_URL 是注册与 WebSocket 的共同基址）
+flutter run -d windows \
+  --dart-define=BASE_URL=http://192.168.1.10:8080 \
+  --dart-define=DEVICE_ID=01J8ZK9WQ7X3YV0M4N5P6Q7R8S \
+  --dart-define=DEVICE_TOKEN=wdt_...
 ```
+
+`DEVICE_ID` / `DEVICE_TOKEN` 由管理面 `POST /api/devices` 下发，**不是客户端生成的**
+（`device_id` 是 26 字符 ULID，token 是 `wdt_` + 43 个 base64url 字符）。
+用 `--dart-define` 传只是为了开发方便 —— 那是明文编译进二进制的；首次启动后凭据会写进
+`CredentialStore`（`shared_preferences`），后续启动不再需要这两个参数。
 
 测试：
 
 ```bash
 flutter test
-dart run tool/verify_pure.dart    # 纯 Dart 层的快速自检（不需要 Flutter 引擎）
+dart run tool/verify_pure.dart    # 纯 Dart 层的完整自检（不需要 Flutter 引擎）
 ```
 
 ## 架构
 
-三层隔离，后端协议未定稿，所有交互收敛在一个可整体替换的网关之后。
-
 ```
-UI (agent_screen / status_bar_overlay / recognition_hud / camera_error_view)
-        │  AgentStatus / FaceResult
-AgentCoordinator ── 单并发排他锁采集循环、命令路由、断线重同步、本地自治
+UI (agent_screen / status_bar_overlay / preview_toggle_button / camera_error_view)
+        │  AgentStatus
+AgentCoordinator ── 命令驱动的状态机：每条命令都 ack，没收到 start_recording 就不推任何媒体
         │
-        ├── BackendGateway ── CommandCodec ── JSON ⇄ 领域模型
-        │      WebSocketBackendGateway / MockBackendGateway
-        └── CameraProvider ── CameraBackend ── CameraService ── FrameSource / VideoChunkRecorder
+        ├── BackendGateway ── SmartClassBackendGateway（注册 → 挂载 → 保活 → 退避重注册）
+        │        protocol/envelope ── Message 信封 / WireCodec 闭集 / parseDeviceCommand
+        │        protocol/binary_frame ── uint32 BE + JSON + 裸字节
+        │        registration_client ── GET /ws/register（带 JSON body）
+        │      MockBackendGateway（离线用，下发真实协议词汇）
+        └── CameraProvider ── CameraBackend ── CameraService ── FramePump ── VideoEncoder
                CameraPluginBackend (camera + camera_desktop, 5 平台)
 ```
 
-关键约束（改动前请先读 `docs/superpowers/plans/` 里的方案）：
+### 协议要点（改之前请先读后端 `docs/protocol/`）
 
-- **分辨率一律绝对像素**，`ResolutionPreset` 只是相对档位；实际生效值从 controller 读回并回传。
-- **二进制帧前必须先发 meta 文本帧**（`frame_meta` / `video_meta`）。
-- **采集严禁排队**：单并发锁，前次未结束即丢帧，锁在 `finally` 释放。
-- **心跳类型名是 `heartbeat`**。
-- **未识别 / 畸变 JSON 静默降级 + 本地留痕**（`UnrecognizedCommandLog`），不抛、不断连、不回传。
-- **v1 只编码 AVC**（三个插件实现都硬编码 H.264）；请求 HEVC 会回传 `capability_mismatch`。
-- **关预览 ≠ 停采集**；关预览时状态条仍显示"采集进行中"。
-- `lib/src/backend` 与 `lib/src/capture` 的非插件部分**不依赖 Flutter**，因此可在纯 Dart VM 上
-  直接跑 `tool/verify_pure.dart`。新增代码请保持这个边界。
+- **注册是 `GET /ws/register` 带 JSON body**，`Authorization: Bearer wdt_…`，返回一次性 ticket
+  （64 位小写 hex）、`expires_at`（RFC3339**Nano**，60s TTL）、`websocket_path`。
+- **挂载是 `GET {base}/ws/device/{ticket}`**。ticket 一次性、随连接死亡，**没有 session resume**，
+  所以每次重连都要重新注册。
+- 信封 `{channel,type,id?,payload?}`，`channel ∈ control/recording/photo`。
+  **二进制帧 = `uint32 BE N` + N 字节 UTF-8 JSON + 裸媒体字节**，`N ∈ 1..65536`，整帧 ≤ 16 MiB。
+- server→device 只有 5 种：`switch_camera` / `start_recording` / `stop_recording` / `take_photo` / `ping`。
+- device→server：`ack` / `pong` / `status` / `error`（文本）+ `frame` / `photo`（二进制）。
+- **每条带 `id` 的命令都必须 ack**，失败回 `ok:false` + `error`。服务端不等待、不重试，
+  ack 是运营侧唯一的确认手段 —— 所以**绝不静默丢弃**。
+- **codec 是闭集且精确小写**：`h264` / `h265` / `mjpeg` / `mpeg4` / `vp8` / `vp9` / `av1`。
+  **`hevc` 只是别称，服务端拒收**，线上必须写 `h265`。
+- `camera_enum` 必须等于注册数组下标；`fps` 必须是 **>0 的整数**（`29.97` 直接 400）。
+- **空闲时也要周期性发 `status`**，否则 60s 静默被服务端断开（默认 30s 一次）。
+- **`stop_recording` 之后继续推的帧会被丢弃**，所以收到就立刻停泵。
+- `1008` = ticket 已被别的连接挂载 → 重新注册；`1009` = 单帧超 16 MiB；`1006` 是**正常现象**
+  （被新连接替换时服务端不握手直接关）。
+- **服务端没有人脸识别结果回推**，AI 是另一个走管理面 REST 拉录制分片的服务，
+  所以客户端不展示识别结果（`RecognitionHud` 已删除）。
+
+### 编码选择
+
+偏好链 `h265 → h264 → mjpeg`，由 `CodecProbe` 实测决定，选择逻辑在 `CodecSelector`。
+**v1 实际落在 `mjpeg`**，这不是妥协：服务端对 `mjpeg` 的定义就是"每个 `recording.frame`
+一张 JPEG"，而 `takePicture()` 产出的正好是 JPEG，天然满足"需要时序信息"。
+`h265`/`h264` 需要编码器（计划中的 T9，走 `ffmpeg_kit_flutter_new`），尚未实现。
+
+### 存储格式决定了不能用 mp4
+
+服务端把每个 `recording.frame` 的裸负载按 `[uint32 BE len][frame]…` **拼接**成 `.bin` 片段，
+**无容器、无头信息**，期望的是"一个编码访问单元 / 一帧"。所以原来的
+`CameraPluginVideoChunkRecorder`（产出带 `moov` 的完整 mp4）**已删除** —— 发过去只会得到
+无法解码的垃圾片段。持续推帧走 `FramePump`。
+
+### 代码分层
+
+- `lib/src/backend` 与 `lib/src/capture` 的非插件部分**不依赖 Flutter**，所以能在纯 Dart VM 上
+  直接跑 `tool/verify_pure.dart`（273 项断言，覆盖协议、注册、两个网关、采集管线、协调器）。
+  新增代码请保持这条边界：一旦引入 `package:flutter/*`，该模块就再也无法在本机验证。
+- `unrecognized_command_log.dart` 的默认 sink 是 `print` 而不是 `debugPrint`
+  （`main.dart` 显式传 `debugPrint`），就是为了上面那条边界。
+- 摄像头四层抽象（`CameraProvider → CameraBackend → CameraService → FramePump`）不泄漏插件类型；
+  预览走窄接口 `CameraPreviewProvider.previewController`（`Object?`），UI 层再窄化为 `CameraController`。
 - **不引入 `permission_handler`**（原因见下）。
 
-界面上的两条硬约束（都是 Android 真机上踩出来的）：
+### 界面上的两条硬约束（Android 真机踩出来的）
 
 - **预览开关在底部**（`PreviewToggleButton`），顶部状态条只放信息。Android 的系统状态栏占着
   右上角，放上面会被盖住、点不到。
 - **预览必须保持原始宽高比**：`CameraPreview` 内部用 `AspectRatio`，而
-  `Stack(fit: StackFit.expand)` 会传**紧约束**，`RenderAspectRatio` 遇到紧约束会直接返回
+  `Stack(fit: StackFit.expand)` 会传**紧约束**，`RenderAspectRatio` 遇到紧约束直接返回
   `constraints.smallest` —— 宽高比被无视，画面被拉伸变形。所以 `_PreviewArea` 外面套了一层
   `Center`（`Center` 会把约束放松），画面按 contain 居中、留黑边。
-  手机竖屏下源是 9:16、屏约 9:20，用 contain 只留很窄的上下黑边；如果改成 cover，
-  要横向裁掉约 75% 的画面，人脸会直接被裁没，所以这里必须用 contain。
-
+  手机竖屏下源是 9:16、屏约 9:20，用 contain 只留很窄的上下黑边；改成 cover 要横向裁掉
+  约 75% 的画面，人脸会被裁没，所以这里必须用 contain。
 
 ## 构建环境
 
@@ -98,8 +143,16 @@ are deprecated by Microsoft and will be REMOVED SOON.'
 `cameraFailureFrom()` 映射成带类型的 `CameraFailure`。删掉后 Windows 端只剩 `camera_desktop`
 一个原生插件（纯 Media Foundation C++，不碰 C++/WinRT）。
 
+### Android
+
+`AndroidManifest.xml` 里必须有 `android:usesCleartextTraffic="true"`：targetSdk 36 时
+Android 9+ 默认禁止明文流量，而网关是 `ws://`，不开的话连接会被系统直接拒掉。
+将来上 TLS 时要和 `ws://` 默认值一起撤掉。真机步骤见 `docs/android-setup.md`。
+
 ### 关于本机 Flutter CLI
 
 `C:\Users\Lhui\AppData\Local\flutter` 可正常使用。另注：在**助手工具的 shell** 里 Dart VM 无法
 创建子进程（`ProcessException: All pipe instances are busy`，`process_win.cc:744`），
 所以 `flutter run/test/analyze` 在那个 shell 里会失败；用户自己的终端不受影响，与项目无关。
+助手侧改用两条替代路径验证：`dart run tool/verify_pure.dart`（进程内执行），
+以及用 Python 直接驱动 `frontend_server_aot` 做单次编译（等价于 `flutter test` 的类型检查）。
