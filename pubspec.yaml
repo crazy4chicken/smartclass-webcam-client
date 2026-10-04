@@ -35,8 +35,13 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   camera: ^0.12.1
+  # Desktop implementations for Linux / macOS / Windows. `camera` itself only
+  # ships android / ios / web, and `camera_windows` is deliberately not used.
   camera_desktop: ^2.0.0
-  permission_handler: ^13.0.2
+  # No permission_handler: camera_android_camerax and camera_avfoundation each
+  # request camera access during initialize(), and permission_handler_windows
+  # does not compile against current MSVC (it forces /await and C++/WinRT
+  # 2.0.210806.1, whose <experimental/coroutine> is now a hard error).
   wakelock_plus: ^1.8.1
   web_socket_channel: ^3.0.3
   shared_preferences: ^2.5.5

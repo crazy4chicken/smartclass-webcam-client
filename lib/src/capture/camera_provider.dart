@@ -39,6 +39,10 @@ class CameraProvider {
   Future<CameraOpenResult> open(CaptureConfig config) async {
     final attempts = <BackendProbe>[];
 
+    // The most specific failure seen, so the UI can say "permission denied"
+    // instead of a generic "no backend available".
+    CameraFailure? lastFailure;
+
     for (final backend in _backends) {
       final BackendProbe probe;
       try {
@@ -55,7 +59,10 @@ class CameraProvider {
       }
 
       attempts.add(probe);
-      if (!probe.available) continue;
+      if (!probe.available) {
+        lastFailure ??= _failureForProbe(probe);
+        continue;
+      }
 
       try {
         final service = await backend.open(config);
@@ -64,17 +71,39 @@ class CameraProvider {
           backendId: backend.id,
           attempts: List<BackendProbe>.unmodifiable(attempts),
         );
-      } catch (_) {
-        // This backend lied about being available; try the next one.
+      } catch (error) {
+        // This backend could not deliver; remember why and try the next one.
+        lastFailure = error is CameraFailure
+            ? error
+            : CameraFailure.initFailed(error);
         continue;
       }
     }
 
     return CameraOpenResult(
       attempts: List<BackendProbe>.unmodifiable(attempts),
-      failure: CameraFailure.noBackendAvailable(
-        List<BackendProbe>.unmodifiable(attempts),
-      ),
+      failure:
+          lastFailure ??
+          CameraFailure.noBackendAvailable(
+            List<BackendProbe>.unmodifiable(attempts),
+          ),
     );
+  }
+
+  static CameraFailure _failureForProbe(BackendProbe probe) {
+    switch (probe.reason) {
+      case CameraUnavailableReason.permissionDenied:
+        return const CameraFailure.permissionDenied();
+      case CameraUnavailableReason.noDevice:
+        return const CameraFailure.noDevice();
+      case CameraUnavailableReason.deviceBusy:
+        return const CameraFailure.deviceBusy();
+      case CameraUnavailableReason.missingDependency:
+      case CameraUnavailableReason.initFailed:
+      case null:
+        return CameraFailure.initFailed(
+          probe.detail ?? probe.reason?.name ?? 'unknown',
+        );
+    }
   }
 }

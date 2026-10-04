@@ -57,23 +57,37 @@ AgentCoordinator ── 单并发排他锁采集循环、命令路由、断线�
 - **关预览 ≠ 停采集**；关预览时状态条仍显示"采集进行中"。
 - `lib/src/backend` 与 `lib/src/capture` 的非插件部分**不依赖 Flutter**，因此可在纯 Dart VM 上
   直接跑 `tool/verify_pure.dart`。新增代码请保持这个边界。
+- **不引入 `permission_handler`**（原因见下）。
 
-## 本机环境注意事项
+## 构建环境
 
-这台机器上 Flutter CLI 目前**不可用**，原因与项目无关，是环境缺陷：
+Windows 端需要 Visual Studio（Desktop development with C++ 工作负载）。
+已在 VS 18 / MSVC 14.51 / Windows SDK 10.0.26100 上验证构建通过。
 
-1. **Dart VM 无法创建子进程**。`Process.run / runSync / start` 全部抛
-   `ProcessException: All pipe instances are busy`（`process_win.cc:744` / Win32 231）。
-   `flutter`、`flutter test`、`dart analyze` 都需要 spawn 子进程，因此全部失败。
-   Python 的 `subprocess` 正常，`.NET` 命名管道也正常 —— 只有 Dart 的进程创建受影响。
-2. `C:\Program Files\Flutter\flutter\bin\cache` 当前用户**不可写**（owner 是 Administrators，
-   且未提权），flutter_tools 会报 `Flutter failed to open a file at ...\lockfile`。
-   本次工作用的是复制到 `C:\Users\Lhui\flutter-sdk` 的可写副本。
-3. flutter_tools 启动时会 `whichAll('aapt')`，该 spawn 会崩。绕法：把 `ANDROID_HOME` 指向一个
-   含 `licenses/` 子目录的假 SDK（仓库内 `.tooling/android-sdk/licenses`，已 gitignore）。
+### 为什么没有 permission_handler
 
-在这台机器上可用的替代验证手段：`dart run tool/verify_pure.dart`（进程内运行）、
-`dart format --output=none`（语法）、以及用 Python 直接驱动 analysis server 的 LSP
-（`--protocol=lsp` + `didOpen` + `publishDiagnostics`）。
+`permission_handler_windows` 0.2.2 强制 `/await` 并拉取 C++/WinRT 2.0.210806.1，其头文件包含
+`<experimental/coroutine>`。MSVC 14.51 已把它变成硬错误：
 
-修好 Dart 的进程创建（或换一台机器）后，`flutter test` 即可正常运行。
+```
+error C2338: static assertion failed: 'error STL1011: The /await compiler option,
+<experimental/coroutine>, <experimental/generator>, and <experimental/resumable>
+are deprecated by Microsoft and will be REMOVED SOON.'
+```
+
+理论上可用 `_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS` 压掉，但微软明确说这套 API
+会被移除，而该依赖本身是**冗余**的：
+
+- `camera_android_camerax` 自带 `CameraPermissionsManager`（`ActivityCompat.requestPermissions`），
+  且在自己的 manifest 里声明了 `android.permission.CAMERA`；
+- `camera_avfoundation` 自带 `CameraPermissionManager`（`AVCaptureDevice.requestAccess`）。
+
+两者都在 `initialize()` 时申请权限，插件抛出的 `CameraException` 由
+`cameraFailureFrom()` 映射成带类型的 `CameraFailure`。删掉后 Windows 端只剩 `camera_desktop`
+一个原生插件（纯 Media Foundation C++，不碰 C++/WinRT）。
+
+### 关于本机 Flutter CLI
+
+`C:\Users\Lhui\AppData\Local\flutter` 可正常使用。另注：在**助手工具的 shell** 里 Dart VM 无法
+创建子进程（`ProcessException: All pipe instances are busy`，`process_win.cc:744`），
+所以 `flutter run/test/analyze` 在那个 shell 里会失败；用户自己的终端不受影响，与项目无关。

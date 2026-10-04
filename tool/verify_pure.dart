@@ -494,10 +494,32 @@ Future<void> checkCameraProvider() async {
   final r3 = await allFail.open(CaptureConfig.defaults());
   check('no service when every backend fails', r3.service == null);
   check(
-    'reports NoBackendAvailable',
-    r3.failure is CameraFailureNoBackendAvailable,
+    'an unavailable probe maps onto its typed failure',
+    r3.failure is CameraFailurePermissionDenied,
   );
   eq('attempt list size', r3.attempts.length, 1);
+
+  final empty = await CameraProvider(backends: <CameraBackend>[])
+      .open(CaptureConfig.defaults());
+  check(
+    'no backends at all falls back to NoBackendAvailable',
+    empty.failure is CameraFailureNoBackendAvailable,
+  );
+
+  final deniedOpen = CameraProvider(
+    backends: [
+      _FakeBackend(
+        'denied',
+        probeResult: _okProbe(),
+        openError: const CameraFailure.permissionDenied(),
+      ),
+    ],
+  );
+  final r5 = await deniedOpen.open(CaptureConfig.defaults());
+  check(
+    'a failed open surfaces its typed failure',
+    r5.failure is CameraFailurePermissionDenied,
+  );
 
   final throwingProbe = CameraProvider(
     backends: [

@@ -124,21 +124,50 @@ void main() {
     expect(result.attempts.length, 2);
   });
 
+  test('maps an unavailable probe onto its typed failure', () async {
+    final provider = CameraProvider(
+      backends: [
+        FakeBackend(
+          'a',
+          probeResult: const BackendProbe(
+            available: false,
+            reason: CameraUnavailableReason.permissionDenied,
+            devices: [],
+            supportedResolutions: [],
+            maxFps: 0,
+            supportsPreview: false,
+          ),
+        ),
+      ],
+    );
+
+    final result = await provider.open(CaptureConfig.defaults());
+
+    expect(result.service, isNull);
+    expect(result.failure, isA<CameraFailurePermissionDenied>());
+    expect(result.attempts.length, 1);
+  });
+
   test(
-    'reports NoBackendAvailable with the full attempt list when all fail',
+    'falls back to NoBackendAvailable when nothing reported a reason',
+    () async {
+      final provider = CameraProvider(backends: <CameraBackend>[]);
+
+      final result = await provider.open(CaptureConfig.defaults());
+
+      expect(result.failure, isA<CameraFailureNoBackendAvailable>());
+    },
+  );
+
+  test(
+    'surfaces the typed failure from a backend that failed to open',
     () async {
       final provider = CameraProvider(
         backends: [
           FakeBackend(
-            'a',
-            probeResult: const BackendProbe(
-              available: false,
-              reason: CameraUnavailableReason.permissionDenied,
-              devices: [],
-              supportedResolutions: [],
-              maxFps: 0,
-              supportsPreview: false,
-            ),
+            'denied',
+            probeResult: _okProbe(),
+            openError: const CameraFailure.permissionDenied(),
           ),
         ],
       );
@@ -146,8 +175,7 @@ void main() {
       final result = await provider.open(CaptureConfig.defaults());
 
       expect(result.service, isNull);
-      expect(result.failure, isA<CameraFailureNoBackendAvailable>());
-      expect(result.attempts.length, 1);
+      expect(result.failure, isA<CameraFailurePermissionDenied>());
     },
   );
 

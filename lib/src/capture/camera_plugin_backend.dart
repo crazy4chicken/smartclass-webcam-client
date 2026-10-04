@@ -4,7 +4,6 @@ import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:cross_file/cross_file.dart';
-import 'package:permission_handler/permission_handler.dart';
 
 import 'camera_backend.dart';
 import 'camera_resolution.dart';
@@ -16,9 +15,6 @@ import 'video_chunk_recorder.dart';
 /// Lists the platform's cameras. Injectable so [CameraPluginBackend] can be
 /// exercised without hardware.
 typedef CameraLister = Future<List<CameraDescription>> Function();
-
-/// Asks the OS for camera permission.
-typedef PermissionRequester = Future<bool> Function();
 
 /// Builds the plugin controller. Injectable for the same reason.
 typedef CameraControllerFactory = CameraController Function(
@@ -60,19 +56,40 @@ CameraController _defaultControllerFactory(
   );
 }
 
-Future<bool> _defaultPermissionRequest() async {
-  // Desktop platforms do not gate the camera behind a runtime prompt.
-  if (!(Platform.isAndroid || Platform.isIOS || Platform.isMacOS)) {
-    return true;
+/// Maps a plugin error onto a typed [CameraFailure].
+///
+/// There is no separate permission plugin on purpose: `camera_android_camerax`
+/// ships `CameraPermissionsManager` and `camera_avfoundation` ships
+/// `CameraPermissionManager`, and both request access during `initialize()`.
+/// A denial therefore surfaces here as a `CameraException`, not from a
+/// pre-flight check.
+CameraFailure cameraFailureFrom(Object error) {
+  if (error is CameraFailure) return error;
+
+  if (error is CameraException) {
+    switch (error.code) {
+      case 'CameraAccessDenied':
+      case 'CameraAccessDeniedWithoutPrompt':
+      case 'CameraAccessRestricted':
+      case 'AudioAccessDenied':
+      case 'cameraPermission':
+        return const CameraFailure.permissionDenied();
+    }
+
+    final description = (error.description ?? '').toLowerCase();
+    if (description.contains('permission') ||
+        description.contains('not authorized') ||
+        description.contains('denied')) {
+      return const CameraFailure.permissionDenied();
+    }
+    if (description.contains('in use') ||
+        description.contains('busy') ||
+        description.contains('occupied')) {
+      return const CameraFailure.deviceBusy();
+    }
   }
-  try {
-    final status = await Permission.camera.request();
-    return status.isGranted || status.isLimited;
-  } catch (_) {
-    // permission_handler may not cover this platform; let the camera attempt
-    // decide instead of failing here.
-    return true;
-  }
+
+  return CameraFailure.initFailed(error);
 }
 
 /// The single camera backend for all five platforms.
@@ -84,18 +101,15 @@ Future<bool> _defaultPermissionRequest() async {
 class CameraPluginBackend implements CameraBackend {
   CameraPluginBackend({
     CameraLister? listCameras,
-    PermissionRequester? requestPermission,
     FrameStore frameStore = const IoFrameStore(),
     CameraControllerFactory? controllerFactory,
     CameraPluginVideoChunkRecorder? recorder,
   }) : _listCameras = listCameras ?? availableCameras,
-       _requestPermission = requestPermission ?? _defaultPermissionRequest,
        _frameStore = frameStore,
        _controllerFactory = controllerFactory ?? _defaultControllerFactory,
        _recorder = recorder;
 
   final CameraLister _listCameras;
-  final PermissionRequester _requestPermission;
   final FrameStore _frameStore;
   final CameraControllerFactory _controllerFactory;
   final CameraPluginVideoChunkRecorder? _recorder;
@@ -108,17 +122,13 @@ class CameraPluginBackend implements CameraBackend {
   }
 
   /// Never throws: every failure becomes `available: false` plus a reason.
+  ///
+  /// Enumerating devices needs no permission on any of the five platforms, so
+  /// a denial cannot be detected here — it surfaces from [open] instead, where
+  /// the plugin asks for access.
   @override
   Future<BackendProbe> probe() async {
     try {
-      final granted = await _requestPermission();
-      if (!granted) {
-        return const BackendProbe(
-          available: false,
-          reason: CameraUnavailableReason.permissionDenied,
-        );
-      }
-
       final cameras = await _listCameras();
       if (cameras.isEmpty) {
         return const BackendProbe(
@@ -347,9 +357,13 @@ class _PluginCameraService
       await _openController(config, cameraIndex);
       return;
     } catch (error) {
+      // Preserve a typed failure (permission denied, device busy) instead of
+      // flattening everything into initFailed.
+      final failure = cameraFailureFrom(error);
+
       if (!rollback || !hadWorkingController) {
         _emitHealth(CameraHealth.lost);
-        throw CameraFailure.initFailed(error);
+        throw failure;
       }
 
       // Restore the last configuration that worked, then still report the
@@ -358,10 +372,10 @@ class _PluginCameraService
         await _openController(previousConfig, previousIndex);
       } catch (_) {
         _emitHealth(CameraHealth.lost);
-        throw CameraFailure.initFailed(error);
+        throw failure;
       }
       _appliedResolution = previousResolution;
-      throw CameraFailure.initFailed(error);
+      throw failure;
     }
   }
 
@@ -375,9 +389,20 @@ class _PluginCameraService
 
     final description = _cameras[cameraIndex];
     final controller = _controllerFactory(description, config);
-    await controller.initialize();
-    if (!_previewEnabled) {
-      await controller.pausePreview();
+    try {
+      await controller.initialize();
+      if (!_previewEnabled) {
+        await controller.pausePreview();
+      }
+    } catch (error) {
+      // This is where the plugin asks for camera access, so a denial arrives
+      // here as a CameraException and must be mapped before it reaches the UI.
+      try {
+        await controller.dispose();
+      } catch (_) {
+        // Nothing useful to do with a half-initialised controller.
+      }
+      throw cameraFailureFrom(error);
     }
 
     final source = TakePictureFrameSource(
