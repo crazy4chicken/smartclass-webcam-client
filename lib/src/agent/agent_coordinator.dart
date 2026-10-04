@@ -296,19 +296,31 @@ class AgentCoordinator {
 
     final pump = _pumpFactory();
     _pump = pump;
-    // Subscribe before starting, so the first frames are not missed.
-    _frameSub = pump.frames.listen(_onCapturedFrame);
 
-    await pump.start(
-      cameraEnum: command.cameraEnum,
-      streamId: command.streamId,
-      fps: _settings.fps,
-      quality: _settings.quality,
-    );
-
+    // Claim the stream BEFORE starting the pump. `_onCapturedFrame` drops any
+    // frame that has no stream to belong to, so a pump that emits while
+    // `start()` is still in flight would otherwise lose its first frame — and
+    // the server's first segment would silently lose its head.
     _activeStreamId = command.streamId;
     _recordingCameraEnum = command.cameraEnum;
     _captureState = CaptureState.recording;
+
+    _frameSub = pump.frames.listen(_onCapturedFrame);
+
+    try {
+      await pump.start(
+        cameraEnum: command.cameraEnum,
+        streamId: command.streamId,
+        fps: _settings.fps,
+        quality: _settings.quality,
+      );
+    } catch (_) {
+      // The pump never came up, so the stream must not stay claimed. The ack
+      // for this failure is written by `handleCommand`'s catch.
+      await _stopRecording();
+      rethrow;
+    }
+
     await _ack(command, ok: true);
   }
 
@@ -424,12 +436,18 @@ class AgentCoordinator {
 
   Future<void> _stopRecording() async {
     final pump = _pump;
+    final subscription = _frameSub;
     _pump = null;
-    await _frameSub?.cancel();
     _frameSub = null;
+
+    // Drop the stream identity first, then tear down. `cancel()` and `stop()`
+    // both await, and a frame landing in that window must not be pushed: the
+    // server discards anything that arrives after the stop anyway.
     _activeStreamId = null;
     _recordingCameraEnum = null;
     _captureState = CaptureState.idle;
+
+    await subscription?.cancel();
 
     try {
       await pump?.stop();

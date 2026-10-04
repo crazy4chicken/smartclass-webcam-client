@@ -223,6 +223,16 @@ class _FakeFramePump implements FramePump {
   int? lastFps;
   int? lastQuality;
 
+  /// Frames emitted from inside `start()`, before it completes.
+  ///
+  /// Models a pump that can produce a frame while the coordinator is still
+  /// awaiting startup — the window in which a naive implementation drops the
+  /// first frame of every recording.
+  List<CapturedFrame> framesOnStart = const <CapturedFrame>[];
+
+  /// When set, [start] fails the way a busy sensor does.
+  Object? startError;
+
   @override
   Stream<CapturedFrame> get frames => _controller.stream;
 
@@ -238,6 +248,11 @@ class _FakeFramePump implements FramePump {
     lastStreamId = streamId;
     lastFps = fps;
     lastQuality = quality;
+    final error = startError;
+    if (error != null) throw error;
+    for (final frame in framesOnStart) {
+      _controller.add(frame);
+    }
   }
 
   @override
@@ -1747,6 +1762,60 @@ Future<void> checkCoordinator() async {
     check('  with a reason', h.gateway.acks.last.error != null);
     eq('the pump was started once', h.pump.startCalls, 1);
     eq('the original stream stays active', h.coordinator.activeStreamId, 's1');
+  }
+
+  // a frame produced while start() is still in flight must not be lost
+  {
+    final h = await build(frameBytes: Uint8List.fromList([1]));
+    h.pump.framesOnStart = <CapturedFrame>[
+      CapturedFrame(
+        seq: 0,
+        ts: DateTime.utc(2026),
+        bytes: Uint8List.fromList([0xF0]),
+      ),
+      CapturedFrame(
+        seq: 1,
+        ts: DateTime.utc(2026),
+        bytes: Uint8List.fromList([0xF1]),
+      ),
+    ];
+
+    await h.coordinator.handleCommand(
+      const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: streamId),
+    );
+    await settle();
+
+    // The stream has to be claimed before the pump starts, otherwise the head
+    // of the server's first segment is silently missing.
+    eq('no frame is lost to the startup window', h.gateway.frameMeta.length, 2);
+    eq(
+      'and the sequence survives intact',
+      h.gateway.frameMeta.map((m) => m.seq).join(','),
+      '0,1',
+    );
+    eq(
+      'both frames carry the stream id',
+      h.gateway.frameMeta.every((m) => m.streamId == streamId),
+      true,
+    );
+  }
+
+  // a pump that fails to start must not leave the stream claimed
+  {
+    final h = await build(frameBytes: Uint8List.fromList([1]));
+    h.pump.startError = StateError('sensor busy');
+
+    await h.coordinator.handleCommand(
+      const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: streamId),
+    );
+    await settle();
+
+    eq('the failure is acked, not swallowed', h.gateway.acks.length, 1);
+    eq('  as a failure', h.gateway.acks.single.ok, false);
+    check('  with the cause', h.gateway.acks.single.error!.contains('busy'));
+    eq('the stream is not left claimed', h.coordinator.activeStreamId, null);
+    eq('the state is idle', h.coordinator.captureState, CaptureState.idle);
+    eq('the pump was stopped', h.pump.stopCalls, 1);
   }
 
   // stop_recording
