@@ -3,6 +3,14 @@
 # wordbuddy
 .workbuddy-ai/
 
+# Local tooling shims (a stub Android SDK so the Flutter tool skips its
+# `where aapt` probe on this machine).
+.tooling/
+
+# IDE
+.idea/
+*.iml
+
 # Files and directories created by pub
 .dart_tool/
 .packages
