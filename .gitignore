@@ -38,3 +38,7 @@ doc/api/
 
 .flutter-plugins
 .flutter-plugins-dependencies
+
+# The backend is a separate repository; keep it out of this one.
+# (Use `git submodule add` if it should be tracked here.)
+smartclass-webcam-server/

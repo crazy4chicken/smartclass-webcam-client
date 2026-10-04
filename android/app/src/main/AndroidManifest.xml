@@ -10,7 +10,14 @@
     <application
         android:label="webcam_client"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
+        <!-- usesCleartextTraffic is required, not optional: the backend gateway
+             is a plain ws:// WebSocket and Android 9+ (API 28+) denies cleartext
+             by default. v1 deliberately has no auth and no TLS, so without this
+             the connection is refused before it reaches the backend.
+             If TLS is ever added, remove this and drop the ws:// default in
+             AppConfig. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
