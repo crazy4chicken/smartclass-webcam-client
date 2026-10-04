@@ -58,9 +58,8 @@ sealed class CameraFailure {
   const factory CameraFailure.captureFailed(Object cause) =
       CameraFailureCaptureFailed;
 
-  const factory CameraFailure.noBackendAvailable(
-    List<BackendProbe> attempts,
-  ) = CameraFailureNoBackendAvailable;
+  const factory CameraFailure.noBackendAvailable(List<BackendProbe> attempts) =
+      CameraFailureNoBackendAvailable;
 }
 
 class CameraFailureNoDevice extends CameraFailure {

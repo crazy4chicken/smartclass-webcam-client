@@ -11,8 +11,11 @@ void main() {
   final codec = JsonCommandCodec();
 
   test('decodes cmd_update_config with absolute pixels', () {
-    final u = codec.decode(
-        '{"type":"cmd_update_config","payload":{"width":1920,"height":1080,"quality":90,"fps":5}}')! as UpdateConfigCommand;
+    final u =
+        codec.decode(
+              '{"type":"cmd_update_config","payload":{"width":1920,"height":1080,"quality":90,"fps":5}}',
+            )!
+            as UpdateConfigCommand;
     expect(u.width, 1920);
     expect(u.height, 1080);
     expect(u.quality, 90);
@@ -20,22 +23,29 @@ void main() {
   });
 
   test('decodes cmd_set_stream_mode with an explicit codec', () {
-    final c = codec.decode(
-        '{"type":"cmd_set_stream_mode","payload":{"mode":"video","codec":"hevc","chunkSeconds":2}}')! as SetStreamModeCommand;
+    final c =
+        codec.decode(
+              '{"type":"cmd_set_stream_mode","payload":{"mode":"video","codec":"hevc","chunkSeconds":2}}',
+            )!
+            as SetStreamModeCommand;
     expect(c.mode, StreamMode.video);
     expect(c.codec, VideoCodec.hevc);
     expect(c.chunkSeconds, 2);
   });
 
   test('decodes cmd_set_preview', () {
-    final c = codec
-        .decode('{"type":"cmd_set_preview","payload":{"enabled":false}}')! as SetPreviewCommand;
+    final c =
+        codec.decode('{"type":"cmd_set_preview","payload":{"enabled":false}}')!
+            as SetPreviewCommand;
     expect(c.enabled, isFalse);
   });
 
   test('decodes event_face_result', () {
-    final c = codec.decode(
-        '{"type":"event_face_result","payload":{"name":"张三","status":"approved"}}')! as FaceResultCommand;
+    final c =
+        codec.decode(
+              '{"type":"event_face_result","payload":{"name":"张三","status":"approved"}}',
+            )!
+            as FaceResultCommand;
     expect(c.result.name, '张三');
   });
 
@@ -79,26 +89,33 @@ void main() {
   test('unknown enum values degrade to "not provided" rather than failing', () {
     final log = UnrecognizedCommandLog(sink: null);
     final c = JsonCommandCodec(unrecognizedLog: log);
-    final cmd = c.decode(
-        '{"type":"cmd_set_stream_mode","payload":{"mode":"teleport","codec":"vp9"}}')! as SetStreamModeCommand;
+    final cmd =
+        c.decode(
+              '{"type":"cmd_set_stream_mode","payload":{"mode":"teleport","codec":"vp9"}}',
+            )!
+            as SetStreamModeCommand;
     expect(cmd.mode, isNull);
     expect(cmd.codec, isNull);
     expect(log.entries, isEmpty);
   });
 
   test('encodes state_sync carrying mode, codec and preview', () {
-    final map = jsonDecode(codec.encode(StateSyncSignal(
-      width: 1280,
-      height: 720,
-      quality: 80,
-      fps: 1.0,
-      cameraIndex: 0,
-      streaming: true,
-      mode: StreamMode.video,
-      codec: VideoCodec.avc,
-      chunkSeconds: 3,
-      previewEnabled: false,
-    ))) as Map<String, dynamic>;
+    final map = jsonDecode(
+      codec.encode(
+        StateSyncSignal(
+          width: 1280,
+          height: 720,
+          quality: 80,
+          fps: 1.0,
+          cameraIndex: 0,
+          streaming: true,
+          mode: StreamMode.video,
+          codec: VideoCodec.avc,
+          chunkSeconds: 3,
+          previewEnabled: false,
+        ),
+      ),
+    ) as Map<String, dynamic>;
     expect(map['type'], 'state_sync');
     expect(map['payload']['mode'], 'video');
     expect(map['payload']['codec'], 'avc');
@@ -106,15 +123,24 @@ void main() {
   });
 
   test('encodes capability mismatch so the backend learns what really ran', () {
-    final map = jsonDecode(codec.encode(const CapabilityMismatchSignal(
-        requested: 'hevc', applied: 'avc', reason: 'codec unavailable'))) as Map<String, dynamic>;
+    final map = jsonDecode(
+      codec.encode(
+        const CapabilityMismatchSignal(
+          requested: 'hevc',
+          applied: 'avc',
+          reason: 'codec unavailable',
+        ),
+      ),
+    ) as Map<String, dynamic>;
     expect(map['type'], 'capability_mismatch');
     expect(map['payload']['requested'], 'hevc');
     expect(map['payload']['applied'], 'avc');
   });
 
   test('encodes heartbeat with the agreed type name', () {
-    expect(jsonDecode(codec.encode(const HeartbeatSignal(deviceId: 'd')))['type'],
-        'heartbeat');
+    expect(
+      jsonDecode(codec.encode(const HeartbeatSignal(deviceId: 'd')))['type'],
+      'heartbeat',
+    );
   });
 }

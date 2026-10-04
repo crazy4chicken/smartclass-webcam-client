@@ -20,12 +20,8 @@ CameraResolution selectClosestResolution(
       .toList();
 
   if (fitting.isNotEmpty) {
-    return fitting.reduce(
-      (a, b) => b.pixelCount > a.pixelCount ? b : a,
-    );
+    return fitting.reduce((a, b) => b.pixelCount > a.pixelCount ? b : a);
   }
 
-  return available.reduce(
-    (a, b) => b.pixelCount < a.pixelCount ? b : a,
-  );
+  return available.reduce((a, b) => b.pixelCount < a.pixelCount ? b : a);
 }

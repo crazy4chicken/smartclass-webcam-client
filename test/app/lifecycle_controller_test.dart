@@ -14,27 +14,29 @@ void main() {
     expect(shouldPauseFor(AppLifecycleState.inactive), isFalse);
   });
 
-  test('translates lifecycle transitions into pause and resume exactly once',
-      () async {
-    var pauses = 0;
-    var resumes = 0;
-    final controller = LifecycleController(
-      onPause: () async => pauses++,
-      onResume: () async => resumes++,
-    );
+  test(
+    'translates lifecycle transitions into pause and resume exactly once',
+    () async {
+      var pauses = 0;
+      var resumes = 0;
+      final controller = LifecycleController(
+        onPause: () async => pauses++,
+        onResume: () async => resumes++,
+      );
 
-    controller.didChangeAppLifecycleState(AppLifecycleState.hidden);
-    controller.didChangeAppLifecycleState(AppLifecycleState.hidden);
-    await Future<void>.delayed(Duration.zero);
-    expect(pauses, 1, reason: 'repeated hidden events must not stack up');
+      controller.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      controller.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      await Future<void>.delayed(Duration.zero);
+      expect(pauses, 1, reason: 'repeated hidden events must not stack up');
 
-    // Losing focus on desktop is not a reason to rebuild the camera.
-    controller.didChangeAppLifecycleState(AppLifecycleState.inactive);
-    await Future<void>.delayed(Duration.zero);
-    expect(resumes, 0);
+      // Losing focus on desktop is not a reason to rebuild the camera.
+      controller.didChangeAppLifecycleState(AppLifecycleState.inactive);
+      await Future<void>.delayed(Duration.zero);
+      expect(resumes, 0);
 
-    controller.didChangeAppLifecycleState(AppLifecycleState.resumed);
-    await Future<void>.delayed(Duration.zero);
-    expect(resumes, 1);
-  });
+      controller.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await Future<void>.delayed(Duration.zero);
+      expect(resumes, 1);
+    },
+  );
 }

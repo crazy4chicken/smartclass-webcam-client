@@ -14,7 +14,7 @@ import 'unrecognized_command_log.dart';
 /// and video chunks the client would have uploaded.
 class MockBackendGateway implements BackendGateway {
   MockBackendGateway({Duration? commandInterval})
-      : commandInterval = commandInterval ?? const Duration(seconds: 2);
+    : commandInterval = commandInterval ?? const Duration(seconds: 2);
 
   final Duration commandInterval;
 
@@ -22,8 +22,9 @@ class MockBackendGateway implements BackendGateway {
       StreamController<ServerCommand>.broadcast();
   final StreamController<ConnectionState> _connectionChanges =
       StreamController<ConnectionState>.broadcast();
-  final UnrecognizedCommandLog _unrecognized =
-      UnrecognizedCommandLog(sink: null);
+  final UnrecognizedCommandLog _unrecognized = UnrecognizedCommandLog(
+    sink: null,
+  );
 
   Timer? _timer;
   int _tick = 0;
@@ -73,17 +74,21 @@ class MockBackendGateway implements BackendGateway {
     final step = _tick++ % 3;
     switch (step) {
       case 0:
-        _commands.add(const SetStreamModeCommand(
-          mode: StreamMode.video,
-          codec: VideoCodec.avc,
-          chunkSeconds: 3,
-        ));
+        _commands.add(
+          const SetStreamModeCommand(
+            mode: StreamMode.video,
+            codec: VideoCodec.avc,
+            chunkSeconds: 3,
+          ),
+        );
       case 1:
         _commands.add(const SetPreviewCommand(enabled: true));
       case 2:
-        _commands.add(const FaceResultCommand(
-          result: FaceResult(name: '演示用户', status: 'approved'),
-        ));
+        _commands.add(
+          const FaceResultCommand(
+            result: FaceResult(name: '演示用户', status: 'approved'),
+          ),
+        );
     }
   }
 

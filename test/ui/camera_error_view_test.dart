@@ -7,14 +7,16 @@ void main() {
   testWidgets('shows typed guidance and forwards retry taps', (tester) async {
     var tapped = 0;
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: CameraErrorView(
-          failure: const CameraFailure.permissionDenied(),
-          onRetry: () => tapped++,
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: CameraErrorView(
+            failure: const CameraFailure.permissionDenied(),
+            onRetry: () => tapped++,
+          ),
         ),
       ),
-    ));
+    );
 
     expect(find.textContaining('权限'), findsOneWidget);
 
@@ -27,11 +29,13 @@ void main() {
       CameraFailure.noDevice(),
       CameraFailure.deviceBusy(),
     ]) {
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: CameraErrorView(failure: failure, onRetry: () {}),
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: CameraErrorView(failure: failure, onRetry: () {}),
+          ),
         ),
-      ));
+      );
       expect(find.textContaining('摄像头'), findsWidgets);
     }
   });

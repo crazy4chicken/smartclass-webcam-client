@@ -69,16 +69,16 @@ class ClientCapabilities {
   final List<String> cameras;
 
   Map<String, Object?> toJson() => {
-        'platform': platform,
-        'modes': modes.map((m) => m.wireName).toList(),
-        'videoCodecs': videoCodecs.map((c) => c.wireName).toList(),
-        'maxFps': maxFps,
-        'hasPreview': hasPreview,
-        'supportedResolutions': supportedResolutions
-            .map((r) => {'width': r.width, 'height': r.height})
-            .toList(),
-        'cameras': cameras,
-      };
+    'platform': platform,
+    'modes': modes.map((m) => m.wireName).toList(),
+    'videoCodecs': videoCodecs.map((c) => c.wireName).toList(),
+    'maxFps': maxFps,
+    'hasPreview': hasPreview,
+    'supportedResolutions': supportedResolutions
+        .map((r) => {'width': r.width, 'height': r.height})
+        .toList(),
+    'cameras': cameras,
+  };
 }
 
 /// Every outbound message, as a domain object.

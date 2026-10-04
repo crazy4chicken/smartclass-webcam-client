@@ -2,18 +2,22 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:webcam_client/src/capture/stream_settings.dart';
 
 void main() {
-  test('defaults to video with the most widely supported codec and preview on',
-      () {
-    final s = StreamSettings.defaults();
-    expect(s.mode, StreamMode.video);
-    expect(s.codec, VideoCodec.avc);
-    expect(s.chunkSeconds, 3);
-    expect(s.previewEnabled, isTrue);
-  });
+  test(
+    'defaults to video with the most widely supported codec and preview on',
+    () {
+      final s = StreamSettings.defaults();
+      expect(s.mode, StreamMode.video);
+      expect(s.codec, VideoCodec.avc);
+      expect(s.chunkSeconds, 3);
+      expect(s.previewEnabled, isTrue);
+    },
+  );
 
   test('copyWith changes only what is given', () {
-    final s = StreamSettings.defaults()
-        .copyWith(codec: VideoCodec.hevc, previewEnabled: false);
+    final s = StreamSettings.defaults().copyWith(
+      codec: VideoCodec.hevc,
+      previewEnabled: false,
+    );
     expect(s.mode, StreamMode.video);
     expect(s.codec, VideoCodec.hevc);
     expect(s.previewEnabled, isFalse);

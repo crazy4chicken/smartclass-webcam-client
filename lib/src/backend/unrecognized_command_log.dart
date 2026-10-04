@@ -42,9 +42,9 @@ void _defaultSink(String message) => print(message);
 /// never allowed to break the connection or the next frame parse.
 class UnrecognizedCommandLog {
   UnrecognizedCommandLog({this.capacity = 50, Object? sink = _unsetSink})
-      : _sink = identical(sink, _unsetSink)
-            ? _defaultSink
-            : sink as void Function(String)?;
+    : _sink = identical(sink, _unsetSink)
+          ? _defaultSink
+          : sink as void Function(String)?;
 
   /// Maximum raw payload retained per entry. Keeps one hostile frame from
   /// exhausting memory.
@@ -68,17 +68,13 @@ class UnrecognizedCommandLog {
         ? raw.substring(0, maxRawLength)
         : raw;
 
-    _entries.addLast(
-      UnrecognizedEntry(raw: trimmed, reason: reason),
-    );
+    _entries.addLast(UnrecognizedEntry(raw: trimmed, reason: reason));
     while (_entries.length > capacity) {
       _entries.removeFirst();
       _droppedCount++;
     }
 
-    _sink?.call(
-      '[unrecognized:${reason.name}] $trimmed',
-    );
+    _sink?.call('[unrecognized:${reason.name}] $trimmed');
   }
 
   void clear() {

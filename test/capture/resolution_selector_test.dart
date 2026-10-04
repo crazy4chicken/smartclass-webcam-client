@@ -48,10 +48,9 @@ void main() {
 
   test('a single available format is returned as-is when it fits', () {
     expect(
-      selectClosestResolution(
-        const [CameraResolution(width: 640, height: 480)],
-        const CameraResolution(width: 1280, height: 720),
-      ),
+      selectClosestResolution(const [
+        CameraResolution(width: 640, height: 480),
+      ], const CameraResolution(width: 1280, height: 720)),
       const CameraResolution(width: 640, height: 480),
     );
   });

@@ -58,14 +58,14 @@ void main() {
     );
     await gw.connect('ws://x');
     incoming.add(
-        '{"type":"event_face_result","payload":{"name":"张三","status":"approved"}}');
+      '{"type":"event_face_result","payload":{"name":"张三","status":"approved"}}',
+    );
     await expectLater(gw.commands, emits(isA<FaceResultCommand>()));
     await gw.disconnect();
     await incoming.close();
   });
 
-  test('malformed frame is recorded locally and the channel survives the next valid frame',
-      () async {
+  test('malformed frame is recorded locally and the channel survives the next valid frame', () async {
     final incoming = StreamController<dynamic>();
     final log = UnrecognizedCommandLog(sink: null);
     final gw = WebSocketBackendGateway(
@@ -90,8 +90,16 @@ void main() {
       channelFactory: (_) => _FakeChannel(const Stream<dynamic>.empty(), sink),
     );
     await gw.connect('ws://x');
-    gw.sendFrameMeta(const FrameMeta(
-        frameId: 7, deviceId: 'd', timestampMs: 1, width: 1280, height: 720, quality: 80));
+    gw.sendFrameMeta(
+      const FrameMeta(
+        frameId: 7,
+        deviceId: 'd',
+        timestampMs: 1,
+        width: 1280,
+        height: 720,
+        quality: 80,
+      ),
+    );
     gw.sendFrameBytes(Uint8List.fromList([1, 2, 3]));
     expect(sink.records.length, 2);
     expect(jsonDecode(sink.records.first as String)['type'], 'frame_meta');
@@ -106,7 +114,8 @@ void main() {
       channelFactory: (_) => _FakeChannel(const Stream<dynamic>.empty(), sink),
     );
     await gw.connect('ws://x');
-    gw.sendVideoMeta(const VideoMeta(
+    gw.sendVideoMeta(
+      const VideoMeta(
         chunkId: 1,
         deviceId: 'd',
         timestampMs: 1,
@@ -114,7 +123,9 @@ void main() {
         sequence: 0,
         durationMs: 3000,
         width: 1280,
-        height: 720));
+        height: 720,
+      ),
+    );
     gw.sendVideoBytes(Uint8List.fromList([0, 0, 0, 24]));
     expect(jsonDecode(sink.records.first as String)['type'], 'video_meta');
     expect(jsonDecode(sink.records.first as String)['payload']['codec'], 'avc');

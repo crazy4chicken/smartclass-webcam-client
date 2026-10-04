@@ -88,11 +88,11 @@ class CameraPluginBackend implements CameraBackend {
     FrameStore frameStore = const IoFrameStore(),
     CameraControllerFactory? controllerFactory,
     CameraPluginVideoChunkRecorder? recorder,
-  })  : _listCameras = listCameras ?? availableCameras,
-        _requestPermission = requestPermission ?? _defaultPermissionRequest,
-        _frameStore = frameStore,
-        _controllerFactory = controllerFactory ?? _defaultControllerFactory,
-        _recorder = recorder;
+  }) : _listCameras = listCameras ?? availableCameras,
+       _requestPermission = requestPermission ?? _defaultPermissionRequest,
+       _frameStore = frameStore,
+       _controllerFactory = controllerFactory ?? _defaultControllerFactory,
+       _recorder = recorder;
 
   final CameraLister _listCameras;
   final PermissionRequester _requestPermission;
@@ -190,20 +190,20 @@ class _PluginCameraService
     required int cameraIndex,
     required FrameStore frameStore,
     required CameraControllerFactory controllerFactory,
-  })  : _cameras = cameras,
-        _frameStore = frameStore,
-        _controllerFactory = controllerFactory,
-        _config = config,
-        _cameraIndex = cameraIndex,
-        _appliedResolution = config.resolution,
-        _descriptors = [
-          for (var i = 0; i < cameras.length; i++)
-            CameraDescriptor(
-              name: cameras[i].name,
-              index: i,
-              lensDirection: cameras[i].lensDirection.name,
-            ),
-        ];
+  }) : _cameras = cameras,
+       _frameStore = frameStore,
+       _controllerFactory = controllerFactory,
+       _config = config,
+       _cameraIndex = cameraIndex,
+       _appliedResolution = config.resolution,
+       _descriptors = [
+         for (var i = 0; i < cameras.length; i++)
+           CameraDescriptor(
+             name: cameras[i].name,
+             index: i,
+             lensDirection: cameras[i].lensDirection.name,
+           ),
+       ];
 
   final List<CameraDescription> _cameras;
   final List<CameraDescriptor> _descriptors;
@@ -274,8 +274,8 @@ class _PluginCameraService
 
   @override
   Future<void> release() => _synchronized(() async {
-        await _disposeController();
-      });
+    await _disposeController();
+  });
 
   @override
   Future<Uint8List?> captureFrame(int quality) async {

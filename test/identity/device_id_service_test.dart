@@ -14,19 +14,21 @@ void main() {
     expect(second, first);
   });
 
-  test('persists the generated id so a fresh instance sees the same value',
-      () async {
-    SharedPreferences.setMockInitialValues({});
-    final generated = await DeviceIdService().getOrCreateDeviceId();
+  test(
+    'persists the generated id so a fresh instance sees the same value',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final generated = await DeviceIdService().getOrCreateDeviceId();
 
-    final restored = await DeviceIdService().getOrCreateDeviceId();
-    expect(restored, generated);
-  });
+      final restored = await DeviceIdService().getOrCreateDeviceId();
+      expect(restored, generated);
+    },
+  );
 
   test('keeps an id that already exists in storage', () async {
-    SharedPreferences.setMockInitialValues(
-      {DeviceIdService.storageKey: 'existing-id'},
-    );
+    SharedPreferences.setMockInitialValues({
+      DeviceIdService.storageKey: 'existing-id',
+    });
     expect(await DeviceIdService().getOrCreateDeviceId(), 'existing-id');
   });
 }

@@ -30,7 +30,7 @@ class CameraOpenResult {
 /// matter of appending to the list.
 class CameraProvider {
   CameraProvider({required List<CameraBackend> backends})
-      : _backends = List<CameraBackend>.unmodifiable(backends);
+    : _backends = List<CameraBackend>.unmodifiable(backends);
 
   final List<CameraBackend> _backends;
 
@@ -44,11 +44,13 @@ class CameraProvider {
       try {
         probe = await backend.probe();
       } catch (error) {
-        attempts.add(BackendProbe(
-          available: false,
-          reason: CameraUnavailableReason.initFailed,
-          detail: '$error',
-        ));
+        attempts.add(
+          BackendProbe(
+            available: false,
+            reason: CameraUnavailableReason.initFailed,
+            detail: '$error',
+          ),
+        );
         continue;
       }
 

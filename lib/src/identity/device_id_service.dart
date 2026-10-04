@@ -4,8 +4,8 @@ import 'package:uuid/uuid.dart';
 /// Persists a stable UUIDv4 that identifies this installation to the backend.
 class DeviceIdService {
   DeviceIdService({Uuid? uuid, SharedPreferences? preferences})
-      : _uuid = uuid ?? const Uuid(),
-        _preferences = preferences;
+    : _uuid = uuid ?? const Uuid(),
+      _preferences = preferences;
 
   static const String storageKey = 'device_id';
 

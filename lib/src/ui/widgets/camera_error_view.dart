@@ -25,8 +25,11 @@ class CameraErrorView extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.no_photography_outlined,
-              size: 64, color: Colors.white54),
+          const Icon(
+            Icons.no_photography_outlined,
+            size: 64,
+            color: Colors.white54,
+          ),
           const SizedBox(height: 20),
           const Text(
             '摄像头不可用',

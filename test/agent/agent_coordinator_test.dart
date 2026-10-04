@@ -37,11 +37,8 @@ class _FixedBackend implements CameraBackend {
   String get id => 'test_backend';
 
   @override
-  Future<BackendProbe> probe() async => const BackendProbe(
-        available: true,
-        maxFps: 30,
-        supportsPreview: true,
-      );
+  Future<BackendProbe> probe() async =>
+      const BackendProbe(available: true, maxFps: 30, supportsPreview: true);
 
   @override
   Future<CameraService> open(CaptureConfig config) async => _service;
@@ -85,11 +82,13 @@ AgentCoordinator _build(
     when(() => recorder.supportedCodecs).thenReturn({VideoCodec.avc});
     when(() => recorder.chunks)
         .thenAnswer((_) => const Stream<VideoChunk>.empty());
-    when(() => recorder.start(
-          codec: any(named: 'codec'),
-          chunkSeconds: any(named: 'chunkSeconds'),
-          config: any(named: 'config'),
-        )).thenAnswer((_) async {});
+    when(
+      () => recorder.start(
+        codec: any(named: 'codec'),
+        chunkSeconds: any(named: 'chunkSeconds'),
+        config: any(named: 'config'),
+      ),
+    ).thenAnswer((_) async {});
     when(() => recorder.stop()).thenAnswer((_) async {});
   }
 
@@ -108,24 +107,28 @@ void main() {
     // the whole ClientSignal parameter type.
     registerFallbackValue(const HeartbeatSignal(deviceId: 'fallback'));
     registerFallbackValue(Uint8List(0));
-    registerFallbackValue(const FrameMeta(
-      frameId: 0,
-      deviceId: '',
-      timestampMs: 0,
-      width: 0,
-      height: 0,
-      quality: 0,
-    ));
-    registerFallbackValue(const VideoMeta(
-      chunkId: 0,
-      deviceId: '',
-      timestampMs: 0,
-      codec: VideoCodec.avc,
-      sequence: 0,
-      durationMs: 0,
-      width: 0,
-      height: 0,
-    ));
+    registerFallbackValue(
+      const FrameMeta(
+        frameId: 0,
+        deviceId: '',
+        timestampMs: 0,
+        width: 0,
+        height: 0,
+        quality: 0,
+      ),
+    );
+    registerFallbackValue(
+      const VideoMeta(
+        chunkId: 0,
+        deviceId: '',
+        timestampMs: 0,
+        codec: VideoCodec.avc,
+        sequence: 0,
+        durationMs: 0,
+        width: 0,
+        height: 0,
+      ),
+    );
     registerFallbackValue(CaptureConfig.defaults());
     registerFallbackValue(VideoCodec.avc);
   });
@@ -147,17 +150,20 @@ void main() {
     verify(() => gw.sendFrameBytes(any())).called(1);
   });
 
-  test('releases the in-flight lock in finally even when capture throws',
-      () async {
-    final camera = MockCameraService();
-    final co = _build(camera, MockBackendGateway());
-    when(() => camera.captureFrame(any())).thenThrow(StateError('camera died'));
+  test(
+    'releases the in-flight lock in finally even when capture throws',
+    () async {
+      final camera = MockCameraService();
+      final co = _build(camera, MockBackendGateway());
+      when(() => camera.captureFrame(any()))
+          .thenThrow(StateError('camera died'));
 
-    await expectLater(co.performCaptureTick(), returnsNormally);
-    await co.performCaptureTick();
+      await expectLater(co.performCaptureTick(), returnsNormally);
+      await co.performCaptureTick();
 
-    verify(() => camera.captureFrame(any())).called(2);
-  });
+      verify(() => camera.captureFrame(any())).called(2);
+    },
+  );
 
   test('sends frame_meta before every binary frame', () async {
     final camera = MockCameraService();
@@ -174,54 +180,63 @@ void main() {
     ]);
   });
 
-  test('video mode uploads chunks with video_meta and reports codec mismatch',
-      () async {
-    final gw = MockBackendGateway();
-    final recorder = MockVideoChunkRecorder();
-    final co = _build(MockCameraService(), gw, recorder: recorder);
-    when(() => recorder.chunks).thenAnswer(
-      (_) => Stream<VideoChunk>.fromIterable([
-        VideoChunk(
-          bytes: Uint8List.fromList([1]),
-          codec: VideoCodec.avc,
-          requestedCodec: VideoCodec.hevc,
-          sequence: 0,
-          durationMs: 3000,
-          width: 1280,
-          height: 720,
+  test(
+    'video mode uploads chunks with video_meta and reports codec mismatch',
+    () async {
+      final gw = MockBackendGateway();
+      final recorder = MockVideoChunkRecorder();
+      final co = _build(MockCameraService(), gw, recorder: recorder);
+      when(() => recorder.chunks).thenAnswer(
+        (_) => Stream<VideoChunk>.fromIterable([
+          VideoChunk(
+            bytes: Uint8List.fromList([1]),
+            codec: VideoCodec.avc,
+            requestedCodec: VideoCodec.hevc,
+            sequence: 0,
+            durationMs: 3000,
+            width: 1280,
+            height: 720,
+          ),
+        ]),
+      );
+
+      co.handleCommand(
+        const SetStreamModeCommand(
+          mode: StreamMode.video,
+          codec: VideoCodec.hevc,
         ),
-      ]),
-    );
+      );
+      await pumpEventQueue();
 
-    co.handleCommand(
-      const SetStreamModeCommand(mode: StreamMode.video, codec: VideoCodec.hevc),
-    );
-    await pumpEventQueue();
+      verify(() => gw.sendVideoMeta(any())).called(greaterThan(0));
+      verify(() => gw.sendVideoBytes(any())).called(greaterThan(0));
+      verify(() => gw.sendSignal(any(that: isA<CapabilityMismatchSignal>())))
+          .called(1);
+    },
+  );
 
-    verify(() => gw.sendVideoMeta(any())).called(greaterThan(0));
-    verify(() => gw.sendVideoBytes(any())).called(greaterThan(0));
-    verify(() => gw.sendSignal(any(that: isA<CapabilityMismatchSignal>())))
-        .called(1);
-  });
+  test(
+    'preview command toggles the camera service, not the capture loop',
+    () async {
+      final camera = MockCameraService();
+      final co = _build(camera, MockBackendGateway());
 
-  test('preview command toggles the camera service, not the capture loop',
-      () async {
-    final camera = MockCameraService();
-    final co = _build(camera, MockBackendGateway());
+      co.handleCommand(const SetPreviewCommand(enabled: false));
+      await pumpEventQueue();
 
-    co.handleCommand(const SetPreviewCommand(enabled: false));
-    await pumpEventQueue();
-
-    verify(() => camera.setPreviewEnabled(false)).called(1);
-    expect(co.settings.previewEnabled, isFalse);
-    expect(co.isStreaming, isTrue);
-  });
+      verify(() => camera.setPreviewEnabled(false)).called(1);
+      expect(co.settings.previewEnabled, isFalse);
+      expect(co.isStreaming, isTrue);
+    },
+  );
 
   test('routes each command type to the right collaborator', () async {
     final camera = MockCameraService();
     final co = _build(camera, MockBackendGateway());
 
-    co.handleCommand(const UpdateConfigCommand(width: 640, height: 480, fps: 4));
+    co.handleCommand(
+      const UpdateConfigCommand(width: 640, height: 480, fps: 4),
+    );
     co.handleCommand(const ControlStreamCommand(enabled: false));
     co.handleCommand(const SwitchCameraCommand(index: 1));
     await pumpEventQueue();
@@ -234,10 +249,14 @@ void main() {
   test('face results are forwarded to the UI stream', () async {
     final co = _build(MockCameraService(), MockBackendGateway());
 
-    final expectation =
-        expectLater(co.onFaceResult, emits(predicate<FaceResult>((r) => r.name == '张三')));
+    final expectation = expectLater(
+      co.onFaceResult,
+      emits(predicate<FaceResult>((r) => r.name == '张三')),
+    );
     co.handleCommand(
-      FaceResultCommand(result: const FaceResult(name: '张三', status: 'approved')),
+      FaceResultCommand(
+        result: const FaceResult(name: '张三', status: 'approved'),
+      ),
     );
     await expectation;
   });
@@ -252,9 +271,11 @@ void main() {
 
     verify(() => gw.sendSignal(any(that: isA<RegisterSignal>())))
         .called(greaterThan(0));
-    final sync = verify(
-      () => gw.sendSignal(captureAny(that: isA<StateSyncSignal>())),
-    ).captured.single as StateSyncSignal;
+    final sync =
+        verify(() => gw.sendSignal(captureAny(that: isA<StateSyncSignal>())))
+                .captured
+                .single
+            as StateSyncSignal;
     expect(sync.mode, StreamMode.video);
     expect(sync.codec, VideoCodec.avc);
     expect(sync.previewEnabled, isTrue);
@@ -262,22 +283,24 @@ void main() {
     expect(sync.height, 720);
   });
 
-  test('goes autonomous when no command arrives within the register timeout',
-      () async {
-    final co = _build(
-      MockCameraService(),
-      MockBackendGateway(),
-      registerTimeout: const Duration(milliseconds: 10),
-    );
+  test(
+    'goes autonomous when no command arrives within the register timeout',
+    () async {
+      final co = _build(
+        MockCameraService(),
+        MockBackendGateway(),
+        registerTimeout: const Duration(milliseconds: 10),
+      );
 
-    await co.start();
-    await Future<void>.delayed(const Duration(milliseconds: 40));
+      await co.start();
+      await Future<void>.delayed(const Duration(milliseconds: 40));
 
-    expect(co.isAutonomous, isTrue);
-    expect(co.isStreaming, isTrue);
+      expect(co.isAutonomous, isTrue);
+      expect(co.isStreaming, isTrue);
 
-    await co.stop();
-  });
+      await co.stop();
+    },
+  );
 
   test('pause releases the camera and drops the connection', () async {
     final camera = MockCameraService();

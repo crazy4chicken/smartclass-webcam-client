@@ -23,8 +23,8 @@ class TakePictureFrameSource implements FrameSource {
   TakePictureFrameSource({
     required PicturePathTaker takePicture,
     FrameStore frameStore = const IoFrameStore(),
-  })  : _takePicture = takePicture,
-        _frameStore = frameStore;
+  }) : _takePicture = takePicture,
+       _frameStore = frameStore;
 
   final PicturePathTaker _takePicture;
   final FrameStore _frameStore;

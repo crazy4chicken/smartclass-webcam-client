@@ -9,8 +9,13 @@ void main() {
     final file = File('${dir.path}${Platform.pathSeparator}frame.jpg')
       ..writeAsBytesSync([0xFF, 0xD8, 1, 0xFF, 0xD9]);
 
-    expect(await const IoFrameStore().readAndDelete(file.path),
-        [0xFF, 0xD8, 1, 0xFF, 0xD9]);
+    expect(await const IoFrameStore().readAndDelete(file.path), [
+      0xFF,
+      0xD8,
+      1,
+      0xFF,
+      0xD9,
+    ]);
     expect(file.existsSync(), isFalse);
 
     await dir.delete(recursive: true);

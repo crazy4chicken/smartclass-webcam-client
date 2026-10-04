@@ -38,11 +38,12 @@ class WebSocketBackendGateway implements BackendGateway {
     Duration? heartbeatInterval,
     Duration Function(int attempt)? backoff,
     this.deviceId = '',
-  })  : _codec = codec,
-        _channelFactory = channelFactory,
-        _heartbeatInterval = heartbeatInterval ??
-            const Duration(seconds: AppConfig.heartbeatSeconds),
-        _backoff = backoff ?? backoffFor;
+  }) : _codec = codec,
+       _channelFactory = channelFactory,
+       _heartbeatInterval =
+           heartbeatInterval ??
+           const Duration(seconds: AppConfig.heartbeatSeconds),
+       _backoff = backoff ?? backoffFor;
 
   final CommandCodec _codec;
   final WebSocketChannelFactory _channelFactory;
@@ -76,7 +77,8 @@ class WebSocketBackendGateway implements BackendGateway {
   bool get isConnected => _connected;
 
   @override
-  UnrecognizedCommandLog get unrecognizedCommands => _codec.unrecognizedCommands;
+  UnrecognizedCommandLog get unrecognizedCommands =>
+      _codec.unrecognizedCommands;
 
   @override
   Future<void> connect(String url) async {

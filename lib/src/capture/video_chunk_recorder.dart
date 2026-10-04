@@ -40,8 +40,7 @@ class VideoChunk {
   ///
   /// Silent degradation is forbidden, so the caller turns this into a
   /// `capability_mismatch` signal.
-  bool get isCodecMismatch =>
-      requestedCodec != null && requestedCodec != codec;
+  bool get isCodecMismatch => requestedCodec != null && requestedCodec != codec;
 }
 
 /// The recorder methods the chunk recorder needs from a camera.
@@ -85,8 +84,8 @@ class CameraPluginVideoChunkRecorder implements VideoChunkRecorder {
   CameraPluginVideoChunkRecorder({
     RecorderHost? host,
     FrameStore fileStore = const IoFrameStore(),
-  })  : _host = host,
-        _fileStore = fileStore;
+  }) : _host = host,
+       _fileStore = fileStore;
 
   final FrameStore _fileStore;
 
@@ -105,8 +104,11 @@ class CameraPluginVideoChunkRecorder implements VideoChunkRecorder {
   int _sequence = 0;
   VideoCodec _requestedCodec = VideoCodec.avc;
   int _chunkSeconds = 3;
-  CaptureConfig _config =
-      const CaptureConfig(width: 1280, height: 720, quality: 80);
+  CaptureConfig _config = const CaptureConfig(
+    width: 1280,
+    height: 720,
+    quality: 80,
+  );
   DateTime? _segmentStartedAt;
 
   @override
@@ -133,10 +135,7 @@ class CameraPluginVideoChunkRecorder implements VideoChunkRecorder {
     await _openSegment();
     if (!_running) return;
 
-    _timer = Timer.periodic(
-      Duration(seconds: _chunkSeconds),
-      (_) => _rotate(),
-    );
+    _timer = Timer.periodic(Duration(seconds: _chunkSeconds), (_) => _rotate());
   }
 
   @override
@@ -192,16 +191,18 @@ class CameraPluginVideoChunkRecorder implements VideoChunkRecorder {
           : DateTime.now().difference(startedAt).inMilliseconds;
 
       if (bytes.isEmpty || _chunks.isClosed) return;
-      _chunks.add(VideoChunk(
-        bytes: bytes,
-        // The plugin can only ever produce AVC; report what really ran.
-        codec: VideoCodec.avc,
-        requestedCodec: _requestedCodec,
-        sequence: _sequence++,
-        durationMs: durationMs,
-        width: _config.width,
-        height: _config.height,
-      ));
+      _chunks.add(
+        VideoChunk(
+          bytes: bytes,
+          // The plugin can only ever produce AVC; report what really ran.
+          codec: VideoCodec.avc,
+          requestedCodec: _requestedCodec,
+          sequence: _sequence++,
+          durationMs: durationMs,
+          width: _config.width,
+          height: _config.height,
+        ),
+      );
     } catch (_) {
       // A lost segment must not kill the recording loop.
     }

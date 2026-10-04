@@ -44,10 +44,10 @@ class CaptureConfig {
   final int quality;
 
   factory CaptureConfig.defaults() => const CaptureConfig(
-        width: AppConfig.defaultWidth,
-        height: AppConfig.defaultHeight,
-        quality: AppConfig.defaultQuality,
-      );
+    width: AppConfig.defaultWidth,
+    height: AppConfig.defaultHeight,
+    quality: AppConfig.defaultQuality,
+  );
 
   CameraResolution get resolution =>
       CameraResolution(width: width, height: height);
@@ -71,6 +71,5 @@ class CaptureConfig {
   int get hashCode => Object.hash(width, height, quality);
 
   @override
-  String toString() =>
-      'CaptureConfig(${width}x$height, q$quality)';
+  String toString() => 'CaptureConfig(${width}x$height, q$quality)';
 }

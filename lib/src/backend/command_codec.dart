@@ -31,7 +31,7 @@ class _InvalidPayload implements Exception {
 /// being parsed. It is recorded in [unrecognizedLog] instead.
 class JsonCommandCodec implements CommandCodec {
   JsonCommandCodec({UnrecognizedCommandLog? unrecognizedLog})
-      : unrecognizedLog = unrecognizedLog ?? UnrecognizedCommandLog();
+    : unrecognizedLog = unrecognizedLog ?? UnrecognizedCommandLog();
 
   final UnrecognizedCommandLog unrecognizedLog;
 
@@ -60,8 +60,7 @@ class JsonCommandCodec implements CommandCodec {
     }
 
     final rawPayload = decoded['payload'];
-    final payload =
-        rawPayload is Map ? rawPayload : const <Object?, Object?>{};
+    final payload = rawPayload is Map ? rawPayload : const <Object?, Object?>{};
 
     try {
       switch (type) {

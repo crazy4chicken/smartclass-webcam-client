@@ -11,12 +11,18 @@ void main() {
       commandInterval: const Duration(milliseconds: 1),
     );
     await gw.connect('ws://mock');
-    await expectLater(gw.commands,
-        emitsThrough(predicate<ServerCommand>((c) => c is SetStreamModeCommand)));
-    await expectLater(gw.commands,
-        emitsThrough(predicate<ServerCommand>((c) => c is SetPreviewCommand)));
-    await expectLater(gw.commands,
-        emitsThrough(predicate<ServerCommand>((c) => c is FaceResultCommand)));
+    await expectLater(
+      gw.commands,
+      emitsThrough(predicate<ServerCommand>((c) => c is SetStreamModeCommand)),
+    );
+    await expectLater(
+      gw.commands,
+      emitsThrough(predicate<ServerCommand>((c) => c is SetPreviewCommand)),
+    );
+    await expectLater(
+      gw.commands,
+      emitsThrough(predicate<ServerCommand>((c) => c is FaceResultCommand)),
+    );
     expect(gw.isConnected, isTrue);
     await gw.disconnect();
   });

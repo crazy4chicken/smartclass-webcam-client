@@ -11,12 +11,14 @@ void main() {
     expect(log.droppedCount, 2);
   });
 
-  test('truncates oversized raw payloads so one huge frame cannot exhaust memory',
-      () {
-    final log = UnrecognizedCommandLog(sink: null);
-    log.record('x' * 20000, UnrecognizedReason.malformedJson);
-    expect(log.entries.single.raw.length, lessThanOrEqualTo(512));
-  });
+  test(
+    'truncates oversized raw payloads so one huge frame cannot exhaust memory',
+    () {
+      final log = UnrecognizedCommandLog(sink: null);
+      log.record('x' * 20000, UnrecognizedReason.malformedJson);
+      expect(log.entries.single.raw.length, lessThanOrEqualTo(512));
+    },
+  );
 
   test('sink receives a human readable message', () {
     final messages = <String>[];

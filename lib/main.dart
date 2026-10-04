@@ -26,9 +26,7 @@ import 'src/ui/screens/agent_screen.dart';
 List<CameraBackend> buildBackendChain({
   CameraPluginVideoChunkRecorder? recorder,
 }) {
-  return <CameraBackend>[
-    CameraPluginBackend(recorder: recorder),
-  ];
+  return <CameraBackend>[CameraPluginBackend(recorder: recorder)];
 }
 
 Future<void> main() async {
@@ -63,8 +61,9 @@ Future<void> _bootstrap() async {
 
   final recorder = CameraPluginVideoChunkRecorder();
   final coordinator = AgentCoordinator(
-    cameraProvider:
-        CameraProvider(backends: buildBackendChain(recorder: recorder)),
+    cameraProvider: CameraProvider(
+      backends: buildBackendChain(recorder: recorder),
+    ),
     gateway: gateway,
     deviceIdService: deviceIdService,
     recorder: recorder,

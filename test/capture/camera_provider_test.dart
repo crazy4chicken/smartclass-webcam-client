@@ -73,29 +73,31 @@ class FakeBackend implements CameraBackend {
 }
 
 BackendProbe _okProbe() => const BackendProbe(
-      available: true,
-      devices: [],
-      supportedResolutions: [],
-      maxFps: 30,
-      supportsPreview: true,
-    );
+  available: true,
+  devices: [],
+  supportedResolutions: [],
+  maxFps: 30,
+  supportsPreview: true,
+);
 
 void main() {
   test('skips an unavailable backend and opens the next one', () async {
-    final provider = CameraProvider(backends: [
-      FakeBackend(
-        'broken',
-        probeResult: const BackendProbe(
-          available: false,
-          reason: CameraUnavailableReason.noDevice,
-          devices: [],
-          supportedResolutions: [],
-          maxFps: 0,
-          supportsPreview: false,
+    final provider = CameraProvider(
+      backends: [
+        FakeBackend(
+          'broken',
+          probeResult: const BackendProbe(
+            available: false,
+            reason: CameraUnavailableReason.noDevice,
+            devices: [],
+            supportedResolutions: [],
+            maxFps: 0,
+            supportsPreview: false,
+          ),
         ),
-      ),
-      FakeBackend('good', probeResult: _okProbe()),
-    ]);
+        FakeBackend('good', probeResult: _okProbe()),
+      ],
+    );
 
     final result = await provider.open(CaptureConfig.defaults());
 
@@ -105,12 +107,16 @@ void main() {
   });
 
   test('falls through when a backend probes fine but open throws', () async {
-    final provider = CameraProvider(backends: [
-      FakeBackend('crashy',
+    final provider = CameraProvider(
+      backends: [
+        FakeBackend(
+          'crashy',
           probeResult: _okProbe(),
-          openError: CameraFailure.initFailed('boom')),
-      FakeBackend('good', probeResult: _okProbe()),
-    ]);
+          openError: CameraFailure.initFailed('boom'),
+        ),
+        FakeBackend('good', probeResult: _okProbe()),
+      ],
+    );
 
     final result = await provider.open(CaptureConfig.defaults());
 
@@ -118,34 +124,40 @@ void main() {
     expect(result.attempts.length, 2);
   });
 
-  test('reports NoBackendAvailable with the full attempt list when all fail',
-      () async {
-    final provider = CameraProvider(backends: [
-      FakeBackend(
-        'a',
-        probeResult: const BackendProbe(
-          available: false,
-          reason: CameraUnavailableReason.permissionDenied,
-          devices: [],
-          supportedResolutions: [],
-          maxFps: 0,
-          supportsPreview: false,
-        ),
-      ),
-    ]);
+  test(
+    'reports NoBackendAvailable with the full attempt list when all fail',
+    () async {
+      final provider = CameraProvider(
+        backends: [
+          FakeBackend(
+            'a',
+            probeResult: const BackendProbe(
+              available: false,
+              reason: CameraUnavailableReason.permissionDenied,
+              devices: [],
+              supportedResolutions: [],
+              maxFps: 0,
+              supportsPreview: false,
+            ),
+          ),
+        ],
+      );
 
-    final result = await provider.open(CaptureConfig.defaults());
+      final result = await provider.open(CaptureConfig.defaults());
 
-    expect(result.service, isNull);
-    expect(result.failure, isA<CameraFailureNoBackendAvailable>());
-    expect(result.attempts.length, 1);
-  });
+      expect(result.service, isNull);
+      expect(result.failure, isA<CameraFailureNoBackendAvailable>());
+      expect(result.attempts.length, 1);
+    },
+  );
 
   test('a backend that throws while probing is recorded, not fatal', () async {
-    final provider = CameraProvider(backends: [
-      _ThrowingBackend('explodes'),
-      FakeBackend('good', probeResult: _okProbe()),
-    ]);
+    final provider = CameraProvider(
+      backends: [
+        _ThrowingBackend('explodes'),
+        FakeBackend('good', probeResult: _okProbe()),
+      ],
+    );
 
     final result = await provider.open(CaptureConfig.defaults());
 

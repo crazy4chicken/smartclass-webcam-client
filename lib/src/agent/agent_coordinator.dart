@@ -28,13 +28,14 @@ class AgentCoordinator {
     VideoChunkRecorder? recorder,
     StreamSettings? initialSettings,
     Duration? registerTimeout,
-  })  : _cameraProvider = cameraProvider,
-        _gateway = gateway,
-        _deviceIdService = deviceIdService,
-        _recorder = recorder,
-        _settings = initialSettings ?? StreamSettings.defaults(),
-        _registerTimeout = registerTimeout ??
-            const Duration(seconds: AppConfig.registerTimeoutSeconds);
+  }) : _cameraProvider = cameraProvider,
+       _gateway = gateway,
+       _deviceIdService = deviceIdService,
+       _recorder = recorder,
+       _settings = initialSettings ?? StreamSettings.defaults(),
+       _registerTimeout =
+           registerTimeout ??
+           const Duration(seconds: AppConfig.registerTimeoutSeconds);
 
   final CameraProvider _cameraProvider;
   final BackendGateway _gateway;
@@ -113,16 +114,16 @@ class AgentCoordinator {
   Stream<AgentStatus> get onStatus => _statuses.stream;
 
   AgentStatus get status => AgentStatus(
-        connection: _connectionState,
-        fps: _measuredFps,
-        cameraName: cameraName,
-        streaming: _streaming,
-        autonomous: _autonomous,
-        resolutionLabel: _effectiveResolution.label,
-        streamModeLabel: _streamModeLabel,
-        previewEnabled: _settings.previewEnabled,
-        backendId: _backendId ?? '',
-      );
+    connection: _connectionState,
+    fps: _measuredFps,
+    cameraName: cameraName,
+    streaming: _streaming,
+    autonomous: _autonomous,
+    resolutionLabel: _effectiveResolution.label,
+    streamModeLabel: _streamModeLabel,
+    previewEnabled: _settings.previewEnabled,
+    backendId: _backendId ?? '',
+  );
 
   CameraResolution get _effectiveResolution =>
       _camera?.appliedResolution ?? _captureConfig.resolution;
@@ -263,14 +264,16 @@ class AgentCoordinator {
       if (frame == null) return;
 
       final resolution = camera.appliedResolution;
-      _gateway.sendFrameMeta(FrameMeta(
-        frameId: ++_frameId,
-        deviceId: _deviceId ?? '',
-        timestampMs: DateTime.now().millisecondsSinceEpoch,
-        width: resolution.width,
-        height: resolution.height,
-        quality: _captureConfig.quality,
-      ));
+      _gateway.sendFrameMeta(
+        FrameMeta(
+          frameId: ++_frameId,
+          deviceId: _deviceId ?? '',
+          timestampMs: DateTime.now().millisecondsSinceEpoch,
+          width: resolution.width,
+          height: resolution.height,
+          quality: _captureConfig.quality,
+        ),
+      );
       _gateway.sendFrameBytes(frame);
       _framesInWindow++;
     } catch (_) {
@@ -342,16 +345,18 @@ class AgentCoordinator {
   void _onVideoChunk(VideoChunk chunk) {
     if (!_streaming) return;
 
-    _gateway.sendVideoMeta(VideoMeta(
-      chunkId: ++_chunkId,
-      deviceId: _deviceId ?? '',
-      timestampMs: DateTime.now().millisecondsSinceEpoch,
-      codec: chunk.codec,
-      sequence: chunk.sequence,
-      durationMs: chunk.durationMs,
-      width: chunk.width,
-      height: chunk.height,
-    ));
+    _gateway.sendVideoMeta(
+      VideoMeta(
+        chunkId: ++_chunkId,
+        deviceId: _deviceId ?? '',
+        timestampMs: DateTime.now().millisecondsSinceEpoch,
+        codec: chunk.codec,
+        sequence: chunk.sequence,
+        durationMs: chunk.durationMs,
+        width: chunk.width,
+        height: chunk.height,
+      ),
+    );
     _gateway.sendVideoBytes(chunk.bytes);
     _chunksInWindow++;
 
@@ -359,11 +364,13 @@ class AgentCoordinator {
     final requested = chunk.requestedCodec;
     if (chunk.isCodecMismatch && requested != null && !_codecMismatchReported) {
       _codecMismatchReported = true;
-      _gateway.sendSignal(CapabilityMismatchSignal(
-        requested: requested.wireName,
-        applied: chunk.codec.wireName,
-        reason: 'the camera plugin can only encode AVC',
-      ));
+      _gateway.sendSignal(
+        CapabilityMismatchSignal(
+          requested: requested.wireName,
+          applied: chunk.codec.wireName,
+          reason: 'the camera plugin can only encode AVC',
+        ),
+      );
     }
   }
 
@@ -504,11 +511,13 @@ class AgentCoordinator {
   }
 
   void _reportMismatch(String requested, String applied, String reason) {
-    _gateway.sendSignal(CapabilityMismatchSignal(
-      requested: requested,
-      applied: applied,
-      reason: reason,
-    ));
+    _gateway.sendSignal(
+      CapabilityMismatchSignal(
+        requested: requested,
+        applied: applied,
+        reason: reason,
+      ),
+    );
   }
 
   // --- connection -----------------------------------------------------------
@@ -525,8 +534,7 @@ class AgentCoordinator {
   Future<void> onGatewayConnectionChanged(ConnectionState state) async {
     if (state != ConnectionState.connected) return;
 
-    final deviceId =
-        _deviceId ??= await _deviceIdService.getOrCreateDeviceId();
+    final deviceId = _deviceId ??= await _deviceIdService.getOrCreateDeviceId();
     _gateway.sendSignal(
       RegisterSignal(deviceId: deviceId, capabilities: _buildCapabilities()),
     );
@@ -562,12 +570,11 @@ class AgentCoordinator {
     return ClientCapabilities(
       platform: Platform.operatingSystem,
       modes: const [StreamMode.still, StreamMode.video],
-      videoCodecs: _recorder?.supportedCodecs.toList() ??
-          const [VideoCodec.avc],
+      videoCodecs:
+          _recorder?.supportedCodecs.toList() ?? const [VideoCodec.avc],
       maxFps: _targetFps,
       hasPreview: true,
-      supportedResolutions:
-          camera?.supportedResolutions ?? kNominalResolutions,
+      supportedResolutions: camera?.supportedResolutions ?? kNominalResolutions,
       cameras: camera?.cameras.map((c) => c.name).toList() ?? const [],
     );
   }
