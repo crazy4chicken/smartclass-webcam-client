@@ -9,6 +9,7 @@ import 'camera_resolution.dart';
 import 'camera_service.dart';
 import 'frame_source.dart';
 import 'frame_store.dart';
+import 'serial_lock.dart';
 
 /// Lists the platform's cameras. Injectable so [CameraPluginBackend] can be
 /// exercised without hardware.
@@ -227,6 +228,18 @@ class _PluginCameraService implements CameraService, CameraPreviewProvider {
   /// the coordinator drops overlapping ticks instead of queueing them.
   Future<void> _lock = Future<void>.value();
 
+  /// Serialises still captures **separately** from rebuilds.
+  ///
+  /// `takePicture()` cannot run twice at once on one controller, and
+  /// `take_photo` legitimately races the frame pump: the server may ask for a
+  /// photo while a stream is active. Without this, whichever call loses throws,
+  /// `TakePictureFrameSource` swallows it into a `null` frame, and the photo is
+  /// never uploaded — the operator gets a `202` and then nothing.
+  ///
+  /// It is a distinct lock from [_lock] so a capture never waits behind a
+  /// camera rebuild, and vice versa.
+  final SerialLock _captures = SerialLock();
+
   Future<T> _synchronized<T>(Future<T> Function() action) {
     final completer = Completer<void>();
     final previous = _lock;
@@ -279,7 +292,10 @@ class _PluginCameraService implements CameraService, CameraPreviewProvider {
   });
 
   @override
-  Future<Uint8List?> captureFrame(int quality) async {
+  Future<Uint8List?> captureFrame(int quality) =>
+      _captures.run(() => _captureOnce(quality));
+
+  Future<Uint8List?> _captureOnce(int quality) async {
     final source = _frameSource;
     if (!_initialized || source == null) return null;
     return source.nextFrame(quality);

@@ -37,6 +37,7 @@ import 'package:webcam_client/src/capture/codec_probe.dart';
 import 'package:webcam_client/src/capture/frame_pump.dart';
 import 'package:webcam_client/src/capture/frame_store.dart';
 import 'package:webcam_client/src/capture/resolution_selector.dart';
+import 'package:webcam_client/src/capture/serial_lock.dart';
 import 'package:webcam_client/src/capture/stream_settings.dart';
 import 'package:webcam_client/src/capture/video_encoder.dart';
 
@@ -1227,6 +1228,75 @@ Future<void> checkFramePump() async {
   check('a zero rate is rejected', rejectedZeroRate);
 }
 
+void checkSerialLock() {
+  section('serial lock');
+
+  fakeAsync((async) {
+    final lock = SerialLock();
+    final order = <String>[];
+    var concurrent = 0;
+    var maxConcurrent = 0;
+
+    void job(String name, int ms) {
+      lock.run(() async {
+        concurrent++;
+        maxConcurrent = max(maxConcurrent, concurrent);
+        order.add('start-$name');
+        await Future<void>.delayed(Duration(milliseconds: ms));
+        order.add('end-$name');
+        concurrent--;
+      });
+    }
+
+    // Queued out of duration order on purpose: the lock must preserve *call*
+    // order, not completion order.
+    job('a', 30);
+    job('b', 10);
+    job('c', 20);
+    async.elapse(const Duration(milliseconds: 300));
+
+    eq(
+      'runs in call order, not duration order',
+      order.join(','),
+      'start-a,end-a,start-b,end-b,start-c,end-c',
+    );
+    eq('items never overlap', maxConcurrent, 1);
+    eq('the queue drains', lock.pending, 0);
+  });
+
+  fakeAsync((async) {
+    final lock = SerialLock();
+    final done = <String>[];
+    // The failure must reach *this* caller (it is the capture that failed) while
+    // still releasing the lock for the next item.
+    final failing = lock.run<void>(() async => throw StateError('boom'));
+    unawaited(failing.then<void>((_) {}, onError: (Object _) {}));
+
+    lock.run(() async => done.add('after'));
+    async.elapse(const Duration(milliseconds: 100));
+    eq('a failing item does not poison the queue', done.join(','), 'after');
+  });
+
+  fakeAsync((async) {
+    // The regression this exists for: `take_photo` racing the frame pump.
+    // Both go through `takePicture()`, which cannot run twice at once on one
+    // controller; unserialised, the loser throws and the photo is lost.
+    final lock = SerialLock();
+    var concurrent = 0;
+    var maxConcurrent = 0;
+    for (var i = 0; i < 4; i++) {
+      lock.run(() async {
+        concurrent++;
+        maxConcurrent = max(maxConcurrent, concurrent);
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        concurrent--;
+      });
+    }
+    async.elapse(const Duration(milliseconds: 400));
+    eq('still captures never overlap', maxConcurrent, 1);
+  });
+}
+
 void checkMjpegEncoder() {
   section('mjpeg encoder');
   fakeAsync((async) {
@@ -2028,6 +2098,7 @@ Future<void> main() async {
   checkUnrecognizedLog();
   checkCodecSelection();
   await checkFramePump();
+  checkSerialLock();
   checkMjpegEncoder();
   await checkCameraProvider();
   await checkFrameStore();

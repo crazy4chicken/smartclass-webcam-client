@@ -84,23 +84,29 @@ Future<void> _bootstrap() async {
   // The camera is opened before the gateway is built, because the camera list
   // has to be announced on registration.
   final cameraProvider = CameraProvider(backends: buildBackendChain());
-  final openResult = await cameraProvider.open(CaptureConfig.defaults());
+  final captureConfig = CaptureConfig.defaults();
+  final openResult = await cameraProvider.open(captureConfig);
   final camera = openResult.service;
   if (camera == null) {
     debugPrint('[camera] no backend available: ${openResult.failure}');
   }
 
+  // Announce what this device will actually deliver, not a capability ladder.
+  //
+  // `supportedResolutions` is the nominal ladder `[640x480, 1280x720, …]`, and
+  // passing it positionally handed camera 0 the *lowest* rung: the server was
+  // told 640x480 for a stream that is really 1280x720, and that value is what
+  // gets snapshotted into the stream's `metadata.resolution`. Every camera is
+  // driven by the same [CaptureConfig], so one resolution is the truth for all
+  // of them — and a single-element list is exactly how `buildAnnouncements`
+  // expresses "same for every camera".
+  final announcedResolution =
+      camera?.appliedResolution ?? captureConfig.resolution;
+
   final announcements = buildAnnouncements(
     cameraNames:
         camera?.cameras.map((c) => c.name).toList() ?? const <String>['camera'],
-    resolutions:
-        camera?.supportedResolutions ??
-        const <CameraResolution>[
-          CameraResolution(
-            width: AppConfig.defaultWidth,
-            height: AppConfig.defaultHeight,
-          ),
-        ],
+    resolutions: <CameraResolution>[announcedResolution],
     fps: settings.fps,
     codecs: wireCodecsFor(available),
   );
