@@ -298,6 +298,23 @@ switch_camera(camera=1) →
   "upstream connect failed"，看起来像服务没起。
 - **公网反而要走代理**：`dl.min.io` 直连可达，`github.com` 加 `--noproxy` 就超时。
 
+## 发布
+
+`.github/workflows/release.yml`：**Windows / macOS / Linux / Android** 四端并行出包，
+iOS 不参与（需要 Apple Developer 证书，见 `docs/release.md`）。
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0    # 跑测试 → 四端构建 → 建 Release 附产物
+```
+
+- 手动触发（Actions → Release → Run workflow）**只出产物、不建 Release**，用来验流水线。
+- `verify` job 先跑 `dart run tool/verify_pure.dart` + `flutter test`，全绿才构建。
+- Android 配了 `ANDROID_KEYSTORE_*` secrets 就用正式签名，没配回落 debug（不会因此构建失败）。
+- **`pubspec.lock` 现在提交进仓库了**：这是应用不是库，发布必须解析到和本地一致的版本。
+
+完整说明（产物清单、签名、各平台运行环境要求、已知限制、实现上的坑）见
+**`docs/release.md`**。
+
 ## 构建环境
 
 Windows 端需要 Visual Studio（Desktop development with C++ 工作负载）。

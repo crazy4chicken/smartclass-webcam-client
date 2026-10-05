@@ -15,8 +15,11 @@
 .dart_tool/
 .packages
 build/
-# If you're building an application, you may want to check-in your pubspec.lock
-pubspec.lock
+# NOTE: the Flutter template ignores `pubspec.lock` with a "you may want to
+# check-in your pubspec.lock" comment. This is an application, not a library, so
+# it is committed: a release has to resolve exactly the versions the local build
+# did. Without it CI takes whatever is newest-compatible, and a release can
+# break on a day when nothing in this repository changed.
 
 # Directory created by dartdoc
 # If you don't generate documentation locally you can remove this line.
@@ -45,3 +48,9 @@ smartclass-webcam-server/
 
 # Scratch terminal dumps pasted into the workspace.
 output_temp.txt
+
+# Android release signing. `key.properties` points at the keystore and holds its
+# passwords; CI writes it from repository secrets and never commits it.
+android/key.properties
+*.jks
+*.keystore
