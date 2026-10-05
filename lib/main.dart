@@ -64,11 +64,19 @@ Future<void> _bootstrap() async {
   // Where to connect and as whom. The store wins over `--dart-define`, which
   // wins over the built-in default — so an install no longer needs a fresh
   // build to be pointed at a different server.
+  //
+  // The two halves are loaded separately on purpose. `save()` means "make the
+  // store match this exactly", so a settings object carrying no credentials
+  // **deletes** the stored pair. Resolving them together would do exactly that
+  // to an install upgrading from a build that stored credentials but no
+  // address: it has nothing to load, so the seed would come out empty-handed.
   final settingsStore = SharedPrefsSettingsStore();
-  final stored = await settingsStore.load();
+  final storedBaseUrl = await settingsStore.loadBaseUrl();
+  final storedCredentials = await settingsStore.loadCredentials();
 
   var connection = resolveConnectionSettings(
-    stored: stored,
+    storedBaseUrl: storedBaseUrl,
+    storedCredentials: storedCredentials,
     buildBaseUrl: AppConfig.baseUrl,
     buildDeviceId: AppConfig.deviceId,
     buildDeviceToken: AppConfig.deviceToken,
@@ -76,10 +84,11 @@ Future<void> _bootstrap() async {
 
   if (AppConfig.useMockBackend && !connection.isProvisioned) {
     connection = connection.copyWith(credentials: _mockCredentials);
-  } else if (stored != connection) {
-    // First launch, or an upgrade from a build that only stored credentials.
-    // Seeding here is what makes `base_url` exist at all; from now on the
-    // store is the source of truth and the build value is only a fallback.
+  } else if (storedBaseUrl == null ||
+      (storedCredentials == null && connection.credentials != null)) {
+    // Seed only what is missing. Safe because `resolveConnectionSettings`
+    // carried any stored credentials into `connection` — writing the address
+    // therefore cannot take them away.
     await settingsStore.save(connection);
   }
 
@@ -90,7 +99,9 @@ Future<void> _bootstrap() async {
     deviceId: AppConfig.deviceId,
     deviceToken: AppConfig.deviceToken,
   );
-  if (stored == null && fromBuild.isConfigured && !fromBuild.looksValid) {
+  if (storedCredentials == null &&
+      fromBuild.isConfigured &&
+      !fromBuild.looksValid) {
     unrecognized.record(
       'DEVICE_ID / DEVICE_TOKEN do not look like a server-issued pair',
       UnrecognizedReason.invalidPayload,

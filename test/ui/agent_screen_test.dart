@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:webcam_client/src/agent/agent_coordinator.dart';
 import 'package:webcam_client/src/agent/agent_status.dart';
+import 'package:webcam_client/src/backend/device_credentials.dart';
 import 'package:webcam_client/src/capture/camera_backend.dart';
 import 'package:webcam_client/src/config/connection_settings.dart';
 import 'package:webcam_client/src/config/settings_store.dart';
@@ -15,23 +16,38 @@ import '../support/doubles.dart';
 class MockCoordinator extends Mock implements AgentCoordinator {}
 
 class _FakeSettingsStore implements SettingsStore {
-  _FakeSettingsStore([this.value]);
+  _FakeSettingsStore({this.baseUrl, this.credentials});
 
-  final ConnectionSettings? value;
-  int loads = 0;
+  Uri? baseUrl;
+  DeviceCredentials? credentials;
+  int baseUrlReads = 0;
+  int credentialReads = 0;
   ConnectionSettings? saved;
 
   @override
-  Future<ConnectionSettings?> load() async {
-    loads++;
-    return value;
+  Future<Uri?> loadBaseUrl() async {
+    baseUrlReads++;
+    return baseUrl;
   }
 
   @override
-  Future<void> save(ConnectionSettings settings) async => saved = settings;
+  Future<DeviceCredentials?> loadCredentials() async {
+    credentialReads++;
+    return credentials;
+  }
 
   @override
-  Future<void> clear() async {}
+  Future<void> save(ConnectionSettings settings) async {
+    saved = settings;
+    baseUrl = settings.baseUrl;
+    credentials = settings.credentials;
+  }
+
+  @override
+  Future<void> clear() async {
+    baseUrl = null;
+    credentials = null;
+  }
 }
 
 void main() {
@@ -40,7 +56,10 @@ void main() {
 
   setUp(() {
     coordinator = MockCoordinator();
-    store = _FakeSettingsStore(testConnection);
+    store = _FakeSettingsStore(
+      baseUrl: testConnection.baseUrl,
+      credentials: testCredentials,
+    );
 
     when(() => coordinator.status).thenReturn(AgentStatus.initial);
     when(() => coordinator.onStatus)
@@ -83,7 +102,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(SettingsScreen), findsOneWidget);
-    expect(store.loads, 1);
+    expect(store.baseUrlReads, 1);
+    expect(store.credentialReads, 1);
     expect(
       tester
           .widget<TextField>(find.byKey(SettingsScreen.urlFieldKey))

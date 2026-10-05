@@ -24,11 +24,8 @@ void main() {
       ),
     );
 
-    final loaded = await store.load();
-    expect(loaded, isNotNull);
-    expect(loaded!.baseUrl.toString(), 'http://10.0.0.9:9000');
-    expect(loaded.credentials?.deviceId, _creds.deviceId);
-    expect(loaded.credentials?.deviceToken, _creds.deviceToken);
+    expect((await store.loadBaseUrl()).toString(), 'http://10.0.0.9:9000');
+    expect(await store.loadCredentials(), _creds);
   });
 
   test('the stored address is normalised, not copied verbatim', () async {
@@ -71,32 +68,36 @@ void main() {
     );
   });
 
-  test('a build that only stored credentials reports nothing stored', () async {
-    // The upgrade case that has to keep working: `base_url` was never written,
-    // so load() must return null or bootstrap will think it has already been
-    // seeded and the build-time address can never take effect again.
+  test('a build that only stored credentials still yields them', () async {
+    // The upgrade case, and the reason the two halves are separate questions.
+    // `loadBaseUrl()` has to say "nothing" so seeding runs once — but
+    // `loadCredentials()` has to hand back the pair, or bootstrap would resolve
+    // a settings object with no credentials and *save* it, deleting a working
+    // device's identity.
     SharedPreferences.setMockInitialValues({
       SharedPrefsCredentialStore.deviceIdKey: _creds.deviceId,
       SharedPrefsCredentialStore.deviceTokenKey: _creds.deviceToken,
     });
+    final store = SharedPrefsSettingsStore();
 
-    expect(await SharedPrefsSettingsStore().load(), isNull);
+    expect(await store.loadBaseUrl(), isNull);
+    expect(await store.loadCredentials(), _creds);
   });
 
-  test(
-    'a stored address that no longer validates is treated as absent',
-    () async {
-      // Better to fall back to the build-time address than to dial something
-      // unusable on every retry.
-      SharedPreferences.setMockInitialValues({
-        SharedPrefsSettingsStore.baseUrlKey: 'http://',
-      });
+  test('a stored address that no longer validates reads as absent', () async {
+    // Better to fall back to the build-time address than to dial something
+    // unusable on every retry.
+    SharedPreferences.setMockInitialValues({
+      SharedPrefsSettingsStore.baseUrlKey: 'http://',
+    });
 
-      expect(await SharedPrefsSettingsStore().load(), isNull);
-    },
-  );
+    expect(await SharedPrefsSettingsStore().loadBaseUrl(), isNull);
+  });
 
   test('saving without credentials clears the stored pair', () async {
+    // The contract is replace, not merge — the settings screen's "clear
+    // credentials" button depends on it. Callers that only mean to add must
+    // resolve against what is stored first.
     SharedPreferences.setMockInitialValues({});
     final store = SharedPrefsSettingsStore();
     await store.save(
@@ -108,10 +109,8 @@ void main() {
 
     await store.save(ConnectionSettings(baseUrl: Uri.parse(defaultBaseUrl)));
 
-    final loaded = await store.load();
-    expect(loaded, isNotNull);
-    expect(loaded!.credentials, isNull);
-    expect(loaded.isProvisioned, isFalse);
+    expect(await store.loadCredentials(), isNull);
+    expect(await store.loadBaseUrl(), isNotNull);
   });
 
   test('clear removes both halves', () async {
@@ -126,7 +125,7 @@ void main() {
 
     await store.clear();
 
-    expect(await store.load(), isNull);
-    expect(await SharedPrefsCredentialStore().load(), isNull);
+    expect(await store.loadBaseUrl(), isNull);
+    expect(await store.loadCredentials(), isNull);
   });
 }

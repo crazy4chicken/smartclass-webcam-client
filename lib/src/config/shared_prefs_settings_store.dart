@@ -1,6 +1,7 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../backend/credential_store.dart';
+import '../backend/device_credentials.dart';
 import 'connection_settings.dart';
 import 'settings_store.dart';
 
@@ -28,7 +29,7 @@ class SharedPrefsSettingsStore implements SettingsStore {
       _preferences ??= await SharedPreferences.getInstance();
 
   @override
-  Future<ConnectionSettings?> load() async {
+  Future<Uri?> loadBaseUrl() async {
     final prefs = await _prefs;
     final raw = prefs.getString(baseUrlKey);
     if (raw == null || raw.isEmpty) return null;
@@ -36,13 +37,11 @@ class SharedPrefsSettingsStore implements SettingsStore {
     // A value that no longer validates is treated as absent: falling back to
     // the build-time address beats dialling something unusable on every retry.
     final validated = validateBaseUrl(raw);
-    if (!validated.isOk) return null;
-
-    return ConnectionSettings(
-      baseUrl: validated.uri!,
-      credentials: await _credentials.load(),
-    );
+    return validated.isOk ? validated.uri : null;
   }
+
+  @override
+  Future<DeviceCredentials?> loadCredentials() => _credentials.load();
 
   @override
   Future<void> save(ConnectionSettings settings) async {

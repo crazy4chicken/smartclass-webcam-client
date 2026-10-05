@@ -43,9 +43,21 @@ flutter run -d windows \
 ```
 
 `DEVICE_ID` / `DEVICE_TOKEN` 由管理面 `POST /api/devices` 下发，**不是客户端生成的**
-（`device_id` 是 26 字符 ULID，token 是 `wdt_` + 43 个 base64url 字符）。
+（`device_id` 是 26 字符 ULID，token 是 `wdt_` + 43 个 base64url 字符）：
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/devices \
+  -H 'Content-Type: application/json' --data '{"name":"教室A-前门"}'
+# 201 -> {"device": {"id": "01M45TRK…"}, "token": "wdt_KTKM…"}
+```
+
+⚠️ **令牌只在创建时返回这一次**（服务端只存 SHA-256）；丢了就
+`POST /api/devices/{id}/token` 轮换。**客户端里没有默认值**：凭据是服务端给这台设备的
+身份，硬编默认值会让整批设备在服务端互相踢。详见 `docs/android-setup.md` §5。
+
 用 `--dart-define` 传只是为了开发方便 —— 那是明文编译进二进制的；首次启动会把这三个值
 （地址 + 凭据）一起**播种**进 `SharedPrefsSettingsStore`，之后**一律以设备上保存的为准**。
+所以设备上那两个框空着是正常的，填上并保存即可。
 
 ### 运行时可配置后端参数（设置界面）
 
@@ -64,6 +76,11 @@ flutter run -d windows \
 - **保存时是换一个全新的 gateway 实例，不是改旧实例的 base**。因为 `401` 会让旧实例进入
   `_stopped = true` 的永久终态 —— 令牌填错一次之后，无论等多久都不会自己恢复。
   重建实例顺手把这个问题一起解决了（`tool/verify_pure.dart` 有专门的回归断言）。
+- **播种只补不删**。地址与凭据是**两个独立的问题**：老版本只写过 `device_id`/`device_token`、
+  没写过 `base_url`，如果把它们当一个值读出来，播种时算出的 settings 会不带凭据，
+  而 `save()` 的语义是"替换" → **升级后第一次启动就会把好设备的身份删掉**。
+  这个 bug 在真机上真的发生过，现在由 `loadBaseUrl()` / `loadCredentials()` 两个问题
+  加一条回归断言钉住。
 
 采集参数（fps / 分辨率 / 质量）**不在设置界面里**：它们不是"换个后端就要改"的东西，
 而且 fps 与分辨率是注册时 announce 的，改动必须连带重建 announcements。

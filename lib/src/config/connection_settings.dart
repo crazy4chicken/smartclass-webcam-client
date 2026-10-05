@@ -251,34 +251,38 @@ Uri? _parse(String raw) {
 
 /// Decides the settings a launch should actually use.
 ///
-/// Three layers, most specific first:
+/// The address and the credentials are resolved **separately**, and that is the
+/// point rather than a convenience. An install upgrading from a build that only
+/// stored credentials has no address to load; resolving the two halves together
+/// would then produce a settings object with no credentials, and saving it
+/// (which is what seeding does) would delete a working device's identity.
 ///
-/// * what an operator saved (**wins**),
-/// * what `--dart-define` seeded (used when nothing is saved),
-/// * [defaultBaseUrl] (the floor, used when the build value is unusable).
-///
-/// A stored address that no longer validates is treated as absent rather than
-/// trusted — better to fall back to the build value than to hand the gateway
-/// something it cannot dial.
+/// Each half follows the same precedence — what an operator saved wins, the
+/// build value seeds — with [defaultBaseUrl] as the floor for the address.
 ConnectionSettings resolveConnectionSettings({
-  ConnectionSettings? stored,
+  required Uri? storedBaseUrl,
+  required DeviceCredentials? storedCredentials,
   required String buildBaseUrl,
   required String buildDeviceId,
   required String buildDeviceToken,
 }) {
   final seeded = _seeded(buildBaseUrl, buildDeviceId, buildDeviceToken);
-  if (stored == null) return seeded;
 
-  final validated = validateBaseUrl(stored.baseUrl.toString());
-  if (!validated.isOk) return seeded;
+  var baseUrl = seeded.baseUrl;
+  if (storedBaseUrl != null) {
+    final validated = validateBaseUrl(storedBaseUrl.toString());
+    // A stored address that no longer validates is treated as absent rather
+    // than trusted — better to fall back to the build value than to hand the
+    // gateway something it cannot dial.
+    if (validated.isOk) baseUrl = validated.uri!;
+  }
 
-  final storedCredentials = stored.credentials;
-  return ConnectionSettings(
-    baseUrl: validated.uri!,
-    credentials: (storedCredentials != null && storedCredentials.isConfigured)
-        ? storedCredentials
-        : seeded.credentials,
-  );
+  final credentials =
+      (storedCredentials != null && storedCredentials.isConfigured)
+      ? storedCredentials
+      : seeded.credentials;
+
+  return ConnectionSettings(baseUrl: baseUrl, credentials: credentials);
 }
 
 ConnectionSettings _seeded(

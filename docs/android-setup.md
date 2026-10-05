@@ -105,6 +105,46 @@ flutter run -d <device-id> `
 `DEVICE_ID` / `DEVICE_TOKEN` 由管理面 `POST /api/devices` 下发（**不是客户端生成的**）。  
 首次启动后它们会写进 `shared_preferences`，之后不用再传。
 
+### 设备 ID / 令牌从哪来、为什么没有默认值
+
+**凭据是服务端给这台设备的身份，不是客户端生成的，所以客户端里不可能有默认值。**
+`AppConfig.deviceId` / `deviceToken` 是 `String.fromEnvironment('DEVICE_ID')` —— 没写
+`defaultValue`，不传 `--dart-define` 就是空串。设置界面里这两个框因此是空的，**这是正常的**。
+
+硬编一个默认值反而会坏事：一台设备一个身份，默认值会让整批设备都声称自己是同一台，
+在服务端互相踢（ticket 一次性，后到的把先到的挤下线，关闭码 `1008`），
+录制和照片也会归错设备。而且服务端**只存令牌的 SHA-256**，泄露的默认值救不回来，只能轮换。
+
+**做法：在跑服务端的那台机器上建设备，把两个值抄到设备上。**
+
+```bash
+# 1) 建设备（管理面，默认 :8080）
+curl -X POST http://127.0.0.1:8080/api/devices \
+  -H 'Content-Type: application/json' \
+  --data '{"name":"教室A-前门","location":"bench"}'
+```
+
+`201` 返回（实测）：
+
+```json
+{
+  "device": { "id": "01M45TRKMRNJBYX1Q1CWVXV330", "name": "教室A-前门", ... },
+  "token": "wdt_KTKMdd1bEbv3zklSza6PdRF27nC4h0AJgVJrvh51wbY"
+}
+```
+
+- **设备 ID = `device.id`** —— 26 字符 ULID。
+- **设备令牌 = `token`** —— `wdt_` + 43 字符，共 47。
+- ⚠️ **令牌只在创建时返回这一次。** `GET /api/devices/{id}/` 里没有它（服务端只存哈希）。
+  丢了就 `POST /api/devices/{id}/token` 轮换一张新的 —— 旧令牌立即失效。
+
+**2) 抄到设备上。** 屏幕左下角齿轮 → 填「后端地址 / 设备 ID / 设备令牌」→ 保存并重连。
+状态条应变成「已连接」；管理面 `GET /api/devices/{id}/` 显示 `online: true` 即成功。
+
+> 想省掉手抄：`--dart-define=DEVICE_ID=… --dart-define=DEVICE_TOKEN=…` 跑一次，
+> 首次启动会把它们连同地址一起播种进 store，之后以设备上的值为准。
+> 但那是**明文编进二进制**的，只适合开发。
+
 **只想验证编译 / 摄像头 / 预览**：加 `--dart-define=USE_MOCK_BACKEND=true`，  
 用内置假后端跑，不需要服务端也不需要凭据。这种模式下客户端会走完整的命令周期  
 （`start_recording` → `take_photo` → `stop_recording` → `ping`）。
@@ -169,7 +209,8 @@ flutter build apk --release --split-per-abi
 > `flutter test` 和 `dart run tool/verify_pure.dart`。
 
 1. 起服务端（见 `smartclass-webcam-server/docs/guide/getting-started`）。
-2. 管理面 `POST /api/devices` 建设备，拿到 `device_id` 与 `wdt_` token。
+2. 管理面 `POST /api/devices` 建设备 → 返回 `device.id` 与 `token`（详见 §5）。
+   在设备上的设置界面填进去即可，**不用重新打包**；或按 §5 的 `--dart-define` 方式播种一次。
 3. `flutter run -d <device-id> --dart-define=BASE_URL=… --dart-define=DEVICE_ID=… --dart-define=DEVICE_TOKEN=…`
 4. 状态条应显示「已连接 / 空闲」。
 5. 运营侧 `POST /api/devices/{id}/recording/start` → 状态条变「采集中」并显示 `stream_id`；  

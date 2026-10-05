@@ -1072,14 +1072,25 @@ void checkResolveConnectionSettings() {
 
   const buildUrl = 'http://192.168.1.20:8080';
 
-  final fromStore = resolveConnectionSettings(
-    stored: ConnectionSettings(
-      baseUrl: Uri.parse('http://10.0.0.9:9000'),
-      credentials: credentials,
-    ),
-    buildBaseUrl: buildUrl,
-    buildDeviceId: credentials.deviceId,
-    buildDeviceToken: credentials.deviceToken,
+  // Default parameter values have to be compile-time constants, so the build
+  // credential pair is passed explicitly wherever it matters.
+  ConnectionSettings resolve({
+    Uri? storedBaseUrl,
+    DeviceCredentials? storedCredentials,
+    String buildBaseUrl = buildUrl,
+    String buildDeviceId = '',
+    String buildDeviceToken = '',
+  }) => resolveConnectionSettings(
+    storedBaseUrl: storedBaseUrl,
+    storedCredentials: storedCredentials,
+    buildBaseUrl: buildBaseUrl,
+    buildDeviceId: buildDeviceId,
+    buildDeviceToken: buildDeviceToken,
+  );
+
+  final fromStore = resolve(
+    storedBaseUrl: Uri.parse('http://10.0.0.9:9000'),
+    storedCredentials: credentials,
   );
   eq(
     'what was saved wins',
@@ -1088,9 +1099,7 @@ void checkResolveConnectionSettings() {
   );
   eq('and its credentials come along', fromStore.credentials, credentials);
 
-  final seeded = resolveConnectionSettings(
-    stored: null,
-    buildBaseUrl: buildUrl,
+  final seeded = resolve(
     buildDeviceId: credentials.deviceId,
     buildDeviceToken: credentials.deviceToken,
   );
@@ -1103,11 +1112,9 @@ void checkResolveConnectionSettings() {
 
   // The store is only trusted if it still parses; otherwise the build value is
   // a better answer than an address nothing can dial.
-  final repaired = resolveConnectionSettings(
-    stored: ConnectionSettings(baseUrl: Uri.parse('http://')),
-    buildBaseUrl: buildUrl,
-    buildDeviceId: credentials.deviceId,
-    buildDeviceToken: credentials.deviceToken,
+  final repaired = resolve(
+    storedBaseUrl: Uri.parse('http://'),
+    storedCredentials: credentials,
   );
   eq(
     'an unusable saved address falls back to the build value',
@@ -1116,8 +1123,7 @@ void checkResolveConnectionSettings() {
   );
 
   // Neither layer has anything useful: the compiled-in default is the floor.
-  final floor = resolveConnectionSettings(
-    stored: null,
+  final floor = resolve(
     buildBaseUrl: '',
     buildDeviceId: '',
     buildDeviceToken: '',
@@ -1130,11 +1136,9 @@ void checkResolveConnectionSettings() {
   eq('with no credentials', floor.isProvisioned, false);
 
   // A saved address with no credentials keeps the address and takes the
-  // build-time pair, so an install that only ever stored credentials upgrades
-  // without losing either half.
-  final halfStored = resolveConnectionSettings(
-    stored: ConnectionSettings(baseUrl: Uri.parse('http://10.0.0.9:9000')),
-    buildBaseUrl: buildUrl,
+  // build-time pair.
+  final halfStored = resolve(
+    storedBaseUrl: Uri.parse('http://10.0.0.9:9000'),
     buildDeviceId: credentials.deviceId,
     buildDeviceToken: credentials.deviceToken,
   );
@@ -1148,6 +1152,30 @@ void checkResolveConnectionSettings() {
     halfStored.credentials,
     credentials,
   );
+
+  // **The upgrade case, and the bug this shape exists to prevent.** A build
+  // from before the settings store existed wrote `device_id` / `device_token`
+  // and no `base_url`. Loading the two halves as a single value would produce a
+  // settings object carrying no credentials — and seeding *saves* it, which
+  // means replace, which would delete a working device's identity on the first
+  // launch after the upgrade. Observed for real on the test phone.
+  final upgrade = resolve(
+    storedCredentials: credentials,
+    buildBaseUrl: '',
+    buildDeviceId: '',
+    buildDeviceToken: '',
+  );
+  eq(
+    'an upgrade that only has credentials keeps them',
+    upgrade.credentials,
+    credentials,
+  );
+  eq(
+    'and still gets an address to seed',
+    upgrade.baseUrl.toString(),
+    defaultBaseUrl,
+  );
+  eq('so the seed is provisioned', upgrade.isProvisioned, true);
 }
 
 void checkCredentials() {

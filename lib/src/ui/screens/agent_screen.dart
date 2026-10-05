@@ -115,17 +115,20 @@ class AgentScreen extends StatelessWidget {
     final onChanged = onConnectionChanged;
     if (store == null || onChanged == null) return;
 
-    // A form should start from what is saved, not from whatever the running
-    // session happens to hold; the coordinator is the fallback for the case
-    // where nothing has been persisted yet.
-    final stored = await store.load();
-    final initial = stored ?? coordinator.connection;
+    // A form should start from what is on disk; the coordinator's copy covers
+    // the mock-backend path, which never persists anything.
+    final live = coordinator.connection;
+    final storedBaseUrl = await store.loadBaseUrl();
+    final storedCredentials = await store.loadCredentials();
     if (!context.mounted) return;
 
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => SettingsScreen(
-          initial: initial,
+          initial: ConnectionSettings(
+            baseUrl: storedBaseUrl ?? live.baseUrl,
+            credentials: storedCredentials ?? live.credentials,
+          ),
           isRecording: status.isRecording,
           linkState: status.linkState,
           onSaved: onChanged,
