@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import '../backend/backend_gateway.dart';
-import '../backend/device_credentials.dart';
 import '../backend/protocol/device_command.dart';
 import '../backend/protocol/device_message.dart';
 import '../backend/unrecognized_command_log.dart';
@@ -12,6 +11,7 @@ import '../capture/camera_resolution.dart';
 import '../capture/camera_service.dart';
 import '../capture/frame_pump.dart';
 import '../capture/stream_settings.dart';
+import '../config/connection_settings.dart';
 import 'agent_status.dart';
 
 /// Builds the pump for one recording.
@@ -19,6 +19,22 @@ import 'agent_status.dart';
 /// A factory rather than an instance because a stream is created per
 /// `start_recording`, and a pump is bound to one stream for its whole life.
 typedef FramePumpFactory = FramePump Function();
+
+/// Builds a gateway for one set of connection settings.
+///
+/// A factory rather than an instance because changing servers means a **new**
+/// gateway, not a mutated one: `SmartClassBackendGateway` latches `_stopped`
+/// on a `401`, and a stopped instance never retries. Rebuilding is what makes
+/// "the token was wrong, here is the right one" recoverable at all.
+///
+/// The settings arrive as an **argument** rather than being captured from a
+/// mutable variable on purpose. With capture, "update the variable then apply"
+/// and "apply then update the variable" differ by one line and produce a
+/// ghost bug that reconnects to the old address, with no compile-time signal.
+/// Passing it in makes the ordering impossible to get wrong.
+typedef BackendGatewayFactory = BackendGateway Function(
+  ConnectionSettings connection,
+);
 
 /// Owns the camera, the command router and the frame push.
 ///
@@ -32,29 +48,34 @@ typedef FramePumpFactory = FramePump Function();
 /// [BackendGateway], and the camera behind [CameraProvider].
 class AgentCoordinator {
   AgentCoordinator({
-    required BackendGateway gateway,
+    required BackendGatewayFactory gatewayFactory,
     required CameraProvider cameraProvider,
     required FramePumpFactory pumpFactory,
-    DeviceCredentials? credentials,
+    required ConnectionSettings connection,
     CameraService? initialCamera,
     String? initialBackendId,
     CaptureConfig? config,
     StreamSettings? settings,
     void Function(String message)? log,
-  }) : _gateway = gateway,
+  }) : _gatewayFactory = gatewayFactory,
+       _connection = connection,
+       _gateway = gatewayFactory(connection),
        _cameraProvider = cameraProvider,
        _pumpFactory = pumpFactory,
-       _credentials = credentials,
        _camera = initialCamera,
        _backendId = initialBackendId,
        _config = config ?? CaptureConfig.defaults(),
        _settings = settings ?? StreamSettings.defaults(),
        _log = log;
 
-  final BackendGateway _gateway;
+  final BackendGatewayFactory _gatewayFactory;
   final CameraProvider _cameraProvider;
   final FramePumpFactory _pumpFactory;
-  final DeviceCredentials? _credentials;
+
+  /// Replaced wholesale by [reconfigure]; never mutated in place.
+  BackendGateway _gateway;
+
+  ConnectionSettings _connection;
 
   /// Where command outcomes go.
   ///
@@ -98,6 +119,9 @@ class AgentCoordinator {
   bool _paused = false;
 
   // --- read-only view -------------------------------------------------------
+
+  /// Where this device is currently pointed, and as whom.
+  ConnectionSettings get connection => _connection;
 
   LinkState get linkState => _linkState;
 
@@ -157,11 +181,7 @@ class AgentCoordinator {
     if (_started) return;
     _started = true;
 
-    _commandSub = _gateway.commands.listen(
-      (command) => unawaited(handleCommand(command)),
-    );
-    _linkSub = _gateway.states.listen(_onLinkState);
-    _errorSub = _gateway.errors.listen(_onGatewayError);
+    _bindGateway();
 
     if (_camera == null) {
       await _openCamera();
@@ -169,14 +189,12 @@ class AgentCoordinator {
       _bindHealth();
     }
 
-    final credentials = _credentials;
+    final credentials = _connection.credentials;
     if (credentials == null) {
       // Never crash a kiosk over a missing configuration. The camera is open
       // and previewing, and the status bar says exactly what is wrong.
       _linkState = LinkState.failed;
-      _lastError =
-          '未配置设备凭据。请用 --dart-define=DEVICE_ID=… DEVICE_TOKEN=… 启动，'
-          '或先由运营侧下发凭据。';
+      _lastError = '未配置设备凭据。请打开设置填写后端地址与设备凭据。';
       _emitStatus();
       return;
     }
@@ -197,6 +215,10 @@ class AgentCoordinator {
     if (_paused) return;
     _paused = true;
     await _stopRecording();
+    // Unbinding here is what keeps [reconfigure]-while-paused correct: the
+    // gateway can be swapped while backgrounded, and the subscriptions have to
+    // follow the new instance rather than the old one.
+    await _unbindGateway();
     await _camera?.release();
     await _gateway.stop();
     _linkState = LinkState.idle;
@@ -206,8 +228,9 @@ class AgentCoordinator {
   Future<void> resume() async {
     if (!_paused) return;
     _paused = false;
+    _bindGateway();
     await _openCamera();
-    final credentials = _credentials;
+    final credentials = _connection.credentials;
     if (credentials != null) {
       await _gateway.start(credentials);
       _linkState = _gateway.state;
@@ -217,13 +240,8 @@ class AgentCoordinator {
 
   Future<void> stop() async {
     await _stopRecording();
-    await _commandSub?.cancel();
-    await _linkSub?.cancel();
-    await _errorSub?.cancel();
+    await _unbindGateway();
     await _healthSub?.cancel();
-    _commandSub = null;
-    _linkSub = null;
-    _errorSub = null;
     _healthSub = null;
 
     await _camera?.release();
@@ -231,6 +249,44 @@ class AgentCoordinator {
     _linkState = LinkState.idle;
     _started = false;
     _emitStatus();
+  }
+
+  /// Swaps the backend address and/or the device credentials, then reconnects.
+  ///
+  /// **The caller must persist first.** Saving is the caller's job (it owns the
+  /// store), and doing it before this call means a power cut during the
+  /// reconnect still leaves the new settings on disk.
+  ///
+  /// A whole new gateway is built rather than the existing one re-pointed:
+  /// a gateway that was answered with `401` has latched `_stopped` and will
+  /// never retry, so "the token was mistyped, here is the right one" would
+  /// otherwise be unfixable without restarting the app.
+  Future<void> reconfigure(ConnectionSettings next) async {
+    _report('reconfigure → ${next.baseUrl}');
+
+    // Stop media first: the disconnect marks the stream `failed` server-side,
+    // so anything pushed after this point is thrown away.
+    await _stopRecording();
+    await _unbindGateway();
+    await _gateway.stop();
+
+    _connection = next;
+    _gateway = _gatewayFactory(next);
+    _framesSent = 0;
+    _lastError = null;
+
+    if (_paused) {
+      // The kiosk is in the background, so nothing may touch the camera or the
+      // network. `_started` is left alone deliberately: the session is still
+      // running, and `resume()` binds and starts the new gateway.
+      return;
+    }
+
+    _started = false;
+    // Deliberately routed through `start()` rather than wiring the link here:
+    // when credentials are missing, `start()` already has the complete
+    // "fail the link and say why" path. A second copy would drift from it.
+    await start();
   }
 
   Future<void> dispose() async {
@@ -486,6 +542,29 @@ class AgentCoordinator {
   }
 
   // --- link -----------------------------------------------------------------
+
+  /// Subscribes to the current gateway.
+  ///
+  /// Split out from [start] because [reconfigure] swaps the gateway underneath
+  /// and has to re-subscribe. Without the matching [unbindGateway] the old
+  /// subscriptions would still be live, and the same command would be handled
+  /// twice — which means two acks for one `id`.
+  void _bindGateway() {
+    _commandSub = _gateway.commands.listen(
+      (command) => unawaited(handleCommand(command)),
+    );
+    _linkSub = _gateway.states.listen(_onLinkState);
+    _errorSub = _gateway.errors.listen(_onGatewayError);
+  }
+
+  Future<void> _unbindGateway() async {
+    await _commandSub?.cancel();
+    await _linkSub?.cancel();
+    await _errorSub?.cancel();
+    _commandSub = null;
+    _linkSub = null;
+    _errorSub = null;
+  }
 
   void _onLinkState(LinkState state) {
     final wasLive = _linkState == LinkState.live;

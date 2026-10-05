@@ -5,9 +5,13 @@ import '../../agent/agent_coordinator.dart';
 import '../../agent/agent_status.dart';
 import '../../capture/camera_backend.dart';
 import '../../capture/camera_service.dart';
+import '../../config/connection_settings.dart';
+import '../../config/settings_store.dart';
 import '../widgets/camera_error_view.dart';
 import '../widgets/preview_toggle_button.dart';
+import '../widgets/settings_button.dart';
 import '../widgets/status_bar_overlay.dart';
+import 'settings_screen.dart';
 
 /// The kiosk screen: preview filling the screen, status strip on top, preview
 /// switch at the bottom.
@@ -21,9 +25,21 @@ import '../widgets/status_bar_overlay.dart';
 /// When no camera is usable the whole screen becomes [CameraErrorView] — never
 /// a white screen and never a crash.
 class AgentScreen extends StatelessWidget {
-  const AgentScreen({super.key, required this.coordinator});
+  const AgentScreen({
+    super.key,
+    required this.coordinator,
+    this.settingsStore,
+    this.onConnectionChanged,
+  });
 
   final AgentCoordinator coordinator;
+
+  /// Supplied together with [onConnectionChanged] by bootstrap. Both are
+  /// optional so a test can build the screen without a store — when either is
+  /// missing the settings entry point is simply not rendered.
+  final SettingsStore? settingsStore;
+
+  final Future<void> Function(ConnectionSettings next)? onConnectionChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -34,43 +50,87 @@ class AgentScreen extends StatelessWidget {
         final status = statusSnapshot.data ?? coordinator.status;
         final service = coordinator.cameraService;
 
-        if (service == null || !service.isInitialized) {
-          return CameraErrorView(
-            failure: coordinator.failure ?? const CameraFailure.noDevice(),
-            onRetry: coordinator.retryCamera,
-          );
-        }
+        final Widget body = (service == null || !service.isInitialized)
+            ? CameraErrorView(
+                failure: coordinator.failure ?? const CameraFailure.noDevice(),
+                onRetry: coordinator.retryCamera,
+              )
+            : Stack(
+                fit: StackFit.expand,
+                children: [
+                  ColoredBox(
+                    color: Colors.black,
+                    child: _PreviewArea(
+                      service: service,
+                      previewEnabled: status.previewEnabled,
+                    ),
+                  ),
+                  Align(
+                    alignment: Alignment.topCenter,
+                    child: StatusBarOverlay(status: status),
+                  ),
+                  // Bottom, not top: the Android system status bar sits in the
+                  // top-right corner and swallowed this control's tap target.
+                  Align(
+                    alignment: Alignment.bottomRight,
+                    child: SafeArea(
+                      top: false,
+                      minimum: const EdgeInsets.all(16),
+                      child: PreviewToggleButton(
+                        previewEnabled: status.previewEnabled,
+                        onToggle: coordinator.setPreviewEnabled,
+                      ),
+                    ),
+                  ),
+                ],
+              );
 
         return Stack(
           fit: StackFit.expand,
           children: [
-            ColoredBox(
-              color: Colors.black,
-              child: _PreviewArea(
-                service: service,
-                previewEnabled: status.previewEnabled,
-              ),
-            ),
-            Align(
-              alignment: Alignment.topCenter,
-              child: StatusBarOverlay(status: status),
-            ),
-            // Bottom, not top: the Android system status bar sits in the
-            // top-right corner and swallowed this control's tap target.
-            Align(
-              alignment: Alignment.bottomRight,
-              child: SafeArea(
-                top: false,
-                minimum: const EdgeInsets.all(16),
-                child: PreviewToggleButton(
-                  previewEnabled: status.previewEnabled,
-                  onToggle: coordinator.setPreviewEnabled,
+            body,
+            // Overlaid rather than placed inside either branch: an unconfigured
+            // device has to be fixable from the camera-error screen too, and
+            // that screen is exactly what a fresh install shows.
+            if (settingsStore != null && onConnectionChanged != null)
+              Align(
+                alignment: Alignment.bottomLeft,
+                child: SafeArea(
+                  top: false,
+                  minimum: const EdgeInsets.all(16),
+                  child: SettingsButton(
+                    showAlert: !coordinator.connection.isProvisioned,
+                    onPressed: () => _openSettings(context, status),
+                  ),
                 ),
               ),
-            ),
           ],
         );
       },
+    );
+  }
+
+  Future<void> _openSettings(BuildContext context, AgentStatus status) async {
+    final store = settingsStore;
+    final onChanged = onConnectionChanged;
+    if (store == null || onChanged == null) return;
+
+    // A form should start from what is saved, not from whatever the running
+    // session happens to hold; the coordinator is the fallback for the case
+    // where nothing has been persisted yet.
+    final stored = await store.load();
+    final initial = stored ?? coordinator.connection;
+    if (!context.mounted) return;
+
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => SettingsScreen(
+          initial: initial,
+          isRecording: status.isRecording,
+          linkState: status.linkState,
+          onSaved: onChanged,
+        ),
+      ),
     );
   }
 }

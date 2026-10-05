@@ -3,6 +3,24 @@ import 'package:flutter/material.dart';
 import '../../agent/agent_status.dart';
 import '../../backend/backend_gateway.dart';
 
+/// `已连接` / `重连中` / `未连接` / `链路失败`.
+///
+/// The wording matters: an operator has to be able to tell "retrying, wait"
+/// apart from "broken, intervene", and a rejected credential can never fix
+/// itself.
+///
+/// Top-level rather than private so the settings screen shows the same words —
+/// an operator comparing the two screens must not have to work out whether
+/// "链路失败" and "连接失败" mean the same thing.
+String linkStateLabel(LinkState state) => switch (state) {
+  LinkState.live => '已连接',
+  LinkState.registering => '注册中',
+  LinkState.attaching => '连接中',
+  LinkState.backoff => '重连中',
+  LinkState.failed => '链路失败',
+  LinkState.idle => '未连接',
+};
+
 /// Translucent status strip pinned to the top of the kiosk screen.
 ///
 /// Informational only — the preview switch lives at the bottom of the screen
@@ -101,19 +119,7 @@ class StatusBarOverlay extends StatelessWidget {
     );
   }
 
-  /// `已连接` / `重连中` / `未连接` / `链路失败`.
-  ///
-  /// The wording matters: an operator has to be able to tell "retrying, wait"
-  /// apart from "broken, intervene", and a rejected credential can never fix
-  /// itself.
-  String get _linkLabel => switch (status.linkState) {
-    LinkState.live => '已连接',
-    LinkState.registering => '注册中',
-    LinkState.attaching => '连接中',
-    LinkState.backoff => '重连中',
-    LinkState.failed => '链路失败',
-    LinkState.idle => '未连接',
-  };
+  String get _linkLabel => linkStateLabel(status.linkState);
 
   String get _captureLabel => switch (status.captureState) {
     CaptureState.recording => '采集中',

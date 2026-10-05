@@ -1,13 +1,19 @@
+import 'connection_settings.dart';
+
 /// Compile-time constants and capture defaults.
 ///
 /// Everything here is injected at build time via `--dart-define`, so the same
 /// binary can be pointed at a different server without touching code.
 ///
+/// These are **seed values only**: `SharedPrefsSettingsStore` takes precedence
+/// once an operator has saved settings on the device, so an install no longer
+/// needs a fresh build to change servers.
+///
 /// **Credentials do not belong here.** `DEVICE_ID` and `DEVICE_TOKEN` exist as
 /// a development convenience only: anything passed with `--dart-define` is
 /// baked into the binary in plain text. Production provisioning goes through
-/// the credential store (see `CredentialStore`), which persists what an
-/// operator supplied on first launch.
+/// the credential store (see `CredentialStore`) — or, on the device itself,
+/// through the settings screen.
 class AppConfig {
   const AppConfig._();
 
@@ -18,12 +24,18 @@ class AppConfig {
   /// the `websocket_path` the server returns, so a base path is preserved.
   ///
   /// Override with `--dart-define=BASE_URL=https://host:8443`.
+  ///
+  /// The default comes from [defaultBaseUrl] rather than a literal, so the
+  /// build-time value and the runtime fallback cannot drift apart.
   static const String baseUrl = String.fromEnvironment(
     'BASE_URL',
-    defaultValue: 'http://127.0.0.1:8080',
+    defaultValue: defaultBaseUrl,
   );
 
   /// Development-only device id (a 26-character ULID issued by the server).
+  ///
+  /// Used to seed the settings store on first launch; after that the device's
+  /// own saved credentials win.
   static const String deviceId = String.fromEnvironment('DEVICE_ID');
 
   /// Development-only device token (`wdt_` + 43 base64url characters).

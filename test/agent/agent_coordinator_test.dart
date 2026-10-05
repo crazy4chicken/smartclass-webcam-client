@@ -13,6 +13,7 @@ import 'package:webcam_client/src/capture/camera_provider.dart';
 import 'package:webcam_client/src/capture/camera_resolution.dart';
 import 'package:webcam_client/src/capture/camera_service.dart';
 import 'package:webcam_client/src/capture/frame_pump.dart';
+import 'package:webcam_client/src/config/connection_settings.dart';
 
 import '../support/doubles.dart';
 
@@ -38,6 +39,42 @@ class _StubBackend implements CameraBackend {
   Future<CameraService> open(CaptureConfig config) async => service;
 }
 
+/// A gateway double with the baseline behaviour every test wants: an empty,
+/// already-live link.
+MockGateway _stubbedGateway() {
+  final gateway = MockGateway();
+  when(() => gateway.commands).thenAnswer((_) => const Stream.empty());
+  when(() => gateway.states).thenAnswer((_) => const Stream.empty());
+  when(() => gateway.errors).thenAnswer((_) => const Stream.empty());
+  when(() => gateway.state).thenReturn(LinkState.live);
+  when(() => gateway.start(any())).thenAnswer((_) async {});
+  when(() => gateway.stop()).thenAnswer((_) async {});
+  return gateway;
+}
+
+/// Hands out a fresh gateway per call, recording what it was asked for.
+///
+/// A real factory has to build a new instance each time — re-pointing a gateway
+/// that latched `_stopped` on a `401` would never retry — so the double does
+/// the same and keeps the evidence.
+class _GatewayFactory {
+  _GatewayFactory({this.onBuild});
+
+  /// Lets a test customise the instance before the coordinator sees it.
+  final void Function(MockGateway gateway)? onBuild;
+
+  final List<ConnectionSettings> requested = <ConnectionSettings>[];
+  final List<MockGateway> built = <MockGateway>[];
+
+  BackendGateway call(ConnectionSettings connection) {
+    requested.add(connection);
+    final gateway = _stubbedGateway();
+    onBuild?.call(gateway);
+    built.add(gateway);
+    return gateway;
+  }
+}
+
 void main() {
   setUpAll(registerCommonFallbacks);
 
@@ -46,16 +83,9 @@ void main() {
   late MockFramePump pump;
 
   setUp(() {
-    gateway = MockGateway();
+    gateway = _stubbedGateway();
     camera = MockCameraService();
     pump = MockFramePump();
-
-    when(() => gateway.commands).thenAnswer((_) => const Stream.empty());
-    when(() => gateway.states).thenAnswer((_) => const Stream.empty());
-    when(() => gateway.errors).thenAnswer((_) => const Stream.empty());
-    when(() => gateway.state).thenReturn(LinkState.live);
-    when(() => gateway.start(any())).thenAnswer((_) async {});
-    when(() => gateway.stop()).thenAnswer((_) async {});
 
     when(() => camera.isInitialized).thenReturn(true);
     when(() => camera.cameraIndex).thenReturn(0);
@@ -81,10 +111,10 @@ void main() {
 
   /// A coordinator holding an already-open camera, the way bootstrap builds it.
   AgentCoordinator build({CameraService? service}) => AgentCoordinator(
-    gateway: gateway,
+    gatewayFactory: (_) => gateway,
     cameraProvider: CameraProvider(backends: [_StubBackend(service ?? camera)]),
     pumpFactory: () => pump,
-    credentials: testCredentials,
+    connection: testConnection,
     initialCamera: service ?? camera,
     initialBackendId: 'stub',
   );
@@ -312,9 +342,10 @@ void main() {
 
     test('missing credentials fail the link instead of crashing', () async {
       final coordinator = AgentCoordinator(
-        gateway: gateway,
+        gatewayFactory: (_) => gateway,
         cameraProvider: CameraProvider(backends: [_StubBackend(camera)]),
         pumpFactory: () => pump,
+        connection: ConnectionSettings(baseUrl: Uri.parse(defaultBaseUrl)),
         initialCamera: camera,
       );
 
@@ -375,6 +406,138 @@ void main() {
       verify(() => gateway.stop()).called(1);
       expect(coordinator.captureState, CaptureState.idle);
       expect(coordinator.activeStreamId, isNull);
+    });
+  });
+
+  group('reconfigure', () {
+    /// A coordinator built on a factory, so the swap can be observed.
+    ({AgentCoordinator coordinator, _GatewayFactory factory}) buildWithFactory({
+      void Function(MockGateway gateway)? onBuild,
+      ConnectionSettings? connection,
+    }) {
+      final factory = _GatewayFactory(onBuild: onBuild);
+      final coordinator = AgentCoordinator(
+        gatewayFactory: factory,
+        cameraProvider: CameraProvider(backends: [_StubBackend(camera)]),
+        pumpFactory: () => pump,
+        connection: connection ?? testConnection,
+        initialCamera: camera,
+        initialBackendId: 'stub',
+      );
+      return (coordinator: coordinator, factory: factory);
+    }
+
+    test('swaps the gateway rather than mutating it', () async {
+      final h = buildWithFactory();
+      await h.coordinator.start();
+
+      expect(h.factory.built, hasLength(1));
+      final first = h.factory.built.single;
+
+      final moved = ConnectionSettings(
+        baseUrl: Uri.parse('http://10.0.0.9:9000'),
+        credentials: testCredentials,
+      );
+      await h.coordinator.reconfigure(moved);
+
+      expect(h.factory.built, hasLength(2));
+      expect(
+        h.factory.requested.last.baseUrl.toString(),
+        'http://10.0.0.9:9000',
+        reason: 'the new instance must be built for the new address',
+      );
+      verify(() => first.stop()).called(1);
+      verify(() => h.factory.built.last.start(any())).called(1);
+      expect(
+        h.coordinator.connection.baseUrl.toString(),
+        'http://10.0.0.9:9000',
+      );
+      expect(h.coordinator.linkState, LinkState.live);
+    });
+
+    test('cuts a live recording and resets the frame counter', () async {
+      final h = buildWithFactory();
+      await h.coordinator.start();
+      await h.coordinator.handleCommand(
+        const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: 's'),
+      );
+      expect(h.coordinator.captureState, CaptureState.recording);
+
+      await h.coordinator.reconfigure(testConnection);
+
+      verify(() => pump.stop()).called(1);
+      expect(h.coordinator.captureState, CaptureState.idle);
+      expect(h.coordinator.activeStreamId, isNull);
+      expect(h.coordinator.framesSent, 0);
+    });
+
+    test('the retired gateway can no longer be heard', () async {
+      // Each instance gets its own error stream, so the test can talk to the
+      // retired one specifically.
+      final errors = <StreamController<String>>[];
+      final h = buildWithFactory(
+        onBuild: (g) {
+          final controller = StreamController<String>();
+          errors.add(controller);
+          when(() => g.errors).thenAnswer((_) => controller.stream);
+        },
+      );
+      await h.coordinator.start();
+
+      await h.coordinator.reconfigure(testConnection);
+      expect(errors, hasLength(2));
+
+      // Two live subscriptions would mean the same command handled twice, and
+      // therefore two acks for one id.
+      errors.first.add('from the retired gateway');
+      await pumpEventQueue();
+      expect(h.coordinator.status.lastError, isNull);
+
+      errors.last.add('from the live gateway');
+      await pumpEventQueue();
+      expect(h.coordinator.status.lastError, 'from the live gateway');
+
+      unawaited(errors.first.close());
+      unawaited(errors.last.close());
+    });
+
+    test(
+      'missing credentials fail the link and point at the settings screen',
+      () async {
+        final h = buildWithFactory();
+        await h.coordinator.start();
+
+        await h.coordinator.reconfigure(
+          ConnectionSettings(baseUrl: Uri.parse(defaultBaseUrl)),
+        );
+
+        expect(h.coordinator.linkState, LinkState.failed);
+        expect(h.coordinator.status.lastError, contains('设置'));
+        verifyNever(() => h.factory.built.last.start(any()));
+      },
+    );
+
+    test('a terminal 401 is recovered by the new instance', () async {
+      // The real gateway latches `_stopped` on a 401 and never retries, so a
+      // setter on the old instance could never bring it back. This is the test
+      // that guards the "rebuild, don't mutate" decision.
+      final states = StreamController<LinkState>();
+      final h = buildWithFactory(
+        onBuild: (g) => when(() => g.states).thenAnswer((_) => states.stream),
+      );
+      await h.coordinator.start();
+
+      states.add(LinkState.failed);
+      await pumpEventQueue();
+      expect(h.coordinator.linkState, LinkState.failed);
+
+      await h.coordinator.reconfigure(testConnection);
+
+      expect(h.factory.built, hasLength(2));
+      expect(h.coordinator.linkState, isNot(LinkState.failed));
+      expect(h.coordinator.linkState, LinkState.live);
+
+      unawaited(states.close());
     });
   });
 

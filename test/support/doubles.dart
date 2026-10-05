@@ -12,11 +12,20 @@ import 'package:webcam_client/src/backend/smartclass_backend_gateway.dart';
 import 'package:webcam_client/src/capture/camera_backend.dart';
 import 'package:webcam_client/src/capture/camera_service.dart';
 import 'package:webcam_client/src/capture/frame_pump.dart';
+import 'package:webcam_client/src/config/connection_settings.dart';
 
 /// A credential pair of the shape the server issues.
 const DeviceCredentials testCredentials = DeviceCredentials(
   deviceId: '01J8ZK9WQ7X3YV0M4N5P6Q7R8S',
   deviceToken: 'wdt_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+);
+
+/// A provisioned connection pointing at the built-in default address.
+///
+/// Not `const` because `Uri.parse` is not — hence `final`.
+final ConnectionSettings testConnection = ConnectionSettings(
+  baseUrl: Uri.parse(defaultBaseUrl),
+  credentials: testCredentials,
 );
 
 /// A 64-character lowercase hex ticket, as `GET /ws/register` returns.

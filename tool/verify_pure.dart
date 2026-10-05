@@ -41,6 +41,7 @@ import 'package:webcam_client/src/capture/resolution_selector.dart';
 import 'package:webcam_client/src/capture/serial_lock.dart';
 import 'package:webcam_client/src/capture/stream_settings.dart';
 import 'package:webcam_client/src/capture/video_encoder.dart';
+import 'package:webcam_client/src/config/connection_settings.dart';
 
 // --- harness ----------------------------------------------------------------
 
@@ -92,6 +93,12 @@ const DeviceCredentials credentials = DeviceCredentials(
 final String ticket64 = List<String>.filled(64, 'b').join();
 
 const String streamId = '01J8ZKQ3B5N7P9R1T3V5X7Z9B2';
+
+/// A provisioned connection pointing at the built-in default address.
+final ConnectionSettings testConnection = ConnectionSettings(
+  baseUrl: Uri.parse(defaultBaseUrl),
+  credentials: credentials,
+);
 
 const CameraAnnouncement cameraAnnouncement = CameraAnnouncement(
   cameraEnum: 0,
@@ -329,6 +336,23 @@ class _FakeGateway implements BackendGateway {
   }
 
   List<AckMessage> get acks => sent.whereType<AckMessage>().toList();
+}
+
+/// Hands out a fresh gateway per call, recording what it was asked for.
+///
+/// A real factory has to produce a new instance each time — re-pointing a
+/// gateway that latched `_stopped` on a `401` would never retry — so the double
+/// does the same and keeps the evidence.
+class _FakeGatewayFactory {
+  final List<ConnectionSettings> requested = <ConnectionSettings>[];
+  final List<_FakeGateway> built = <_FakeGateway>[];
+
+  BackendGateway call(ConnectionSettings connection) {
+    requested.add(connection);
+    final gateway = _FakeGateway();
+    built.add(gateway);
+    return gateway;
+  }
 }
 
 class _FakeSink implements ChannelSink {
@@ -793,6 +817,333 @@ void checkBinaryFraming() {
       return false;
     }
   }());
+}
+
+// --- runtime connection settings --------------------------------------------
+
+void checkBaseUrlValidation() {
+  section('base url validation');
+
+  BaseUrlValidation ok(String raw) {
+    final result = validateBaseUrl(raw);
+    check('"$raw" is accepted  (problem: ${result.problem})', result.isOk);
+    return result;
+  }
+
+  BaseUrlProblem bad(String raw) {
+    final result = validateBaseUrl(raw);
+    check('"$raw" is rejected', !result.isOk);
+    return result.problem!;
+  }
+
+  eq('empty', bad(''), BaseUrlProblem.empty);
+  eq('whitespace only', bad('   '), BaseUrlProblem.empty);
+
+  eq(
+    'a plain origin',
+    ok('http://127.0.0.1:8080').uri!.toString(),
+    'http://127.0.0.1:8080',
+  );
+  eq(
+    'a trailing slash is dropped',
+    ok('http://127.0.0.1:8080/').uri!.toString(),
+    'http://127.0.0.1:8080',
+  );
+  // The case this whole layer exists for: nobody types a URI, they type an
+  // address. Dart will not even parse this one — a scheme may not start with a
+  // digit — so it has to survive a failed parse.
+  eq(
+    'a bare host:port gets http://',
+    ok('192.168.1.20:8080').uri!.toString(),
+    'http://192.168.1.20:8080',
+  );
+  // Dart *does* parse this, as scheme `localhost` with path `8080`.
+  eq(
+    'localhost:port gets http://',
+    ok('localhost:8080').uri!.toString(),
+    'http://localhost:8080',
+  );
+  eq(
+    'a bare hostname gets http://',
+    ok('cameras.test').uri!.toString(),
+    'http://cameras.test',
+  );
+  eq(
+    'surrounding whitespace is trimmed',
+    ok('  http://cameras.test  ').uri!.toString(),
+    'http://cameras.test',
+  );
+  eq(
+    'https is preserved',
+    ok('https://cameras.test').uri!.toString(),
+    'https://cameras.test',
+  );
+  // `toWebSocketUri` only accepts http(s), so leaving `ws://` in place would
+  // point the *registration* call at a WebSocket address.
+  eq(
+    'ws is folded to http',
+    ok('ws://cameras.test:8080').uri!.toString(),
+    'http://cameras.test:8080',
+  );
+  eq(
+    'wss is folded to https',
+    ok('wss://cameras.test').uri!.toString(),
+    'https://cameras.test',
+  );
+  // Without this, `HTTPS://Host` and `https://host` look like a change and cost
+  // a pointless reconnect.
+  eq(
+    'scheme and host are lower-cased',
+    ok('HTTPS://Cameras.Test:8443').uri!.toString(),
+    'https://cameras.test:8443',
+  );
+  eq(
+    'a sub-path is preserved',
+    ok('http://host:8080/base/').uri!.toString(),
+    'http://host:8080/base',
+  );
+  eq(
+    'a sub-path without a trailing slash is preserved',
+    ok('http://host:8080/base').uri!.toString(),
+    'http://host:8080/base',
+  );
+
+  eq(
+    'ftp is a bad scheme',
+    bad('ftp://cameras.test'),
+    BaseUrlProblem.badScheme,
+  );
+  eq(
+    'a dropped slash leaves no host',
+    bad('https:/cameras.test'),
+    BaseUrlProblem.noHost,
+  );
+  eq('http:// alone has no host', bad('http://'), BaseUrlProblem.noHost);
+  eq(
+    'a query is refused',
+    bad('http://cameras.test?a=1'),
+    BaseUrlProblem.hasQuery,
+  );
+  eq(
+    'a fragment is refused',
+    bad('http://cameras.test#x'),
+    BaseUrlProblem.hasFragment,
+  );
+  eq(
+    'a URL carrying a password is refused',
+    bad('http://user:pass@cameras.test'),
+    BaseUrlProblem.hasUserInfo,
+  );
+  // Dart round-trips an out-of-range port without complaint and only fails
+  // later, inside the HTTP client, so it has to be caught here.
+  eq(
+    'an out-of-range port is refused',
+    bad('http://cameras.test:99999999999'),
+    BaseUrlProblem.notAbsolute,
+  );
+  eq(
+    'an unparseable string is refused',
+    bad('http://[::bad'),
+    BaseUrlProblem.notAbsolute,
+  );
+
+  // Every problem code has to be reachable with wording an installer can act
+  // on, or the field would go silent exactly when it matters.
+  check(
+    'every problem carries a message',
+    BaseUrlProblem.values.every((p) {
+      final sample = switch (p) {
+        BaseUrlProblem.empty => '',
+        BaseUrlProblem.notAbsolute => 'http://[::bad',
+        BaseUrlProblem.badScheme => 'ftp://host',
+        BaseUrlProblem.noHost => 'http://',
+        BaseUrlProblem.hasUserInfo => 'http://u:p@host',
+        BaseUrlProblem.hasQuery => 'http://host?a',
+        BaseUrlProblem.hasFragment => 'http://host#a',
+      };
+      final result = validateBaseUrl(sample);
+      return result.problem == p && result.message.isNotEmpty;
+    }),
+  );
+  eq('a valid url has no message', ok('http://host').message, '');
+}
+
+void checkConnectionSettings() {
+  section('connection settings');
+
+  final unprovisioned = ConnectionSettings(
+    baseUrl: Uri.parse('http://127.0.0.1:8080'),
+  );
+  eq(
+    'no credentials means not provisioned',
+    unprovisioned.isProvisioned,
+    false,
+  );
+  eq('and nothing to shape-check', unprovisioned.looksValid, false);
+
+  final provisioned = unprovisioned.copyWith(credentials: credentials);
+  eq('copyWith adds credentials', provisioned.isProvisioned, true);
+  eq(
+    'and leaves the address alone',
+    provisioned.baseUrl,
+    unprovisioned.baseUrl,
+  );
+
+  final cleared = provisioned.copyWith(clearCredentials: true);
+  eq('clearCredentials removes them', cleared.credentials, null);
+  eq('but keeps the address', cleared.baseUrl, provisioned.baseUrl);
+
+  final moved = provisioned.copyWith(
+    baseUrl: Uri.parse('http://10.0.0.9:9000'),
+  );
+  eq(
+    'copyWith replaces the address',
+    moved.baseUrl.toString(),
+    'http://10.0.0.9:9000',
+  );
+  eq('and keeps the credentials', moved.credentials, credentials);
+
+  eq(
+    'the same values are the same endpoint',
+    provisioned.hasSameEndpoint(
+      ConnectionSettings(
+        baseUrl: Uri.parse('http://127.0.0.1:8080'),
+        credentials: credentials,
+      ),
+    ),
+    true,
+  );
+  eq(
+    'a trailing slash is the same endpoint',
+    provisioned.hasSameEndpoint(
+      ConnectionSettings(
+        baseUrl: Uri.parse('http://127.0.0.1:8080/'),
+        credentials: credentials,
+      ),
+    ),
+    true,
+  );
+  eq(
+    'letter case is the same endpoint',
+    ConnectionSettings(baseUrl: Uri.parse('https://Cameras.Test:8443'))
+        .hasSameEndpoint(
+          ConnectionSettings(baseUrl: Uri.parse('https://cameras.test:8443')),
+        ),
+    true,
+  );
+  eq(
+    'a different port is a different endpoint',
+    provisioned.hasSameEndpoint(
+      ConnectionSettings(
+        baseUrl: Uri.parse('http://127.0.0.1:9000'),
+        credentials: credentials,
+      ),
+    ),
+    false,
+  );
+  eq(
+    'a different credential is a different endpoint',
+    provisioned.hasSameEndpoint(unprovisioned),
+    false,
+  );
+
+  final sameAgain = ConnectionSettings(
+    baseUrl: Uri.parse('http://127.0.0.1:8080/'),
+    credentials: credentials,
+  );
+  eq('== follows the endpoint', provisioned == sameAgain, true);
+  eq('hashCode follows too', provisioned.hashCode == sameAgain.hashCode, true);
+  check(
+    'toString never leaks the token',
+    !provisioned.toString().contains('wdt_'),
+  );
+  check(
+    'toString still names the address',
+    provisioned.toString().contains('127.0.0.1:8080'),
+  );
+}
+
+void checkResolveConnectionSettings() {
+  section('resolve connection settings');
+
+  const buildUrl = 'http://192.168.1.20:8080';
+
+  final fromStore = resolveConnectionSettings(
+    stored: ConnectionSettings(
+      baseUrl: Uri.parse('http://10.0.0.9:9000'),
+      credentials: credentials,
+    ),
+    buildBaseUrl: buildUrl,
+    buildDeviceId: credentials.deviceId,
+    buildDeviceToken: credentials.deviceToken,
+  );
+  eq(
+    'what was saved wins',
+    fromStore.baseUrl.toString(),
+    'http://10.0.0.9:9000',
+  );
+  eq('and its credentials come along', fromStore.credentials, credentials);
+
+  final seeded = resolveConnectionSettings(
+    stored: null,
+    buildBaseUrl: buildUrl,
+    buildDeviceId: credentials.deviceId,
+    buildDeviceToken: credentials.deviceToken,
+  );
+  eq(
+    'an empty store is seeded from the build value',
+    seeded.baseUrl.toString(),
+    buildUrl,
+  );
+  eq('and so are the credentials', seeded.credentials, credentials);
+
+  // The store is only trusted if it still parses; otherwise the build value is
+  // a better answer than an address nothing can dial.
+  final repaired = resolveConnectionSettings(
+    stored: ConnectionSettings(baseUrl: Uri.parse('http://')),
+    buildBaseUrl: buildUrl,
+    buildDeviceId: credentials.deviceId,
+    buildDeviceToken: credentials.deviceToken,
+  );
+  eq(
+    'an unusable saved address falls back to the build value',
+    repaired.baseUrl.toString(),
+    buildUrl,
+  );
+
+  // Neither layer has anything useful: the compiled-in default is the floor.
+  final floor = resolveConnectionSettings(
+    stored: null,
+    buildBaseUrl: '',
+    buildDeviceId: '',
+    buildDeviceToken: '',
+  );
+  eq(
+    'an unusable build value lands on the default',
+    floor.baseUrl.toString(),
+    defaultBaseUrl,
+  );
+  eq('with no credentials', floor.isProvisioned, false);
+
+  // A saved address with no credentials keeps the address and takes the
+  // build-time pair, so an install that only ever stored credentials upgrades
+  // without losing either half.
+  final halfStored = resolveConnectionSettings(
+    stored: ConnectionSettings(baseUrl: Uri.parse('http://10.0.0.9:9000')),
+    buildBaseUrl: buildUrl,
+    buildDeviceId: credentials.deviceId,
+    buildDeviceToken: credentials.deviceToken,
+  );
+  eq(
+    'a saved address still wins',
+    halfStored.baseUrl.toString(),
+    'http://10.0.0.9:9000',
+  );
+  eq(
+    'and the build credentials fill the gap',
+    halfStored.credentials,
+    credentials,
+  );
 }
 
 void checkCredentials() {
@@ -1820,12 +2171,12 @@ Future<void> checkCoordinator() async {
     if (!initialized) camera.release();
 
     final coordinator = AgentCoordinator(
-      gateway: gateway,
+      gatewayFactory: (_) => gateway,
       cameraProvider: CameraProvider(
         backends: <CameraBackend>[_FakeBackend('stub', probeResult: _okProbe)],
       ),
       pumpFactory: () => pump,
-      credentials: credentials,
+      connection: testConnection,
       initialCamera: camera,
       initialBackendId: 'stub',
     );
@@ -2140,11 +2491,12 @@ Future<void> checkCoordinator() async {
   {
     final gateway = _FakeGateway();
     final coordinator = AgentCoordinator(
-      gateway: gateway,
+      gatewayFactory: (_) => gateway,
       cameraProvider: CameraProvider(
         backends: <CameraBackend>[_FakeBackend('stub', probeResult: _okProbe)],
       ),
       pumpFactory: () => _FakeFramePump(),
+      connection: ConnectionSettings(baseUrl: Uri.parse(defaultBaseUrl)),
       initialCamera: _FakeCameraService(bytes: Uint8List(0)),
     );
     await coordinator.start();
@@ -2159,12 +2511,12 @@ Future<void> checkCoordinator() async {
     final gateway = _FakeGateway();
     final lines = <String>[];
     final coordinator = AgentCoordinator(
-      gateway: gateway,
+      gatewayFactory: (_) => gateway,
       cameraProvider: CameraProvider(
         backends: <CameraBackend>[_FakeBackend('stub', probeResult: _okProbe)],
       ),
       pumpFactory: () => _FakeFramePump(),
-      credentials: credentials,
+      connection: testConnection,
       initialCamera: _FakeCameraService(bytes: Uint8List.fromList([1])),
       log: lines.add,
     );
@@ -2211,6 +2563,161 @@ Future<void> checkCoordinator() async {
     eq('the gateway was stopped', h.gateway.stopCalls, 1);
     eq('the state is idle', h.coordinator.captureState, CaptureState.idle);
   }
+
+  // reconfigure swaps the gateway rather than mutating it
+  {
+    final factory = _FakeGatewayFactory();
+    final pump = _FakeFramePump();
+    final camera = _FakeCameraService(bytes: Uint8List.fromList([1]));
+    final coordinator = AgentCoordinator(
+      gatewayFactory: factory,
+      cameraProvider: CameraProvider(
+        backends: <CameraBackend>[_FakeBackend('stub', probeResult: _okProbe)],
+      ),
+      pumpFactory: () => pump,
+      connection: testConnection,
+      initialCamera: camera,
+      initialBackendId: 'stub',
+    );
+    await coordinator.start();
+
+    eq('the factory was asked once', factory.requested.length, 1);
+    final first = factory.built.single;
+    eq('and produced the live gateway', first.startCalls, 1);
+
+    await coordinator.handleCommand(
+      const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: streamId),
+    );
+    pump.emit(
+      CapturedFrame(seq: 0, ts: DateTime.utc(2026), bytes: Uint8List(4)),
+    );
+    await settle();
+    eq('a frame went out', coordinator.framesSent, 1);
+
+    final moved = ConnectionSettings(
+      baseUrl: Uri.parse('http://10.0.0.9:9000'),
+      credentials: credentials,
+    );
+    await coordinator.reconfigure(moved);
+
+    eq('a second gateway was built', factory.built.length, 2);
+    eq(
+      'with the new address',
+      factory.requested.last.baseUrl.toString(),
+      'http://10.0.0.9:9000',
+    );
+    eq('the old gateway was stopped', first.stopCalls, 1);
+    eq('the new gateway was started', factory.built.last.startCalls, 1);
+    eq('the recording was cut', pump.stopCalls, 1);
+    eq(
+      'the capture state is idle',
+      coordinator.captureState,
+      CaptureState.idle,
+    );
+    eq('the frame counter is reset', coordinator.framesSent, 0);
+    eq(
+      'the coordinator reports the new address',
+      coordinator.connection.baseUrl.toString(),
+      'http://10.0.0.9:9000',
+    );
+    eq('and the link came back up', coordinator.linkState, LinkState.live);
+  }
+
+  // the old gateway's events must not be handled after the swap
+  {
+    final factory = _FakeGatewayFactory();
+    final coordinator = AgentCoordinator(
+      gatewayFactory: factory,
+      cameraProvider: CameraProvider(
+        backends: <CameraBackend>[_FakeBackend('stub', probeResult: _okProbe)],
+      ),
+      pumpFactory: () => _FakeFramePump(),
+      connection: testConnection,
+      initialCamera: _FakeCameraService(bytes: Uint8List(0)),
+    );
+    await coordinator.start();
+    final old = factory.built.single;
+
+    await coordinator.reconfigure(testConnection);
+    final current = factory.built.last;
+
+    // A command arriving on the retired gateway would be handled a second time,
+    // which means two acks for one id.
+    old.emitError('from the retired gateway');
+    old.setState(LinkState.backoff);
+    await settle();
+    eq(
+      'the retired gateway cannot report errors',
+      coordinator.status.lastError,
+      null,
+    );
+    eq('nor change the link state', coordinator.linkState, LinkState.live);
+
+    current.emitError('from the live gateway');
+    await settle();
+    eq(
+      'but the live one can',
+      coordinator.status.lastError,
+      'from the live gateway',
+    );
+  }
+
+  // no credentials means the link fails and points at the settings screen
+  {
+    final factory = _FakeGatewayFactory();
+    final coordinator = AgentCoordinator(
+      gatewayFactory: factory,
+      cameraProvider: CameraProvider(
+        backends: <CameraBackend>[_FakeBackend('stub', probeResult: _okProbe)],
+      ),
+      pumpFactory: () => _FakeFramePump(),
+      connection: testConnection,
+      initialCamera: _FakeCameraService(bytes: Uint8List(0)),
+    );
+    await coordinator.start();
+    await coordinator.reconfigure(
+      ConnectionSettings(baseUrl: Uri.parse(defaultBaseUrl)),
+    );
+
+    eq('the link fails', coordinator.linkState, LinkState.failed);
+    eq(
+      'and the message names the settings screen',
+      coordinator.status.lastError!.contains('设置'),
+      true,
+    );
+    eq('the gateway was never started', factory.built.last.startCalls, 0);
+  }
+
+  // a 401 is terminal, so only a new instance can recover it
+  {
+    final factory = _FakeGatewayFactory();
+    final coordinator = AgentCoordinator(
+      gatewayFactory: factory,
+      cameraProvider: CameraProvider(
+        backends: <CameraBackend>[_FakeBackend('stub', probeResult: _okProbe)],
+      ),
+      pumpFactory: () => _FakeFramePump(),
+      connection: testConnection,
+      initialCamera: _FakeCameraService(bytes: Uint8List(0)),
+    );
+    await coordinator.start();
+
+    // `SmartClassBackendGateway` latches `_stopped` on a 401 and never retries;
+    // the fake stands in for that terminal state.
+    factory.built.single.setState(LinkState.failed);
+    await settle();
+    eq('the link is terminal', coordinator.linkState, LinkState.failed);
+
+    await coordinator.reconfigure(testConnection);
+
+    eq('a fresh instance was built', factory.built.length, 2);
+    eq(
+      'and it recovered the link',
+      coordinator.linkState != LinkState.failed,
+      true,
+    );
+    eq('the link is live', coordinator.linkState, LinkState.live);
+  }
 }
 
 Future<void> main() async {
@@ -2220,6 +2727,9 @@ Future<void> main() async {
   checkCommandParsing();
   checkDeviceMessages();
   checkBinaryFraming();
+  checkBaseUrlValidation();
+  checkConnectionSettings();
+  checkResolveConnectionSettings();
   checkCredentials();
   checkRegistrationRequest();
   checkUriHelpers();
