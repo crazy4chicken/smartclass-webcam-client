@@ -163,7 +163,13 @@ flutter build apk --release --split-per-abi
 
 ## 10. 真后端联调步骤
 
-服务端默认监听 `:8080`。协议权威文档在 `smartclass-webcam-server/docs/protocol/`。
+服务端默认监听 `:8080`。协议权威文档在**后端仓库**的 `smartclass-webcam-server/docs/protocol/`。
+
+> **服务端是另一个仓库**，不属于本仓库。工作区里若有一份 `smartclass-webcam-server/`，
+> 那只是本地测试用的检出（已被 gitignore）。客户端对它是**网络依赖，不是路径依赖** ——
+> 唯一的耦合点是 `AppConfig.baseUrl`（默认 `http://127.0.0.1:8080`，可用
+> `--dart-define=BASE_URL=` 覆盖）。把那份检出删掉，客户端照样构建、照样跑
+> `flutter test` 和 `dart run tool/verify_pure.dart`。
 
 1. 起服务端（见 `smartclass-webcam-server/docs/guide/getting-started`）。
 2. 管理面 `POST /api/devices` 建设备，拿到 `device_id` 与 `wdt_` token。

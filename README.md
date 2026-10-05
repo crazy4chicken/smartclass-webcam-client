@@ -9,6 +9,18 @@
 **协议权威文档**是后端仓库的 `smartclass-webcam-server/docs/protocol/`
 （index / registration / transport / control / media），本客户端逐条对齐。
 
+> ### 服务端是**另一个仓库**，不是本仓库的一部分
+>
+> 本仓库**只包含客户端**。`smartclass-webcam-server/` 若出现在工作区里，那只是一份
+> **本地测试用的检出**，并且**已被 `.gitignore` 忽略**（本仓库 0 个文件跟踪它）——
+> 删掉它，`flutter pub get` / `flutter test` / `flutter build` / `dart run tool/verify_pure.dart`
+> 全部照常工作。
+>
+> 客户端对服务端**没有任何路径依赖**，只有**网络依赖**：`AppConfig.baseUrl`
+> （默认 `http://127.0.0.1:8080`）是唯一的耦合点，且可以在编译期用 `--dart-define=BASE_URL=`
+> 改掉。代码里所有 `smartclass-webcam-server` 的出现都只是**注释里引用的文档出处**，
+> 不是路径。
+
 ## 平台
 
 Windows / macOS / Linux / iOS / Android 单代码库覆盖。桌面三端由 `camera` + `camera_desktop`
@@ -185,6 +197,10 @@ switch_camera(camera=1) →
 运营侧无从察觉。**明确拒绝比静默失败好。** 停流后切换正常（实测 64ms）。
 
 ## 端到端联调环境
+
+> 这一节讲的都是**本地临时搭的东西**，不是本仓库的组成部分。
+> 服务端仓库、PG 集群、S3 替身都放在工作区外（`smartclass-webcam-server/` 那一份检出已被
+> gitignore），随时可以整个删掉，不影响客户端构建与自测。
 
 完整步骤在 `docs/superpowers/plans/2026-10-04-android-server-e2e-test.md`，Android 侧细节在
 `docs/android-setup.md`。这里只记**踩过的环境坑**，因为它们会让"跑不起来"看起来像代码问题。
