@@ -148,6 +148,11 @@ Future<void> _bootstrap() async {
     initialCamera: camera,
     initialBackendId: openResult.backendId,
     settings: settings,
+    // The server never waits for an ack and records nothing about most
+    // commands, so the console is the only place a refusal is visible. Without
+    // this, a device that acks `ok:false` looks identical to one that ignored
+    // the command entirely.
+    log: debugPrint,
   );
 
   try {

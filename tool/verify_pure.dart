@@ -2070,6 +2070,50 @@ Future<void> checkCoordinator() async {
     eq('the gateway was never started', gateway.startCalls, 0);
   }
 
+  // command outcomes are reported, because the ack is otherwise invisible
+  {
+    final gateway = _FakeGateway();
+    final lines = <String>[];
+    final coordinator = AgentCoordinator(
+      gateway: gateway,
+      cameraProvider: CameraProvider(
+        backends: <CameraBackend>[_FakeBackend('stub', probeResult: _okProbe)],
+      ),
+      pumpFactory: () => _FakeFramePump(),
+      credentials: credentials,
+      initialCamera: _FakeCameraService(bytes: Uint8List.fromList([1])),
+      log: lines.add,
+    );
+    await coordinator.start();
+
+    await coordinator.handleCommand(
+      const SwitchCameraCommand(id: 'e', cameraEnum: 1),
+    );
+    eq(
+      'the command is reported',
+      lines.any((l) => l.contains('switch_camera')),
+      true,
+    );
+    eq('the ack is reported', lines.any((l) => l.contains('ack ok')), true);
+
+    // A refusal has to be just as visible: the server never waits for an ack
+    // and records nothing about most commands, so this line is the only place
+    // an operator can learn the device said no.
+    lines.clear();
+    await coordinator.handleCommand(
+      const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: streamId),
+    );
+    lines.clear();
+    await coordinator.handleCommand(
+      const StartRecordingCommand(id: 'b', cameraEnum: 0, streamId: 's2'),
+    );
+    eq(
+      'a refusal is reported with its reason',
+      lines.any((l) => l.contains('ack FAILED') && l.contains('already')),
+      true,
+    );
+  }
+
   // pause releases everything
   {
     final h = await build(frameBytes: Uint8List.fromList([1]));

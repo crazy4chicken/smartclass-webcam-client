@@ -40,6 +40,7 @@ class AgentCoordinator {
     String? initialBackendId,
     CaptureConfig? config,
     StreamSettings? settings,
+    void Function(String message)? log,
   }) : _gateway = gateway,
        _cameraProvider = cameraProvider,
        _pumpFactory = pumpFactory,
@@ -47,12 +48,23 @@ class AgentCoordinator {
        _camera = initialCamera,
        _backendId = initialBackendId,
        _config = config ?? CaptureConfig.defaults(),
-       _settings = settings ?? StreamSettings.defaults();
+       _settings = settings ?? StreamSettings.defaults(),
+       _log = log;
 
   final BackendGateway _gateway;
   final CameraProvider _cameraProvider;
   final FramePumpFactory _pumpFactory;
   final DeviceCredentials? _credentials;
+
+  /// Where command outcomes go.
+  ///
+  /// Injected rather than imported so this file stays Flutter-free, and
+  /// **necessary** rather than nice-to-have: the server never waits for an ack,
+  /// never retries and records nothing about most commands, so the ack is the
+  /// only place an operator can learn that a command was refused. A device that
+  /// acks `ok:false` into the void is indistinguishable from one that ignored
+  /// the command.
+  final void Function(String message)? _log;
 
   final StreamController<AgentStatus> _statuses =
       StreamController<AgentStatus>.broadcast();
@@ -252,6 +264,7 @@ class AgentCoordinator {
   /// failure is forbidden: the server never waits for an ack and never retries,
   /// so an unacked command leaves an operator with no idea anything happened.
   Future<void> handleCommand(DeviceCommand command) async {
+    _report('${_describe(command)} →');
     try {
       switch (command) {
         case StartRecordingCommand():
@@ -271,6 +284,21 @@ class AgentCoordinator {
     }
     _emitStatus();
   }
+
+  /// A short, greppable rendering of a command for the console.
+  static String _describe(DeviceCommand command) => switch (command) {
+    StartRecordingCommand(:final cameraEnum, :final streamId) =>
+      'start_recording(camera=$cameraEnum, stream=$streamId)',
+    StopRecordingCommand(:final cameraEnum, :final streamId) =>
+      'stop_recording(camera=$cameraEnum, stream=$streamId)',
+    TakePhotoCommand(:final cameraEnum, :final requestId) =>
+      'take_photo(camera=$cameraEnum, request=$requestId)',
+    SwitchCameraCommand(:final cameraEnum) =>
+      'switch_camera(camera=$cameraEnum)',
+    PingCommand() => 'ping',
+  };
+
+  void _report(String message) => _log?.call(message);
 
   Future<void> _startRecording(StartRecordingCommand command) async {
     if (_captureState == CaptureState.recording) {
@@ -413,6 +441,7 @@ class AgentCoordinator {
     // `ping` is the only command without an id, and it is answered with a
     // `pong`, not an `ack`.
     if (id == null) return;
+    _report('  ack ${ok ? 'ok' : 'FAILED'}${error == null ? '' : ': $error'}');
     _gateway.send(AckMessage(id: id, ok: ok, error: error));
   }
 
