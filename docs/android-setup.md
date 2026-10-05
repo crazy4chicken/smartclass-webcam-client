@@ -1,22 +1,32 @@
 # Android 真机运行手册
 
-面向本机现状写的可执行步骤（2026-10-04 核实）。
+面向本机现状写的可执行步骤（**2026-10-05 核实**）。
 
-## 0. 现状：本机还没有 Android SDK
+## 0. 现状：环境已就绪
+
+真机端到端联调已经跑通过一整轮，下面是核实过的状态。
 
 | 项 | 状态 |
 | --- | --- |
-| Android SDK | **没有**（`platforms/`、`build-tools/`、`cmdline-tools/` 全缺） |
-| `android/local.properties` 的 `sdk.dir` | 指向 `C:\Users\Lhui\Desktop\tools` —— **这是错的**，那只是个放了 `adb.exe` 的普通文件夹。Flutter 因为看到里面有 `platform-tools/` 就把它当成 SDK 了，Gradle 到那一步会找不到 `platforms/android-36` |
-| JDK | 有，JDK 21（PATH 上的 Oracle 21.0.12，另有 `C:\Program Files\Android\openjdk\jdk-21.0.8`）。AGP 9 要求 17+，够用 |
-| adb | 有，37.0.0，在 `C:\Users\Lhui\Desktop\tools\platform-tools\adb.exe` |
-| 模拟器 | 没有，也不需要（真机） |
+| Android SDK | ✅ `C:\Users\Lhui\AppData\Local\Android\Sdk`，有 `platforms/android-36`、`build-tools/36.0.0`、`platform-tools`、`ndk`、`cmdline-tools`、`licenses` |
+| adb | ✅ 37.0.0，`C:\Users\Lhui\AppData\Local\Android\Sdk\platform-tools\adb.exe` |
+| JDK | ✅ JDK 21（PATH 上的 Oracle 21.0.12，另有 `C:\Program Files\Android\openjdk\jdk-21.0.8`）。AGP 9 要求 17+，够用 |
+| 真机 | ✅ 已在 `V2405A`（Android 16）上跑通全流程 |
+| 模拟器 | ❌ 没有 `emulator` / `system-images` / AVD —— 也不需要，用真机 |
+| Go | ✅ 1.27.1（后端要求 ≥1.26），用于本地起服务端 |
+| PostgreSQL | ✅ 18.6（服务在 5432）；但 `postgres` 口令未知，联调时另起 trust 集群，见 README「端到端联调环境」 |
+| Docker | ⚠️ Desktop 已装但 **daemon 默认没起**，且 **Docker Hub 被本机代理挡掉**，拉不到镜像 |
 
 项目侧版本：AGP 9.1.0 / Kotlin 2.4.0 / Gradle 9.3.1；
 Flutter 默认 `compileSdk=36`、`targetSdk=36`、`minSdk=24`、`ndkVersion=28.2.13676358`。
 `camera_android_camerax` 要求 `minSdk >= 23`，默认 24 满足，**不需要改 gradle**。
 
-## 1. 装 Android SDK（命令行，约 250 MB）
+> 曾经踩过：`android/local.properties` 的 `sdk.dir` 一度指向
+> `C:\Users\Lhui\Desktop\tools` —— 那只是个放了 `adb.exe` 的普通文件夹。Flutter 看到里面有
+> `platform-tools/` 就把它当成 SDK，直到 Gradle 找不到 `platforms/android-36` 才暴露。
+> 现在指向真 SDK。
+
+## 1. 换机器 / SDK 丢了才需要（当前机器不用做）
 
 1. 到 <https://developer.android.com/studio#command-line-tools-only> 下载
    **Command line tools only** 的 Windows zip。
@@ -143,6 +153,12 @@ flutter build apk --release --split-per-abi
 | 状态条显示「链路失败」+ 401 | 令牌被轮换或设备被删除。**重试没用**，需要运营侧重发凭据 |
 | 状态条一直「重连中」 | 服务端没起、地址不对、或 `adb reverse` 掉了（拔插线后会失效） |
 | 状态条「已连接 / 空闲」，后端却收不到东西 | 正常：设备是从属的，要等运营侧 `POST .../recording/start` |
+| 装了新包但设备**根本不注册**，`online` 一直是 false | 摄像头权限弹窗阻塞了 `initialize()`，而初始化排在注册之前。`adb shell pm grant <pkg> android.permission.CAMERA` |
+| 注册 401 `device authentication failed` | 令牌被轮换 / 设备被删；**或**注册请求漏了 `Authorization: Bearer wdt_…`（`WEBCAM_DEV=true` 关的是 teamusers 鉴权，**设备令牌照样校验**） |
+| `recording/start` 返回 `409 already streaming`，但明明没在录 | 服务端重启留下的**僵尸 `active` 流**（服务端启动时不做 reconcile）。显式 `POST .../recording/stop` 清掉即可 |
+| `take_photo` 返回 `202` 但照片列表一直空 | 见 §11 权限那条；**录制中**拍照另有并发问题（已在客户端用 `SerialLock` 修掉，见 README「设备与媒体层的坑」） |
+| segment 有 `size_bytes` 但拆不出帧 | 多半是**没配对象存储**，服务端用 `NoopStorage` 丢字节 —— 行和大小照样写，内容是空的 |
+| 拆出来有帧但不是完整 JPEG | 相机 HAL 可能在 EOI 后追加 0 字节；客户端已用 `trimJpegPadding` 裁掉。若仍出现，用 `check_segment.py --dump` 导出看帧头帧尾 |
 | 后端日志有 segment 但下游解不开 | v1 用 `mjpeg`，一个 `recording.frame` 就是一张 JPEG；按 4 字节长度前缀切分即可 |
 
 ## 10. 真后端联调步骤
@@ -160,3 +176,90 @@ flutter build apk --release --split-per-abi
 8. 断网再恢复 → 状态条进「重连中」，恢复后**重新注册**（register 调用次数 +1）。
 
 `1008`（ticket 已被挂载）会自动重新注册；`1006` 是被新连接替换时的正常关闭，不是故障。
+
+## 11. 不用 `flutter run` 也能驱动真机
+
+`flutter run` 起不来时（例如在助手 shell 里，Dart VM 建不了子进程），
+**已经装好的 debug APK 可以完全用 adb 驱动** —— 这条路径实测跑完过一整轮端到端联调。
+
+前提：`flutter run` 或 `flutter build apk` 已经成功过一次，包已安装。
+
+```sh
+ADB="C:/Users/Lhui/AppData/Local/Android/Sdk/platform-tools/adb.exe"
+PKG=com.example.webcam_client
+DEVICE_ID=<管理面拿到的 ULID>
+TOKEN=<wdt_…>
+
+# 1. 让设备上的 127.0.0.1:8080 反向隧道到宿主机（APK 里 BASE_URL 是默认值时正好对应）
+"$ADB" reverse tcp:8080 tcp:8080
+
+# 2. 把凭据写进 shared_preferences（debug 包 run-as 可用）
+cat > /tmp/prefs.xml <<EOF
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<map>
+    <string name="flutter.device_id">$DEVICE_ID</string>
+    <string name="flutter.device_token">$TOKEN</string>
+</map>
+EOF
+"$ADB" shell am force-stop $PKG
+"$ADB" shell "run-as $PKG sh -c 'echo $(base64 -w0 /tmp/prefs.xml) | base64 -d > shared_prefs/FlutterSharedPreferences.xml'"
+
+# 3. 预授权摄像头（不预授权会卡住，见下）
+"$ADB" shell pm grant $PKG android.permission.CAMERA
+
+# 4. 启动
+"$ADB" logcat -c
+"$ADB" shell monkey -p $PKG -c android.intent.category.LAUNCHER 1
+sleep 12
+"$ADB" logcat -d | grep 'flutter :' | tail
+```
+
+### 三个必须知道的点
+
+- **键名前缀是 `flutter.`** —— `shared_preferences` 会自动加，所以
+  `device_id` 在文件里是 `flutter.device_id`。
+- **必须 base64 中转**。直接 `cat | adb shell 'run-as … > file'` 会被换行和引号搞坏，
+  写出来的 XML 解析失败、表现为"凭据没生效"。
+- ⚠️ **不预授权会卡住，而且现象极具误导性**。权限弹窗会阻塞 `initialize()`，
+  而初始化排在注册**之前** —— 所以设备根本不注册，`online` 一直是 `false`，
+  看起来像网络/凭据问题。真机上是 `pm grant` 一行的事。
+
+### 观测与归属验证
+
+三路观测：`adb logcat -d | grep 'flutter :'`、服务端 stdout、管理面 REST。
+
+**归属验证用受控实验，比看日志可靠**：
+
+```sh
+# 跑着 → online:true；force-stop → online:false；重启 → online:true
+curl -sS "http://127.0.0.1:8080/api/devices/$DEVICE_ID/" | grep -oE '"online":(true|false)'
+```
+
+客户端现在会把**每条命令和它的 ack 结果**打到控制台（`flutter :` 前缀），
+所以 `switch_camera` / `take_photo` 这类"服务端不记录任何状态"的命令也能确认：
+
+```
+switch_camera(camera=1) →
+  ack FAILED: cannot switch camera while stream 01M4… is active
+```
+
+## 12. 字节级校验（落盘内容）
+
+HTTP 200 和 `size_bytes > 0` **说明不了任何事**，尤其是没有对象存储时
+服务端用 `NoopStorage` 丢字节、但 segment 行和 `size_bytes` 照样写。
+要验内容只能下载下来拆：
+
+```sh
+python tool/e2e/check_segment.py <segment.bin>          # 本地文件
+python tool/e2e/check_segment.py --url <presigned-url>  # 直接拉
+```
+
+判读：
+
+- `trailing` 必须是 `0` —— 非 0 说明长度前缀拼接对不齐；
+  `OVERRUN` 说明某个前缀承诺的字节数超过对象长度，框架完全对不上。
+- `jpeg_ok` 必须等于 `frames` —— 少一个就说明有帧被截断，
+  或者 EOI 之后被追加了非图像数据。
+- 帧大小应在几十~几百 KB（1280x720 JPEG）。
+
+本地没有可用对象存储时用 `tool/e2e/s3_stub.py`，见 README 的「端到端联调环境」。

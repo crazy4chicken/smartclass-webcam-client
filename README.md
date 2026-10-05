@@ -35,11 +35,23 @@ flutter run -d windows \
 用 `--dart-define` 传只是为了开发方便 —— 那是明文编译进二进制的；首次启动后凭据会写进
 `CredentialStore`（`shared_preferences`），后续启动不再需要这两个参数。
 
-测试：
+测试与自检：
 
 ```bash
 flutter test
-dart run tool/verify_pure.dart    # 纯 Dart 层的完整自检（不需要 Flutter 引擎）
+dart run tool/verify_pure.dart    # 298 项断言的纯 Dart 自检，不需要 Flutter 引擎
+```
+
+端到端联调（真机 × 真服务端）见 `docs/superpowers/plans/2026-10-04-android-server-e2e-test.md`，
+工具在 `tool/e2e/`：
+
+```bash
+# 拆开一个落盘 segment，逐帧校验（长度前缀拼接 + 每帧是否为完整 JPEG）
+python tool/e2e/check_segment.py <segment.bin>
+python tool/e2e/check_segment.py --url <presigned-url> --dump frame
+
+# 没有可用对象存储时的最小 S3 替身（见下）
+python tool/e2e/s3_stub.py --port 9000 --dir <object-dir>
 ```
 
 ## 架构
@@ -48,6 +60,7 @@ dart run tool/verify_pure.dart    # 纯 Dart 层的完整自检（不需要 Flut
 UI (agent_screen / status_bar_overlay / preview_toggle_button / camera_error_view)
         │  AgentStatus
 AgentCoordinator ── 命令驱动的状态机：每条命令都 ack，没收到 start_recording 就不推任何媒体
+        │            （命令与 ack 结果走可注入的 log sink，控制台可见）
         │
         ├── BackendGateway ── SmartClassBackendGateway（注册 → 挂载 → 保活 → 退避重注册）
         │        protocol/envelope ── Message 信封 / WireCodec 闭集 / parseDeviceCommand
@@ -56,6 +69,8 @@ AgentCoordinator ── 命令驱动的状态机：每条命令都 ack，没收�
         │      MockBackendGateway（离线用，下发真实协议词汇）
         └── CameraProvider ── CameraBackend ── CameraService ── FramePump ── VideoEncoder
                CameraPluginBackend (camera + camera_desktop, 5 平台)
+                 ├── serial_lock ── 串行化「相机重建」与「抓帧」两条互斥路径
+                 └── jpeg ── 裁掉相机 HAL 偶尔追加在 EOI 之后的 0 字节
 ```
 
 ### 协议要点（改之前请先读后端 `docs/protocol/`）
@@ -79,6 +94,10 @@ AgentCoordinator ── 命令驱动的状态机：每条命令都 ack，没收�
   （被新连接替换时服务端不握手直接关）。
 - **服务端没有人脸识别结果回推**，AI 是另一个走管理面 REST 拉录制分片的服务，
   所以客户端不展示识别结果（`RecognitionHud` 已删除）。
+- ⚠️ **服务端重启不会清理中断的流**（真机实测，后端缺口，别去客户端找）：设备断开时服务端会把
+  在录的流标 `failed`（`internal/httpapi/media.go`），但**它自己启动时没有 reconcile/sweep**。
+  所以「服务端被杀时正在录的流」会**永远停在 `active`**，并**阻塞该 camera 之后的所有录制**
+  （`409 camera_enum N is already streaming`），必须运营侧显式 `recording/stop` 才能清掉。
 
 ### 编码选择
 
@@ -97,15 +116,17 @@ AgentCoordinator ── 命令驱动的状态机：每条命令都 ack，没收�
 ### 代码分层
 
 - `lib/src/backend` 与 `lib/src/capture` 的非插件部分**不依赖 Flutter**，所以能在纯 Dart VM 上
-  直接跑 `tool/verify_pure.dart`（273 项断言，覆盖协议、注册、两个网关、采集管线、协调器）。
+  直接跑 `tool/verify_pure.dart`（**298 项断言**，覆盖协议、注册、两个网关、采集管线、
+  协调器状态机、串行锁、JPEG 裁剪）。
   新增代码请保持这条边界：一旦引入 `package:flutter/*`，该模块就再也无法在本机验证。
 - `unrecognized_command_log.dart` 的默认 sink 是 `print` 而不是 `debugPrint`
-  （`main.dart` 显式传 `debugPrint`），就是为了上面那条边界。
+  （`main.dart` 显式传 `debugPrint`），`AgentCoordinator` 的命令日志走可注入的
+  `void Function(String)` sink —— 都是为了上面那条边界。
 - 摄像头四层抽象（`CameraProvider → CameraBackend → CameraService → FramePump`）不泄漏插件类型；
   预览走窄接口 `CameraPreviewProvider.previewController`（`Object?`），UI 层再窄化为 `CameraController`。
 - **不引入 `permission_handler`**（原因见下）。
 
-### 界面上的两条硬约束（Android 真机踩出来的）
+### 界面硬约束（Android 真机踩出来的）
 
 - **预览开关在底部**（`PreviewToggleButton`），顶部状态条只放信息。Android 的系统状态栏占着
   右上角，放上面会被盖住、点不到。
@@ -115,6 +136,95 @@ AgentCoordinator ── 命令驱动的状态机：每条命令都 ack，没收�
   `Center`（`Center` 会把约束放松），画面按 contain 居中、留黑边。
   手机竖屏下源是 9:16、屏约 9:20，用 contain 只留很窄的上下黑边；改成 cover 要横向裁掉
   约 75% 的画面，人脸会被裁没，所以这里必须用 contain。
+
+### 设备与媒体层的坑（端到端联调发现，都已修）
+
+三个都是**读代码看不出来**的，只有真机跑起来 + 看落盘字节才会暴露。改这块之前请先读。
+
+**① `takePicture()` 不能并发 —— 录制中拍照会静默失败。**
+`take_photo` 和帧泵都在同一个 `CameraController` 上抓帧。并发时输的那个抛异常，
+`TakePictureFrameSource` 把它吞成 `null`，协调器回 `ack ok:false` 而**没有人在听** ——
+运营侧只看到 `202`，然后照片永远不出现。修法是 `SerialLock`（`lib/src/capture/serial_lock.dart`）
+把抓帧串行化，且**与相机重建锁分开**，避免互相阻塞。泵的单并发语义不受影响
+（它本来就 shed 而不是 queue）。
+> 规律：同一个底层资源有两条调用路径时，**串行化要放在资源那一层**，不能指望调用方自觉。
+
+**② 注册必须声明"实际生效值"，不是"能力阶梯"。**
+`buildAnnouncements` 曾拿到 `supportedResolutions`（`[640x480, 1280x720, …]`）并按 camera
+下标取值，于是 camera 0 报了最低档 `640x480` —— 而服务端会把它快照进
+`metadata.resolution`，与实际采集的 1280x720 不符。现在传 `camera.appliedResolution`。
+> 规律：announce 出去的必须是**「我会交付什么」**，不是「我支持什么」。
+
+**③ 相机 HAL 会在 JPEG 的 EOI 之后追加 0 字节。**
+实测约 **1/20** 的帧比图片本身长 6~8 字节（结构完好，SOI/EOI 都在）。只有**持续推帧**那条
+路径会这样，而且是间歇性的；按需拍照（同一条 `takePicture` + 读 + 删）字节精确 ——
+所以是高频调用放大了 HAL 的抖动。`trimJpegPadding`（`lib/src/capture/jpeg.dart`）
+裁到最后一个 `FF D9`，**且只在后面是 ≤64 字节 0 时才裁**。
+没有 SOI / 没有 EOI / 尾巴过长 / EOI 后有非零字节 —— **一律不动**，
+否则一个真被截断的帧会被悄悄裁成"看起来合法"。
+> 规律：清理逻辑要**窄到不会掩盖真正的损坏**。这个坑只有 `check_segment.py` 那种字节级校验能发现。
+
+### 命令可观测性
+
+服务端对多数命令**不记录任何状态**（`switch_camera` 的文档原话是
+"the ack is the only confirmation an operator can get"），而客户端不把 ack 写日志的话，
+**一个回 `ok:false` 的设备和一个干脆忽略命令的设备从外面看一模一样**。
+所以 `AgentCoordinator` 接一个可注入的 `log` sink（`main.dart` 传 `debugPrint`），
+每条命令和它的 ack 结果都打到控制台：
+
+```
+start_recording(camera=0, stream=01M4…) →
+  ack ok
+switch_camera(camera=1) →
+  ack FAILED: cannot switch camera while stream 01M4… is active
+```
+
+**`switch_camera` 在 stream 活着时会被拒绝**（`ok:false` + 原因），这是有意为之：
+协议允许 `ok:false` "when the device cannot switch"，而一台物理摄像头只能服务一条流，
+切换会**静默杀死**正在跑的流，服务端还会把那条流一直留在 `active`（见上面的后端缺口），
+运营侧无从察觉。**明确拒绝比静默失败好。** 停流后切换正常（实测 64ms）。
+
+## 端到端联调环境
+
+完整步骤在 `docs/superpowers/plans/2026-10-04-android-server-e2e-test.md`，Android 侧细节在
+`docs/android-setup.md`。这里只记**踩过的环境坑**，因为它们会让"跑不起来"看起来像代码问题。
+
+### 对象存储：这台机器上一个真实 S3 都用不了
+
+- MinIO **社区版已停发**：`dl.min.io/server/minio/release/…` 与所有 `/archive/` 旧版本
+  一律返回 **410**；新路径 `dl.min.io/aistor/…` 能下，但启动即报
+  `No valid license found … All S3 operations are denied`。
+- **Docker Hub 被代理整个挡掉**（`registry-1.docker.io` 走代理返回 000，
+  Docker Desktop 自身又没配 HTTPS proxy），所以 `minio/minio` 镜像也拉不到。
+- GitHub release 走代理 502。
+
+→ 用 `tool/e2e/s3_stub.py`。`minio-go` 只用五个操作
+（`HEAD /{bucket}`、`PUT /{bucket}`、`PUT|GET|DELETE /{bucket}/{key}`），
+且**签名可以忽略** —— 目的是验客户端字节，不是验 S3。对象落真实目录，
+可以绕开 API 直接看字节。
+
+⚠️ **它必须解 `aws-chunked`**：`minio-go` 上传用 SigV4 streaming，body 是
+`<hex>;chunk-signature=…\r\n<data>\r\n…`，而 **`Content-Encoding: aws-chunked` 这个头不一定发** ——
+要直接看 body 前 64 字节有没有 `;chunk-signature=`。第一版没解，存下来的段开头是
+`10000;chunk-signature=…`，**看起来完全像客户端的 bug**。
+
+> 没有对象存储时服务端会用 `NoopStorage` 丢字节，但 ⚠️ **segment 行照样写、`size_bytes` 照样有值**，
+> 所以"有行有大小"绝不能代替字节校验。
+
+### 本机后端栈（不用 Docker）
+
+- **PostgreSQL**：系统那套在 5432，但 `postgres` 口令未知、pg_hba 全 `scram-sha-256`、无 `.pgpass`。
+  **自建 trust 集群绕开**：`initdb -D <dir> -U postgres -A trust` 然后
+  `postgres.exe -D <dir> -p 5433`。**PG18 跑后端内嵌迁移没问题**，不必退 PG16。
+- **服务端**：`go build ./cmd/server`，环境变量见 `internal/config/config.go`。
+  `WEBCAM_DEV=true` 关掉 teamusers 鉴权，但**设备令牌仍然校验** ——
+  `GET /ws/register` 必须带 `Authorization: Bearer wdt_…`。
+
+### ⚠️ 本机 shell 有 HTTP 代理（白名单制）
+
+- 打 **127.0.0.1 必须加 `--noproxy '*'`**，否则被代理拦截、返回假的
+  "upstream connect failed"，看起来像服务没起。
+- **公网反而要走代理**：`dl.min.io` 直连可达，`github.com` 加 `--noproxy` 就超时。
 
 ## 构建环境
 
@@ -154,5 +264,9 @@ Android 9+ 默认禁止明文流量，而网关是 `ws://`，不开的话连接�
 `C:\Users\Lhui\AppData\Local\flutter` 可正常使用。另注：在**助手工具的 shell** 里 Dart VM 无法
 创建子进程（`ProcessException: All pipe instances are busy`，`process_win.cc:744`），
 所以 `flutter run/test/analyze` 在那个 shell 里会失败；用户自己的终端不受影响，与项目无关。
-助手侧改用两条替代路径验证：`dart run tool/verify_pure.dart`（进程内执行），
-以及用 Python 直接驱动 `frontend_server_aot` 做单次编译（等价于 `flutter test` 的类型检查）。
+助手侧改用三条替代路径验证：
+
+1. `dart run tool/verify_pure.dart` —— 进程内执行，298 项断言。
+2. 用 Python 直接驱动 `frontend_server_aot` 做单次编译（等价于 `flutter test` 的类型检查）。
+3. **真机联调**：`flutter run` 起不来，但**已经装好的 debug APK 可以完全用 adb 驱动** ——
+   详见 `docs/android-setup.md` 的「不用 flutter run 也能驱动真机」。
