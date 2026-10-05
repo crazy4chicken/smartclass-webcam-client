@@ -16,11 +16,12 @@
 | 依赖 | 状态 | 位置 / 版本 |
 |---|---|---|
 | Go | ✅ | `go1.27.1 windows/amd64`（后端要求 ≥1.26） |
-| Docker | ✅ | `29.5.2` —— 用于 PostgreSQL 与 MinIO |
+| PostgreSQL | ✅ | **18.6**，已作为 Windows 服务运行，监听 `0.0.0.0:5432`；客户端工具在 `C:\Program Files\PostgreSQL\18\bin`（`psql.exe` / `createdb.exe` / `pg_isready.exe`，默认不在 PATH） |
 | Java | ✅ | `21.0.12` |
+| Docker | ✅ 仅兜底 | `29.5.2` —— **本计划不依赖它**；仅当 PG18 建库失败时用于起一个 PG16 对照实例 |
 | Android SDK | ✅ | `C:\Users\Lhui\AppData\Local\Android\Sdk`，有 `platforms/android-36`、`build-tools/36.0.0`、`platform-tools/adb.exe` |
 | Android 模拟器 | ❌ | **无 `emulator`、无 `system-images`、无 AVD** |
-| `psql` 客户端 | ❌ | 不在 PATH —— 用 `docker exec` 代替 |
+| MinIO（对象存储） | ❌ | 未安装 —— 用单个 exe 本地起，见 Step 0.2 |
 | Flutter | ✅ | `C:\Users\Lhui\AppData\Local\flutter`（注：本沙箱内 `flutter analyze` 起不来，报 `All pipe instances are busy`；`flutter run` / `flutter logs` 未验证过，若同样受阻换一个会话执行） |
 | 明文 HTTP | ✅ | `android/app/src/main/AndroidManifest.xml` 已有 `android:usesCleartextTraffic="true"` |
 
@@ -47,24 +48,44 @@
 
 **Files:** 无（不改代码）
 
-- [ ] **Step 0.1: 起 PostgreSQL**
+- [ ] **Step 0.1: 用本机 PostgreSQL 18 建库**
+
+已装的是 **18.6**，服务已在跑、5432 已在监听，不需要 Docker。后端要求 PostgreSQL ≥16，18 满足。
 
 ```sh
-docker run -d --name webcam-pg -e POSTGRES_PASSWORD=webcam -e POSTGRES_DB=webcam -p 5432:5432 postgres:16
-docker exec webcam-pg pg_isready -U postgres
+PGBIN="C:/Program Files/PostgreSQL/18/bin"
+"$PGBIN/pg_isready.exe" -h 127.0.0.1 -p 5432        # 期望 accepting connections
+"$PGBIN/createdb.exe" -U postgres -h 127.0.0.1 webcam
 ```
-Expected: `accepting connections`
+Expected: `createdb` 无输出即成功。若提示密码，填安装 PostgreSQL 时设的 `postgres` 口令。
+
+**若 18 上建库/启动报 schema 错误**（后端内嵌迁移是针对 PG16 写的，大版本可能踩到移除的语法），退回 Docker 起一个 PG16 对照：
+```sh
+docker run -d --name webcam-pg16 -e POSTGRES_PASSWORD=webcam -e POSTGRES_DB=webcam -p 5433:5432 postgres:16
+```
+然后把 `WEBCAM_DB_URL` 的端口改成 `5433`。
 
 - [ ] **Step 0.2: 起 MinIO（对象存储，字节校验必需）**
 
+MinIO 未安装。**优先用单个 exe，不依赖 Docker**：
 ```sh
-docker run -d --name webcam-minio \
-  -e MINIO_ROOT_USER=webcam -e MINIO_ROOT_PASSWORD=webcam12345 \
-  -p 9000:9000 -p 9001:9001 \
-  minio/minio server /data --console-address ":9001"
+curl -Lo "$HOME/minio.exe" https://dl.min.io/server/minio/release/windows-amd64/minio.exe
+set MINIO_ROOT_USER=webcam
+set MINIO_ROOT_PASSWORD=webcam12345
+"$HOME/minio.exe" server "%USERPROFILE%\minio-data" --console-address ":9001"
+```
+备选（若不想下 exe）：
+```sh
+docker run -d --name webcam-minio -e MINIO_ROOT_USER=webcam -e MINIO_ROOT_PASSWORD=webcam12345 \
+  -p 9000:9000 -p 9001:9001 minio/minio server /data --console-address ":9001"
+```
+健康检查（两种都适用）：
+```sh
 curl -fsS http://127.0.0.1:9000/minio/health/live
 ```
 Expected: HTTP 200
+
+> 不配对象存储时服务端会用 **no-op 后端直接丢弃字节**，只留数据库行数 —— 那样做不了 Task 3.5 的字节级断言，所以这一步不能省。
 
 - [ ] **Step 0.3: 起服务端**
 
@@ -392,20 +413,23 @@ Expected: `404` + `device websocket not found` —— 第二次注册**立刻作
 | recording/start 返回 `409` | 设备离线，或该 camera 已有 active 流 | 先查 `online`，再查 streams |
 | 有 segment 但 `size_bytes` 为 0 / 拆不出帧 | 客户端发的内容与声明 codec 不符 | `check_segment.py` 看帧头 |
 | 客户端连不上 `127.0.0.1:8080` | 真机忘了 `adb reverse`；模拟器用了 `127.0.0.1` 而非 `10.0.2.2` | `adb reverse --list` |
-| MinIO 报 bucket 不存在 | 服务端启动失败没走到建桶 | `docker logs webcam-minio` + 服务端 stdout |
+| MinIO 报 bucket 不存在 | 服务端启动失败没走到建桶 | 看 `minio.exe` 窗口输出（`docker logs webcam-minio` 若走 Docker）+ 服务端 stdout |
+| `createdb` 报认证失败 | 用了错口令 | 填安装 PostgreSQL 18 时为 `postgres` 设的口令；或改用 PG16 容器（Step 0.1 兜底） |
 | `flutter run` 卡住 | 本沙箱管道问题 | 换会话执行，或直接用 `adb install` 装已构建的 apk |
 
 ## 清理
 
 ```sh
 adb reverse --remove tcp:8080       2>/dev/null || true
-docker rm -f webcam-pg webcam-minio
+# 本机 PostgreSQL 保留（库可留作后续复跑，或手工 dropdb webcam）
+"$PGBIN/dropdb.exe" -U postgres -h 127.0.0.1 webcam    # 可选
+docker rm -f webcam-pg16 webcam-minio 2>/dev/null || true   # 仅当用过 Docker
 ```
 
 ## Self-Review Checklist
 
 1. **协议覆盖**：注册、挂载、保活、四类命令、媒体两种通道、重连、ticket 一次性 —— 均有对应 Task 与可观测断言。
 2. **字节级验证存在**：Task 3.5 与 4.3 直接校验落盘内容，而不是只看 HTTP 状态码 —— 这是本计划区别于「冒烟测试」的地方。
-3. **环境事实已核实**：Go / Docker / Android SDK 版本来自本机实测；模拟器缺失已标注为前置下载项，未假装可用。
+3. **环境事实已核实**：Go / PostgreSQL 18.6 / Android SDK 均来自本机实测，能用本机的就不额外起容器；模拟器缺失已标注为前置下载项，未假装可用。**Docker 只在两处兜底**（PG18 不兼容时起 PG16、MinIO 不想下 exe），不是主路径。
 4. **失败即缺陷的判定明确**：未收命令就推帧、stop 后继续推、帧非完整 JPEG、重连复用旧 ticket —— 四条都写成了显式失败条件。
 5. **比例**：命令与断言逐条给出，不重复描述协议细节（那些在 `docs/protocol/` 与本仓库的接入计划里）。
