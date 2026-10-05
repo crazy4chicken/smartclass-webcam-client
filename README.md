@@ -106,10 +106,13 @@ AgentCoordinator ── 命令驱动的状态机：每条命令都 ack，没收�
   （被新连接替换时服务端不握手直接关）。
 - **服务端没有人脸识别结果回推**，AI 是另一个走管理面 REST 拉录制分片的服务，
   所以客户端不展示识别结果（`RecognitionHud` 已删除）。
-- ⚠️ **服务端重启不会清理中断的流**（真机实测，后端缺口，别去客户端找）：设备断开时服务端会把
-  在录的流标 `failed`（`internal/httpapi/media.go`），但**它自己启动时没有 reconcile/sweep**。
-  所以「服务端被杀时正在录的流」会**永远停在 `active`**，并**阻塞该 camera 之后的所有录制**
-  （`409 camera_enum N is already streaming`），必须运营侧显式 `recording/stop` 才能清掉。
+- **服务端重启会把中断的流收尾为 `failed`**（后端 `b8b4d7e`，客户端无需配合）：
+  流的缓冲帧只活在进程内存里，所以重启后任何还是 `active` 的行都是**孤儿**。
+  服务端启动时在**接受设备连接之前**跑一次 sweep，把它们标 `failed` 并补 `ended_at`。
+  设备断开（服务端活着）时同样标 `failed`，并做最后一次 flush。
+  > 修复前的表现：孤儿流**永远停在 `active`**，并**阻塞该 camera 之后的所有录制**
+  > （`409 camera_enum N is already streaming`），必须运营侧显式 `recording/stop` 才能清掉。
+  > 客户端在这两种情况下的行为都是对的：链路一断就自己中止录制。
 
 ### 编码选择
 
@@ -193,7 +196,8 @@ switch_camera(camera=1) →
 
 **`switch_camera` 在 stream 活着时会被拒绝**（`ok:false` + 原因），这是有意为之：
 协议允许 `ok:false` "when the device cannot switch"，而一台物理摄像头只能服务一条流，
-切换会**静默杀死**正在跑的流，服务端还会把那条流一直留在 `active`（见上面的后端缺口），
+切换会**静默杀死**正在跑的流。服务端没有任何"设备放弃了这条流"的信号 ——
+它只会在**设备断开**或**自己重启**时收尾，所以那条流会一直挂着 `active`，
 运营侧无从察觉。**明确拒绝比静默失败好。** 停流后切换正常（实测 64ms）。
 
 ## 端到端联调环境
