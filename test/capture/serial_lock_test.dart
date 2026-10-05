@@ -36,7 +36,9 @@ void main() {
       for (var i = 0; i < 5; i++)
         lock.run(() async {
           concurrent++;
-          maxConcurrent = maxConcurrent < concurrent ? concurrent : maxConcurrent;
+          maxConcurrent = maxConcurrent < concurrent
+              ? concurrent
+              : maxConcurrent;
           await Future<void>.delayed(const Duration(milliseconds: 5));
           concurrent--;
         }),
