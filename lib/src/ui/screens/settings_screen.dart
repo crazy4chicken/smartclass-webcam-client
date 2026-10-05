@@ -135,11 +135,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     String? idError;
     String? tokenError;
     if (hasId != hasToken) {
-      // Half a credential is always a mistake. Report it on both fields so it
-      // is visible whichever one the operator happens to be looking at.
-      const both = '设备 ID 与设备令牌需要同时填写';
-      if (!hasId) idError = both;
-      if (!hasToken) tokenError = both;
+      // Half a credential is always a mistake, and the useful place to say so
+      // is the field that is empty. Flagging the half the operator already
+      // filled in correctly would just be noise.
+      const incomplete = '设备 ID 与设备令牌需要同时填写';
+      if (!hasId) idError = incomplete;
+      if (!hasToken) tokenError = incomplete;
     } else {
       if (hasId && !typed.hasValidDeviceId) {
         idError = '设备 ID 应是服务端签发的 26 位 ULID';

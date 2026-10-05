@@ -521,13 +521,21 @@ void main() {
       // The real gateway latches `_stopped` on a 401 and never retries, so a
       // setter on the old instance could never bring it back. This is the test
       // that guards the "rebuild, don't mutate" decision.
-      final states = StreamController<LinkState>();
+      //
+      // One controller per instance: a `StreamController` without `.broadcast()`
+      // is single-subscription, so handing the same one to both gateways makes
+      // the second `listen` throw.
+      final states = <StreamController<LinkState>>[];
       final h = buildWithFactory(
-        onBuild: (g) => when(() => g.states).thenAnswer((_) => states.stream),
+        onBuild: (g) {
+          final controller = StreamController<LinkState>();
+          states.add(controller);
+          when(() => g.states).thenAnswer((_) => controller.stream);
+        },
       );
       await h.coordinator.start();
 
-      states.add(LinkState.failed);
+      states.first.add(LinkState.failed);
       await pumpEventQueue();
       expect(h.coordinator.linkState, LinkState.failed);
 
@@ -537,7 +545,9 @@ void main() {
       expect(h.coordinator.linkState, isNot(LinkState.failed));
       expect(h.coordinator.linkState, LinkState.live);
 
-      unawaited(states.close());
+      for (final controller in states) {
+        unawaited(controller.close());
+      }
     });
   });
 

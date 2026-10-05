@@ -131,14 +131,36 @@ void main() {
     );
   });
 
-  testWidgets('half a credential is reported on both fields', (tester) async {
+  testWidgets('half a credential is reported on the field that is empty', (
+    tester,
+  ) async {
     await _open(tester);
 
+    // Token cleared, device id still filled in.
     await tester.enterText(find.byKey(SettingsScreen.tokenFieldKey), '');
     await tester.pump();
 
     expect(find.byKey(SettingsScreen.tokenErrorKey), findsOneWidget);
+    expect(
+      find.byKey(SettingsScreen.deviceIdErrorKey),
+      findsNothing,
+      reason: 'the device id is not what is wrong',
+    );
+    expect(
+      tester.widget<FilledButton>(find.byKey(SettingsScreen.saveKey)).onPressed,
+      isNull,
+    );
+
+    // The other way round: the token is back, the device id is gone.
+    await tester.enterText(
+      find.byKey(SettingsScreen.tokenFieldKey),
+      _creds.deviceToken,
+    );
+    await tester.enterText(find.byKey(SettingsScreen.deviceIdFieldKey), '');
+    await tester.pump();
+
     expect(find.byKey(SettingsScreen.deviceIdErrorKey), findsOneWidget);
+    expect(find.byKey(SettingsScreen.tokenErrorKey), findsNothing);
     expect(
       tester.widget<FilledButton>(find.byKey(SettingsScreen.saveKey)).onPressed,
       isNull,

@@ -331,6 +331,10 @@ class _FakeGateway implements BackendGateway {
     if (!_states.isClosed) _states.add(next);
   }
 
+  void emitCommand(DeviceCommand command) {
+    if (!_commands.isClosed) _commands.add(command);
+  }
+
   void emitError(String message) {
     if (!_errors.isClosed) _errors.add(message);
   }
@@ -2562,6 +2566,23 @@ Future<void> checkCoordinator() async {
     eq('the camera was released', h.camera.isInitialized, false);
     eq('the gateway was stopped', h.gateway.stopCalls, 1);
     eq('the state is idle', h.coordinator.captureState, CaptureState.idle);
+  }
+
+  // pause then resume must leave exactly one subscription
+  {
+    final h = await build(frameBytes: Uint8List.fromList([1]));
+    await h.coordinator.pause();
+    await h.coordinator.resume();
+
+    // Both real gateways expose *broadcast* streams, so a second subscription
+    // would not throw — it would quietly handle every command twice, which
+    // means two acks for one `id`. Counting acks is the only way to see it.
+    h.gateway.emitCommand(const SwitchCameraCommand(id: 'e', cameraEnum: 1));
+    await settle();
+
+    eq('one command produces exactly one ack', h.gateway.acks.length, 1);
+    eq('and it is the right one', h.gateway.acks.single.id, 'e');
+    eq('the camera actually switched', h.coordinator.cameraEnum, 1);
   }
 
   // reconfigure swaps the gateway rather than mutating it
