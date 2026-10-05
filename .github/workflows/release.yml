@@ -158,23 +158,33 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # Order matters: the licences have to be accepted before `sdkmanager` will
-      # install anything, and `compileSdk = flutter.compileSdkVersion` resolves
-      # to 36 for this Flutter release — the runner image ships an SDK but not
-      # necessarily this platform.
+      # `packages` must be given explicitly. At the `v3` tag it defaults to
+      # `tools platform-tools`, and the standalone `tools` package was removed
+      # from the SDK repository years ago — so `sdkmanager tools` fails with
+      # "Failed to find package 'tools'" and takes the whole job down.
+      #
+      # Packages are split on **spaces**, not commas, so this has to be one
+      # space-separated string.
+      #
+      # The versions are what `flutter.compileSdkVersion` / `targetSdkVersion`
+      # (36) and `flutter.ndkVersion` resolve to for this Flutter release —
+      # see `packages/flutter_tools/gradle/src/main/kotlin/FlutterExtension.kt`
+      # in the SDK. **Bump the NDK here if `FLUTTER_VERSION` above moves.**
+      #
+      # The NDK is not optional: `build.gradle.kts` sets
+      # `ndkVersion = flutter.ndkVersion`, and Flutter's Gradle plugin
+      # deliberately configures an empty CMake project to force AGP to resolve
+      # it. Flutter can install it mid-build, but doing it here fails fast
+      # instead of burying a ~2.7 GB download inside Gradle output.
+      #
+      # The action accepts the SDK licences itself
+      # (`accept-android-sdk-licenses` defaults to true), so no separate
+      # `sdkmanager --licenses` step is needed.
       - name: Set up Android SDK
         if: matrix.target == 'apk'
         uses: android-actions/setup-android@v3
-
-      - name: Accept Android licences
-        if: matrix.target == 'apk'
-        # `sdkmanager` returns non-zero even after accepting everything, so the
-        # status is deliberately discarded; the install below is the real check.
-        run: yes | sdkmanager --licenses > /dev/null || true
-
-      - name: Install Android platform
-        if: matrix.target == 'apk'
-        run: sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0 ndk;28.2.13676358'
 
       # A real keystore when the secrets are present, so the APKs are
       # publishable. Without them `build.gradle.kts` falls back to the debug
