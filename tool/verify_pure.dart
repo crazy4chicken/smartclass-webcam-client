@@ -36,6 +36,7 @@ import 'package:webcam_client/src/capture/camera_service.dart';
 import 'package:webcam_client/src/capture/codec_probe.dart';
 import 'package:webcam_client/src/capture/frame_pump.dart';
 import 'package:webcam_client/src/capture/frame_store.dart';
+import 'package:webcam_client/src/capture/jpeg.dart';
 import 'package:webcam_client/src/capture/resolution_selector.dart';
 import 'package:webcam_client/src/capture/serial_lock.dart';
 import 'package:webcam_client/src/capture/stream_settings.dart';
@@ -1297,6 +1298,89 @@ void checkSerialLock() {
   });
 }
 
+void checkJpegTrim() {
+  section('jpeg padding trim');
+
+  Uint8List jpeg([int filler = 8, int pad = 0]) {
+    final bytes = <int>[0xFF, 0xD8, 0xFF, 0xE0];
+    for (var i = 0; i < filler; i++) {
+      bytes.add(0x11);
+    }
+    bytes.addAll([0xFF, 0xD9]);
+    bytes.addAll(List<int>.filled(pad, 0));
+    return Uint8List.fromList(bytes);
+  }
+
+  eqBytes(
+    'a clean JPEG is returned untouched',
+    trimJpegPadding(jpeg()),
+    jpeg(),
+  );
+
+  // The observed shape: EOI present, then a few zero bytes.
+  final padded = jpeg(8, 6);
+  eqBytes('six trailing zeros are trimmed', trimJpegPadding(padded), jpeg());
+  eqBytes(
+    'eight trailing zeros are trimmed',
+    trimJpegPadding(jpeg(8, 8)),
+    jpeg(),
+  );
+
+  // Everything below must be left alone, so a real problem stays visible.
+  eqBytes(
+    'a long zero run is not treated as padding',
+    trimJpegPadding(jpeg(8, 65)),
+    jpeg(8, 65),
+  );
+  final nonZeroTail = jpeg(8, 6);
+  nonZeroTail[nonZeroTail.length - 1] = 0x7A;
+  eqBytes(
+    'a non-zero byte after the EOI is left alone',
+    trimJpegPadding(nonZeroTail),
+    nonZeroTail,
+  );
+  eqBytes(
+    'a payload that is not a JPEG is left alone',
+    trimJpegPadding(Uint8List.fromList([0, 1, 2, 3, 4, 5, 6, 7])),
+    Uint8List.fromList([0, 1, 2, 3, 4, 5, 6, 7]),
+  );
+  final truncated = Uint8List.fromList([
+    0xFF,
+    0xD8,
+    0xFF,
+    0xE0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+  ]);
+  eqBytes(
+    'a truncated frame with no EOI stays visible',
+    trimJpegPadding(truncated),
+    truncated,
+  );
+
+  // An EXIF thumbnail is a whole JPEG inside APP1, so `FF D9` appears twice;
+  // only the outermost EOI ends the file.
+  final withThumbnail = Uint8List.fromList([
+    0xFF, 0xD8, // SOI
+    0xFF, 0xE1, 0x00, 0x10, // APP1
+    0xFF, 0xD8, 0xAA, 0xBB, 0xFF, 0xD9, // embedded thumbnail
+    0xCC, 0xDD, 0xFF, 0xD9, // the real EOI
+    0x00, 0x00, // padding
+  ]);
+  eqBytes(
+    'the outermost EOI wins over an embedded thumbnail',
+    trimJpegPadding(withThumbnail),
+    Uint8List.sublistView(withThumbnail, 0, withThumbnail.length - 2),
+  );
+}
+
 void checkMjpegEncoder() {
   section('mjpeg encoder');
   fakeAsync((async) {
@@ -2143,6 +2227,7 @@ Future<void> main() async {
   checkCodecSelection();
   await checkFramePump();
   checkSerialLock();
+  checkJpegTrim();
   checkMjpegEncoder();
   await checkCameraProvider();
   await checkFrameStore();

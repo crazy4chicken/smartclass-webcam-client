@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'camera_resolution.dart';
 import 'frame_store.dart';
+import 'jpeg.dart';
 
 /// Produces the bytes of one still frame.
 abstract interface class FrameSource {
@@ -50,7 +51,11 @@ class TakePictureFrameSource implements FrameSource {
     if (!_running) return null;
     try {
       final path = await _takePicture();
-      return await _frameStore.readAndDelete(path);
+      final bytes = await _frameStore.readAndDelete(path);
+      if (bytes == null) return null;
+      // A frame is exactly one JPEG, and a JPEG ends at its EOI. Some camera
+      // HALs hand back a file a few bytes longer than the picture it contains.
+      return trimJpegPadding(bytes);
     } catch (_) {
       // A dropped frame is normal; never queue, never rethrow into the loop.
       return null;

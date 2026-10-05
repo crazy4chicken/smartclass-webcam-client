@@ -28,12 +28,21 @@ EOI = b"\xff\xd9"
 
 
 def split_frames(raw):
-    """Returns (frames, trailing_byte_count)."""
+    """Returns (frames, trailing).
+
+    `trailing` is the number of bytes the prefixes leave unaccounted for, or
+    None when a prefix promises more bytes than the object holds. The two are
+    different failures: leftover bytes mean the framing nearly lines up, an
+    overrun means it does not line up at all. Walking past the end would report
+    a negative count, which reads as nonsense and hides the cause.
+    """
     frames = []
     i = 0
     while i + 4 <= len(raw):
         (n,) = struct.unpack(">I", raw[i : i + 4])
         i += 4
+        if i + n > len(raw):
+            return frames, None
         frames.append(raw[i : i + n])
         i += n
     return frames, len(raw) - i
@@ -66,7 +75,7 @@ def main():
 
     print(f"bytes={len(raw)}")
     print(f"frames={len(frames)}")
-    print(f"trailing={trailing}")
+    print(f"trailing={'OVERRUN' if trailing is None else trailing}")
     print(f"jpeg_ok={len(jpeg)}/{len(frames)}")
     if sizes:
         print(f"size_min={sizes[0]} size_max={sizes[-1]}")
@@ -78,14 +87,22 @@ def main():
                 handle.write(frame)
             print(f"wrote {name}")
 
-    # The three failure modes this script exists to catch.
+    # The failure modes this script exists to catch.
     problems = []
     if not frames:
         problems.append("no frames recovered")
-    if trailing != 0:
+    if trailing is None:
+        problems.append(
+            "a length prefix promises more bytes than the object holds "
+            "(the framing does not line up at all)"
+        )
+    elif trailing != 0:
         problems.append(f"{trailing} trailing bytes (prefixes do not line up)")
     if len(jpeg) != len(frames):
-        problems.append(f"{len(frames) - len(jpeg)} frame(s) are not whole JPEGs")
+        problems.append(
+            f"{len(frames) - len(jpeg)} frame(s) are not whole JPEGs "
+            "(truncated, or padded after the EOI)"
+        )
 
     if problems:
         print("RESULT: FAIL - " + "; ".join(problems))
