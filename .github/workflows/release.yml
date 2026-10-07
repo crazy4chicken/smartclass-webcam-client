@@ -226,17 +226,30 @@ jobs:
       # ---------------------------------------------------------------------
       # Package
       # ---------------------------------------------------------------------
+      # Every platform stages its final files into `release/`, and the upload
+      # below uses that **one** pattern.
+      #
+      # Not cosmetic: `upload-artifact` sets the artifact's root to "the least
+      # common ancestor of all the search paths" — of the *patterns*, not of
+      # what they matched. An earlier version matched `webcam_client-*.zip`,
+      # `webcam_client-*.tar.gz` and `dist/*.apk` together, so even in the
+      # Android job — where the first two match nothing — the root became the
+      # workspace, and the APK was stored as `dist/…apk` inside the artifact.
+      # The release job then received `dist/dist/…apk`, and its `dist/*` glob
+      # matched only the directory. The APK vanished from the release with no
+      # error anywhere. A single uniform pattern makes the root unambiguous.
       - name: Package (Windows)
         if: matrix.target == 'windows'
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.version }}"
           $stage = "webcam_client-$version-windows-x64"
-          New-Item -ItemType Directory -Path $stage | Out-Null
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
           Copy-Item -Recurse "build/windows/x64/runner/Release/*" $stage
           Copy-Item README.md $stage
-          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
-          Get-Item "$stage.zip" | Select-Object Name, Length
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          Compress-Archive -Path $stage -DestinationPath "release/$stage.zip"
+          Get-ChildItem release
 
       - name: Package (macOS)
         if: matrix.target == 'macos'
@@ -245,15 +258,15 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
           stage="webcam_client-${version}-macos"
-          mkdir -p "$stage"
+          mkdir -p "$stage" release
           # `ditto` rather than `zip`: a .app is a bundle of symlinks and
           # extended attributes, and a plain zip flattens the ones the loader
           # needs, producing an app that will not launch.
           ditto "build/macos/Build/Products/Release/webcam_client.app" \
             "$stage/webcam_client.app"
           cp README.md "$stage"
-          ditto -c -k --sequesterRsrc --keepParent "$stage" "${stage}.zip"
-          ls -la "${stage}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$stage" "release/${stage}.zip"
+          ls -la release
 
       - name: Package (Linux)
         if: matrix.target == 'linux'
@@ -262,11 +275,12 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
           stage="webcam_client-${version}-linux-x64"
+          mkdir -p release
           # The bundle is a self-contained tree; keep the layout intact.
           cp -r build/linux/x64/release/bundle "$stage"
           cp README.md "$stage"
-          tar -czf "${stage}.tar.gz" "$stage"
-          ls -la "${stage}.tar.gz"
+          tar -czf "release/${stage}.tar.gz" "$stage"
+          ls -la release
 
       - name: Package (Android)
         if: matrix.target == 'apk'
@@ -274,24 +288,29 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
-          mkdir -p dist
+          mkdir -p release
           shopt -s nullglob
-          for apk in build/app/outputs/flutter-apk/app-*-release.apk; do
-            abi="$(basename "$apk" | sed -E 's/^app-(.*)-release\.apk$/\1/')"
-            cp "$apk" "dist/webcam_client-${version}-android-${abi}.apk"
-          done
+          apks=(build/app/outputs/flutter-apk/app-*-release.apk)
           shopt -u nullglob
-          ls -la dist
+          # `nullglob` makes a failed glob an empty array instead of a literal
+          # path; without this check the loop would simply not run and the
+          # artifact would go up empty.
+          if [ ${#apks[@]} -eq 0 ]; then
+            echo "::error::flutter build apk --split-per-abi produced no APKs"
+            exit 1
+          fi
+          for apk in "${apks[@]}"; do
+            abi="$(basename "$apk" | sed -E 's/^app-(.*)-release\.apk$/\1/')"
+            cp "$apk" "release/webcam_client-${version}-android-${abi}.apk"
+          done
+          ls -la release
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          # Only one of these matches per job; `if-no-files-found` catches the
-          # case where the build "succeeded" but produced nothing.
-          path: |
-            webcam_client-*.zip
-            webcam_client-*.tar.gz
-            dist/*.apk
+          # One pattern for every platform. See the note above the packaging
+          # steps for why mixing in a subdirectory silently loses files.
+          path: release/*
           if-no-files-found: error
           retention-days: 14
 
@@ -309,8 +328,35 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: List assets
-        run: ls -la dist
+      # Publishing a release that is quietly missing a platform is the worst
+      # outcome: it looks fine and nobody notices until someone tries to
+      # download. `files: dist/*` matches directories as well as files and the
+      # release action skips directories without complaining, so a nested path
+      # (`dist/dist/…`) disappears silently. Assert the set instead.
+      - name: Verify every platform is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "--- downloaded ---"
+          ls -la dist
+          echo
+          missing=()
+          for suffix in \
+            '-windows-x64.zip' \
+            '-macos.zip' \
+            '-linux-x64.tar.gz' \
+            '-android-arm64-v8a.apk'
+          do
+            # shellcheck disable=SC2144
+            if ! ls dist/*"${suffix}" >/dev/null 2>&1; then
+              missing+=("${suffix}")
+            fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::release would be incomplete, missing: ${missing[*]}"
+            exit 1
+          fi
+          echo "all four platforms present"
 
       - uses: softprops/action-gh-release@v2
         with:

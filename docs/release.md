@@ -90,14 +90,24 @@ base64 -w0 release.jks    # 贴进 ANDROID_KEYSTORE_BASE64
 
 ## 几个实现上的坑（改工作流前先读）
 
+- **所有平台都必须把产物放进同一个 `release/` 目录，上传只用 `release/*` 这一个 pattern。**
+  `actions/upload-artifact` 把 artifact 的根目录设成 **「所有 search path 的最小公共祖先」**
+  —— 注意是**路径 pattern 的**公共祖先，**不是实际匹配到的文件的**。
+  早先的写法同时写了 `webcam_client-*.zip`、`webcam_client-*.tar.gz`、`dist/*.apk`：
+  在 Android 那个 job 里前两个什么都匹配不到，但它们照样把根目录拉到了工作区根，
+  于是 APK 在 artifact 里被存成 `dist/….apk`；release job 拿到的是 `dist/dist/….apk`，
+  而 `files: dist/*` 只匹配到那个**目录**（release action 会跳过目录且不报错）→
+  **APK 从 release 里凭空消失，全程零报错。** 只有 Android 用了子目录，所以只有它中招。
+- **release job 会校验四个平台都在**，缺任何一个直接 `::error::` 退出。
+  发布一个"看起来正常但少了某个平台"的 release 是最糟的结果 —— 没人会立刻发现。
 - **版本号是「盖」进 `pubspec.yaml` 的，不是用 `--build-name` 传的。**
   Windows 和 Linux 的 `flutter build` 没有 `--build-name`，而 Android 的
   `versionName`/`versionCode` 直接读 pubspec —— 只有改 pubspec 才能让四个平台
   对同一个版本号。文件只在 runner 里改，不提交。
 - **macOS 打包必须用 `ditto` 而不是 `zip`。** `.app` 是带符号链接和扩展属性的 bundle，
   普通 zip 会把 loader 需要的链接拍平，产出一个打不开的 app。
-- **Android 的 `sdkmanager --licenses` 要在安装 platform 之前跑**，
-  且它接受完许可后仍可能返回非 0，所以状态被刻意丢弃（真正的检查是后面的安装）。
+- **Android 的 `setup-android` 必须显式传 `packages`**（默认值是已被删除的 `tools` 包），
+  而且**包名按空格分隔**；NDK 是必需的（`ndkVersion = flutter.ndkVersion`）。
 - **`fail-fast: false`**：Windows 挂了不该把 Linux / Android 的产物一起取消。
 - **`pubspec.lock` 是提交进仓库的。** 这是应用不是库；不提交的话 CI 每次取
   "最新的兼容版本"，某天依赖发了新版就可能出一个和本地不一样的包。
