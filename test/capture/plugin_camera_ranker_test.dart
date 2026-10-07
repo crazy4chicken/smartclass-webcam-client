@@ -5,6 +5,8 @@ import 'package:webcam_client/src/capture/camera_order.dart';
 import 'package:webcam_client/src/capture/camera_service.dart';
 import 'package:webcam_client/src/capture/plugin_camera_ranker.dart';
 
+import '../support/doubles.dart';
+
 const CameraDescription _front = CameraDescription(
   name: 'front',
   lensDirection: CameraLensDirection.front,
@@ -17,39 +19,6 @@ const CameraDescription _back = CameraDescription(
   sensorOrientation: 0,
 );
 
-/// A controller that answers without touching any platform channel.
-///
-/// `CameraController` extends `ValueNotifier<CameraValue>` and its constructor
-/// makes no platform calls, so overriding [initialize] and writing [value] is
-/// enough — no `CameraPlatform` double is needed.
-class _FakeController extends CameraController {
-  _FakeController(
-    CameraDescription description,
-    ResolutionPreset preset, {
-    this.previewSize,
-    this.fails = false,
-  }) : super(description, preset, enableAudio: false);
-
-  final Size? previewSize;
-  final bool fails;
-
-  bool initialized = false;
-  bool disposed = false;
-
-  @override
-  Future<void> initialize() async {
-    if (fails) throw CameraException('CameraAccessDenied', 'denied');
-    initialized = true;
-    value = value.copyWith(isInitialized: true, previewSize: previewSize);
-  }
-
-  @override
-  Future<void> dispose() async {
-    disposed = true;
-    super.dispose();
-  }
-}
-
 void main() {
   const descriptors = [
     CameraDescriptor(name: 'front', index: 0, lensDirection: 'front'),
@@ -57,11 +26,11 @@ void main() {
   ];
 
   test('ranks every camera with exactly one open each', () async {
-    final controllers = <_FakeController>[];
+    final controllers = <FakeCameraController>[];
     final ranker = PluginCameraRanker(
       listCameras: () async => const [_front, _back],
       controllerFactory: (description) {
-        final controller = _FakeController(
+        final controller = FakeCameraController(
           description,
           ResolutionPreset.max,
           previewSize: description.name == 'back'
@@ -97,7 +66,7 @@ void main() {
       final ranker = PluginCameraRanker(
         listCameras: () async => const [_front],
         controllerFactory: (description) {
-          final controller = _FakeController(
+          final controller = FakeCameraController(
             description,
             ResolutionPreset.max,
             previewSize: const Size(640, 480),
@@ -116,14 +85,16 @@ void main() {
   test(
     'a camera that fails to open reports no ceiling instead of throwing',
     () async {
-      final controllers = <_FakeController>[];
+      final controllers = <FakeCameraController>[];
       final ranker = PluginCameraRanker(
         listCameras: () async => const [_front, _back],
         controllerFactory: (description) {
-          final controller = _FakeController(
+          final controller = FakeCameraController(
             description,
             ResolutionPreset.max,
-            fails: description.name == 'back',
+            failOnInitialize: description.name == 'back'
+                ? CameraException('CameraAccessDenied', 'denied')
+                : null,
             previewSize: const Size(1280, 720),
           );
           controllers.add(controller);
@@ -145,7 +116,7 @@ void main() {
     final ranker = PluginCameraRanker(
       listCameras: () async => const [_front],
       controllerFactory: (description) =>
-          _FakeController(description, ResolutionPreset.max),
+          FakeCameraController(description, ResolutionPreset.max),
     );
 
     final ranked = await ranker.rank(const [
@@ -163,7 +134,7 @@ void main() {
         listCameras: () async => const [_front],
         controllerFactory: (description) {
           opened.add(description.name);
-          return _FakeController(description, ResolutionPreset.max);
+          return FakeCameraController(description, ResolutionPreset.max);
         },
       );
 
