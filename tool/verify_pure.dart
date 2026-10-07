@@ -31,6 +31,7 @@ import 'package:webcam_client/src/backend/registration_request.dart';
 import 'package:webcam_client/src/backend/smartclass_backend_gateway.dart';
 import 'package:webcam_client/src/backend/unrecognized_command_log.dart';
 import 'package:webcam_client/src/capture/camera_backend.dart';
+import 'package:webcam_client/src/capture/camera_capabilities.dart';
 import 'package:webcam_client/src/capture/camera_provider.dart';
 import 'package:webcam_client/src/capture/camera_resolution.dart';
 import 'package:webcam_client/src/capture/camera_service.dart';
@@ -1810,6 +1811,267 @@ void checkJpegTrim() {
   );
 }
 
+/// A structurally real JPEG carrying a start-of-frame segment.
+///
+/// The marker is a parameter so the checks can cover the whole `C0`-`CF` range
+/// rather than only baseline.
+Uint8List jpegWithSof({
+  required int width,
+  required int height,
+  int marker = 0xC0,
+  bool withTrailingSegment = false,
+}) {
+  return Uint8List.fromList(<int>[
+    0xFF, 0xD8, // SOI
+    0xFF, 0xE0, 0x00, 0x10, // APP0, length 16
+    ...List<int>.filled(14, 0x00),
+    if (withTrailingSegment) ...[
+      0xFF,
+      0xDB,
+      0x00,
+      0x06,
+      ...List<int>.filled(4, 0x00),
+    ],
+    0xFF, marker, 0x00, 0x11, // SOF, length 17
+    0x08,
+    (height >> 8) & 0xFF, height & 0xFF,
+    (width >> 8) & 0xFF, width & 0xFF,
+    0x03,
+    0x01, 0x22, 0x00,
+    0x02, 0x11, 0x01,
+    0x03, 0x11, 0x01,
+    0xFF, 0xD9, // EOI
+  ]);
+}
+
+void checkJpegSize() {
+  section('jpeg size reader');
+
+  eq(
+    'SOF0 dimensions are read',
+    jpegSize(jpegWithSof(width: 1280, height: 720)).toString(),
+    'CameraResolution(1280x720)',
+  );
+  eq(
+    'a portrait capture is reported as it is',
+    jpegSize(jpegWithSof(width: 480, height: 640)).toString(),
+    'CameraResolution(480x640)',
+  );
+  eq(
+    'the full 16-bit range is read',
+    jpegSize(jpegWithSof(width: 3840, height: 2160)).toString(),
+    'CameraResolution(3840x2160)',
+  );
+  eq(
+    'a segment before the frame header is skipped',
+    jpegSize(jpegWithSof(width: 1024, height: 768, withTrailingSegment: true))
+        .toString(),
+    'CameraResolution(1024x768)',
+  );
+
+  var sofFlavours = 0;
+  for (final marker in <int>[
+    0xC0,
+    0xC1,
+    0xC2,
+    0xC3,
+    0xC5,
+    0xC6,
+    0xC7,
+    0xC9,
+    0xCA,
+    0xCB,
+    0xCD,
+    0xCE,
+    0xCF,
+  ]) {
+    if (jpegSize(jpegWithSof(width: 640, height: 480, marker: marker)) !=
+        null) {
+      sofFlavours++;
+    }
+  }
+  eq('every start-of-frame flavour is read', sofFlavours, 13);
+
+  eq('an empty buffer is null', jpegSize(Uint8List(0)), null);
+  eq(
+    'a two-byte buffer is null',
+    jpegSize(Uint8List.fromList([0xFF, 0xD8])),
+    null,
+  );
+  eq(
+    'a buffer that is not a JPEG is null',
+    jpegSize(Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 0, 0, 0, 0])),
+    null,
+  );
+  eq(
+    'a JPEG with no frame header is null',
+    jpegSize(
+      Uint8List.fromList(<int>[
+        0xFF,
+        0xD8,
+        0xFF,
+        0xE0,
+        0x00,
+        0x10,
+        ...List<int>.filled(14, 0x00),
+        0xFF,
+        0xD9,
+      ]),
+    ),
+    null,
+  );
+  eq(
+    'a truncated frame header is null, not a throw',
+    jpegSize(
+      Uint8List.fromList(<int>[
+        0xFF,
+        0xD8,
+        0xFF,
+        0xC0,
+        0x00,
+        0x11,
+        0x08,
+        0x02,
+        0xD0,
+      ]),
+    ),
+    null,
+  );
+  eq(
+    'a thumbnail after the start of scan is not mistaken for the picture',
+    jpegSize(
+      Uint8List.fromList(<int>[
+        0xFF,
+        0xD8,
+        0xFF,
+        0xDA,
+        0x00,
+        0x08,
+        ...List<int>.filled(6, 0x00),
+        ...jpegWithSof(width: 160, height: 120),
+      ]),
+    ),
+    null,
+  );
+}
+
+void checkCameraCapabilities() {
+  section('camera capabilities');
+
+  const vga = CameraResolution(width: 640, height: 480);
+  const svga = CameraResolution(width: 800, height: 600);
+  const xga = CameraResolution(width: 1024, height: 768);
+  const hd = CameraResolution(width: 1280, height: 720);
+  const fhd = CameraResolution(width: 1920, height: 1080);
+
+  final deduped = CameraCapabilities.of(
+    resolutions: <CameraResolution>[vga, fhd, vga, hd],
+    framerates: <int>[5, 30, 30, 15],
+  );
+  eq(
+    'duplicate resolutions collapse and sort by pixel count',
+    deduped.resolutions.map((r) => r.label).join(','),
+    '1920x1080,1280x720,640x480',
+  );
+  eq(
+    'duplicate frame rates collapse and sort descending',
+    deduped.framerates.join(','),
+    '30,15,5',
+  );
+
+  final measured = CameraCapabilities.of(
+    resolutions: <CameraResolution>[fhd, vga],
+    framerates: <int>[30],
+  ).withCommonBaseline();
+  eq(
+    'the common ladder fills the gaps below the ceiling',
+    measured.resolutions.map((r) => r.label).join(','),
+    '1920x1080,1280x720,1024x768,800x600,640x480,320x240',
+  );
+  check(
+    'the common frame rates are added',
+    kCommonFramerates.every(measured.framerates.contains),
+  );
+  check(
+    'the declared list is still free of duplicates',
+    measured.resolutions.toSet().length == measured.resolutions.length &&
+        measured.framerates.toSet().length == measured.framerates.length,
+  );
+
+  final capped = CameraCapabilities.of(
+    resolutions: <CameraResolution>[vga],
+    framerates: <int>[30],
+  ).withCommonBaseline();
+  check(
+    'nothing above the measured maximum is ever declared',
+    capped.resolutions.every((r) => r.pixelCount <= vga.pixelCount),
+  );
+  eq(
+    'so a 480p camera tops out at 640x480',
+    capped.resolutions.first.label,
+    '640x480',
+  );
+
+  check(
+    'an unmeasured camera declares nothing',
+    CameraCapabilities.empty.withCommonBaseline().isEmpty,
+  );
+
+  // The server rejects a registration that omits the camera's *current* mode.
+  final current = CameraCapabilities.of(
+    resolutions: <CameraResolution>[vga, xga],
+    framerates: <int>[60, 30, 15],
+  ).withCommonBaseline().withCurrent(resolution: svga, fps: 5);
+  check(
+    'the current resolution is declared',
+    current.resolutions.contains(svga),
+  );
+  check('the current frame rate is declared', current.framerates.contains(5));
+  check(
+    'withCurrent still leaves the list deduped',
+    current.resolutions.toSet().length == current.resolutions.length,
+  );
+
+  final roundTripped = CameraCapabilities.fromJson(measured.toJson());
+  eq(
+    'capabilities survive a JSON round trip',
+    roundTripped.toString(),
+    measured.toString(),
+  );
+  eq(
+    'a null payload answers empty',
+    CameraCapabilities.fromJson(null).isEmpty,
+    true,
+  );
+  eq(
+    'a corrupt payload answers empty rather than throwing',
+    CameraCapabilities.fromJson(<String, Object?>{
+      'resolutions': <Object?>['not-a-size', 640, null, '0x480'],
+      'framerates': <Object?>['30', null, -5],
+    }).isEmpty,
+    true,
+  );
+  eq(
+    'the current pair survives a JSON round trip',
+    CameraCapabilities.fromJson(current.toJson()).toString(),
+    current.toString(),
+  );
+
+  const mode = CameraMode(resolution: hd, fps: 5);
+  check(
+    'an unchanged mode does not differ',
+    !mode.differsFrom(const CameraMode(resolution: hd, fps: 5)),
+  );
+  check(
+    'a changed resolution differs',
+    mode.differsFrom(const CameraMode(resolution: fhd, fps: 5)),
+  );
+  check(
+    'a changed frame rate differs',
+    mode.differsFrom(const CameraMode(resolution: hd, fps: 15)),
+  );
+}
+
 void checkMjpegEncoder() {
   section('mjpeg encoder');
   fakeAsync((async) {
@@ -2833,6 +3095,8 @@ Future<void> main() async {
   await checkFramePump();
   checkSerialLock();
   checkJpegTrim();
+  checkJpegSize();
+  checkCameraCapabilities();
   checkMjpegEncoder();
   await checkCameraProvider();
   await checkFrameStore();
