@@ -223,6 +223,22 @@ class CameraMode {
   String toString() => 'CameraMode(${resolution.label} @ ${fps}fps)';
 }
 
+/// What one camera will be announced as accepting: the measured set, the common
+/// ladder below its ceiling, and the mode it is at now.
+///
+/// **One function rather than two call sites computing it.** The registration
+/// and the `switch_camera` validator have to agree exactly — a device that
+/// declares 1024x768 and then refuses it is worse than one that declares less,
+/// because the operator picked from a list the device itself published.
+CameraCapabilities declaredCapabilities({
+  required CameraCapabilities measured,
+  required CameraResolution currentResolution,
+  required int currentFps,
+}) => measured.withCommonBaseline().withCurrent(
+  resolution: currentResolution,
+  fps: currentFps,
+);
+
 /// Reads a `WIDTHxHEIGHT` label, or null.
 ///
 /// Shared by the announcement path and the capability cache so both agree on

@@ -71,6 +71,8 @@ void registerCommonFallbacks() {
   registerFallbackValue(Uint8List(0));
   // Needed for `when(() => gateway.start(any()))`.
   registerFallbackValue(testCredentials);
+  // Needed for `when(() => camera.reconfigure(any()))`.
+  registerFallbackValue(CaptureConfig.defaults());
 }
 
 // --- mocktail mocks ---------------------------------------------------------

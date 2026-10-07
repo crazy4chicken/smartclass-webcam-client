@@ -189,9 +189,13 @@ CameraAnnouncement _announcementFor(
   // The common ladder first, then the current mode — in that order, and the
   // order matters: `withCurrent` is what guarantees the pair the server insists
   // on, and applying it first would let the ladder mask a mismatch.
-  final declared = camera.capabilities.withCommonBaseline().withCurrent(
-    resolution: camera.resolution,
-    fps: safeFps,
+  //
+  // `declaredCapabilities` is shared with the coordinator's `switch_camera`
+  // validator, so what is published here is exactly what will be accepted.
+  final declared = declaredCapabilities(
+    measured: camera.capabilities,
+    currentResolution: camera.resolution,
+    currentFps: safeFps,
   );
 
   // The server hard-rejects an empty list, and a kiosk that cannot register is

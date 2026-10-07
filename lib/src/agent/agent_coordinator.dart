@@ -6,6 +6,7 @@ import '../backend/protocol/device_command.dart';
 import '../backend/protocol/device_message.dart';
 import '../backend/unrecognized_command_log.dart';
 import '../capture/camera_backend.dart';
+import '../capture/camera_capabilities.dart';
 import '../capture/camera_provider.dart';
 import '../capture/camera_resolution.dart';
 import '../capture/camera_service.dart';
@@ -36,6 +37,30 @@ typedef BackendGatewayFactory = BackendGateway Function(
   ConnectionSettings connection,
 );
 
+/// The starting mode for every announced camera.
+///
+/// All of them start at the same place because the device captures from exactly
+/// one camera at one geometry: [CaptureConfig] is the only source of truth for
+/// "what the pipeline is built at", and every camera is driven by it. A camera
+/// that has never been switched to is therefore at the default, whether or not
+/// it has ever been opened.
+///
+/// The count comes from the capabilities list, because that is what the
+/// announcements are built from and the two must agree on how many cameras
+/// exist. At least one entry always exists: a device whose probe found nothing
+/// still has a camera 0, and `switch_camera(camera=0)` must not be out of range.
+List<CameraMode> _seedModes({
+  required List<CameraCapabilities> capabilities,
+  required CaptureConfig config,
+  required StreamSettings settings,
+}) {
+  final count = capabilities.isEmpty ? 1 : capabilities.length;
+  return <CameraMode>[
+    for (var i = 0; i < count; i++)
+      CameraMode(resolution: config.resolution, fps: settings.fps),
+  ];
+}
+
 /// Owns the camera, the command router and the frame push.
 ///
 /// The device is a **subordinate**: it pushes nothing until the server asks.
@@ -56,6 +81,10 @@ class AgentCoordinator {
     String? initialBackendId,
     CaptureConfig? config,
     StreamSettings? settings,
+    List<CameraCapabilities> capabilities = const <CameraCapabilities>[],
+    List<CaptureCodec> announcedCodecs = const <CaptureCodec>[
+      CaptureCodec.mjpeg,
+    ],
     void Function(String message)? log,
   }) : _gatewayFactory = gatewayFactory,
        _connection = connection,
@@ -66,11 +95,45 @@ class AgentCoordinator {
        _backendId = initialBackendId,
        _config = config ?? CaptureConfig.defaults(),
        _settings = settings ?? StreamSettings.defaults(),
+       _capabilities = List<CameraCapabilities>.unmodifiable(capabilities),
+       _announcedCodecs = List<CaptureCodec>.unmodifiable(
+         announcedCodecs.isEmpty
+             ? const <CaptureCodec>[CaptureCodec.mjpeg]
+             : announcedCodecs,
+       ),
+       _modes = _seedModes(
+         capabilities: capabilities,
+         config: config ?? CaptureConfig.defaults(),
+         settings: settings ?? StreamSettings.defaults(),
+       ),
        _log = log;
 
   final BackendGatewayFactory _gatewayFactory;
   final CameraProvider _cameraProvider;
   final FramePumpFactory _pumpFactory;
+
+  /// What each announced camera was measured to accept, indexed by
+  /// `camera_enum`. Empty on a device whose probe found nothing, which is not a
+  /// failure state — it just means every camera declares only the mode it is in.
+  final List<CameraCapabilities> _capabilities;
+
+  /// The codecs announced at registration, in order. The **first** is the
+  /// preferred one, which is what an unnamed `start_recording.codec` selects.
+  final List<CaptureCodec> _announcedCodecs;
+
+  /// The mode each announced camera is at right now, indexed by `camera_enum`.
+  ///
+  /// The server stores **nothing** for `switch_camera`, so this is the only
+  /// record of what the device is doing — and it has to be re-announced (see
+  /// [_reregister]) rather than merely remembered, because the server snapshots
+  /// the *registration's* values into the stream's `metadata` at
+  /// `recording/start`.
+  ///
+  /// Grows if a command names an enum past the end: the backend range-checks
+  /// the real camera list, so a value that gets this far is one the server
+  /// believes in, and refusing it locally would be the device inventing a
+  /// second opinion.
+  final List<CameraMode> _modes;
 
   /// Replaced wholesale by [reconfigure]; never mutated in place.
   BackendGateway _gateway;
@@ -134,6 +197,71 @@ class AgentCoordinator {
   /// The frame rate announced to the server.
   int get announcedFps => _settings.fps;
 
+  /// The mode each announced camera is at, indexed by `camera_enum`.
+  ///
+  /// Bootstrap reads this to build the announcements, which is what makes a
+  /// parameter-changing `switch_camera` visible to the server at all.
+  List<CameraMode> get cameraModes => List<CameraMode>.unmodifiable(_modes);
+
+  /// What the probe measured, indexed by `camera_enum`.
+  List<CameraCapabilities> get capabilities =>
+      List<CameraCapabilities>.unmodifiable(_capabilities);
+
+  /// The announced codecs, in order. The first is the preferred one.
+  List<CaptureCodec> get announcedCodecs =>
+      List<CaptureCodec>.unmodifiable(_announcedCodecs);
+
+  /// The codecs this pipeline can actually produce.
+  ///
+  /// `CaptureCodec.isIntraOnly` is the test rather than a name comparison: the
+  /// frame pump emits one self-contained picture per frame, so a codec that
+  /// needs inter-frame state cannot be produced no matter what was announced.
+  /// Today that is `mjpeg` and nothing else — see the deferred native-encoder
+  /// work in the plan.
+  ///
+  /// Checking this rather than membership of [_announcedCodecs] matters: an
+  /// announcement is a claim, and a wrong claim must not be able to make the
+  /// device ack a codec it cannot encode.
+  List<CaptureCodec> get _producibleCodecs => <CaptureCodec>[
+    for (final codec in _announcedCodecs)
+      if (codec.isIntraOnly) codec,
+  ];
+
+  /// The mode the active camera is at.
+  CameraMode get activeMode => _modeFor(_cameraEnum);
+
+  /// What [cameraEnum] was announced as accepting.
+  ///
+  /// The same computation `buildAnnouncements` performs, so the device accepts
+  /// exactly what it published. A value outside this set was never offered to
+  /// the operator, so honouring it would mean capturing at a geometry the
+  /// server has no record of.
+  CameraCapabilities declaredFor(int cameraEnum) => declaredCapabilities(
+    measured: _measuredFor(cameraEnum),
+    currentResolution: _modeFor(cameraEnum).resolution,
+    currentFps: _modeFor(cameraEnum).fps,
+  );
+
+  CameraCapabilities _measuredFor(int cameraEnum) =>
+      cameraEnum >= 0 && cameraEnum < _capabilities.length
+      ? _capabilities[cameraEnum]
+      : CameraCapabilities.empty;
+
+  /// The mode of [cameraEnum], or the current default for one past the end.
+  CameraMode _modeFor(int cameraEnum) =>
+      cameraEnum >= 0 && cameraEnum < _modes.length
+      ? _modes[cameraEnum]
+      : CameraMode(resolution: _config.resolution, fps: _settings.fps);
+
+  void _setMode(int cameraEnum, CameraMode mode) {
+    while (_modes.length <= cameraEnum) {
+      _modes.add(
+        CameraMode(resolution: _config.resolution, fps: _settings.fps),
+      );
+    }
+    _modes[cameraEnum] = mode;
+  }
+
   StreamSettings get settings => _settings;
 
   CameraService? get cameraService => _camera;
@@ -169,6 +297,11 @@ class AgentCoordinator {
   /// the server log while nothing is being recorded.
   Map<String, Object?> reportStatus() => {
     'active_camera': _cameraEnum,
+    // The mode the device is actually in. `switch_camera` stores nothing
+    // server-side, so this periodic report is the only place an operator can
+    // see the current geometry without reading the registration back.
+    'resolution': activeMode.resolution.label,
+    'fps': activeMode.fps,
     'recording': _captureState == CaptureState.recording,
     'stream_id': _activeStreamId,
     'frames_sent': _framesSent,
@@ -343,14 +476,17 @@ class AgentCoordinator {
 
   /// A short, greppable rendering of a command for the console.
   static String _describe(DeviceCommand command) => switch (command) {
-    StartRecordingCommand(:final cameraEnum, :final streamId) =>
-      'start_recording(camera=$cameraEnum, stream=$streamId)',
+    StartRecordingCommand(:final cameraEnum, :final streamId, :final codec) =>
+      'start_recording(camera=$cameraEnum, stream=$streamId'
+          '${codec == null ? '' : ', codec=${codec.wireName}'})',
     StopRecordingCommand(:final cameraEnum, :final streamId) =>
       'stop_recording(camera=$cameraEnum, stream=$streamId)',
     TakePhotoCommand(:final cameraEnum, :final requestId) =>
       'take_photo(camera=$cameraEnum, request=$requestId)',
-    SwitchCameraCommand(:final cameraEnum) =>
-      'switch_camera(camera=$cameraEnum)',
+    SwitchCameraCommand(:final cameraEnum, :final resolution, :final fps) =>
+      'switch_camera(camera=$cameraEnum'
+          '${resolution == null ? '' : ', ${resolution.label}'}'
+          '${fps == null ? '' : ' @ ${fps}fps'})',
     PingCommand() => 'ping',
   };
 
@@ -374,6 +510,27 @@ class AgentCoordinator {
         command,
         ok: false,
         error: 'camera ${command.cameraEnum} is not available',
+      );
+      return;
+    }
+
+    // Absent means the device's preferred codec, which is the **first** entry
+    // of what was announced — not a hardcoded default that could drift from the
+    // registration.
+    final codec = command.codec ?? _announcedCodecs.first;
+    final producible = _producibleCodecs;
+    if (!producible.contains(codec)) {
+      // The server's stream row is already `active` and nothing here rolls it
+      // back, so the device has to be honest that it is not feeding it.
+      // Encoding something else and acking `ok` would leave an operator with a
+      // stream that looks alive and a recording that is not what was asked for.
+      await _ack(
+        command,
+        ok: false,
+        error:
+            'codec ${codec.wireName} is not available; '
+            'this device can produce '
+            '${producible.map((c) => c.wireName).join('/')}',
       );
       return;
     }
@@ -479,13 +636,86 @@ class AgentCoordinator {
       return;
     }
 
+    final cameraEnum = command.cameraEnum;
+    final previous = _modeFor(cameraEnum);
+    final requested = CameraMode(
+      resolution: command.resolution ?? previous.resolution,
+      fps: command.fps ?? previous.fps,
+    );
+
+    // Validate against what this camera was **announced** as accepting. The
+    // operator picks from the published lists, so a value outside them is a
+    // mismatch, and applying it would mean capturing at a geometry the server
+    // has no record of while its stream row stays `active`.
+    final declared = declaredFor(cameraEnum);
+    if (!declared.resolutions.contains(requested.resolution)) {
+      await _ack(
+        command,
+        ok: false,
+        error:
+            'camera $cameraEnum does not support ${requested.resolution.label}; '
+            'declared ${declared.resolutions.map((r) => r.label).join('/')}',
+      );
+      return;
+    }
+    if (!declared.framerates.contains(requested.fps)) {
+      await _ack(
+        command,
+        ok: false,
+        error:
+            'camera $cameraEnum does not support ${requested.fps}fps; '
+            'declared ${declared.framerates.join('/')}',
+      );
+      return;
+    }
+
+    // Build the config first and only adopt it on success: a `reconfigure` that
+    // rolls back must not leave the coordinator believing in a geometry the
+    // camera is not actually at.
+    final resolutionChanged = requested.resolution != previous.resolution;
+    final nextConfig = resolutionChanged
+        ? _config.copyWith(
+            width: requested.resolution.width,
+            height: requested.resolution.height,
+          )
+        : _config;
+
     try {
-      await camera.switchCamera(command.cameraEnum);
-      _cameraEnum = command.cameraEnum;
-      await _ack(command, ok: true);
+      await camera.switchCamera(cameraEnum);
+      if (resolutionChanged) {
+        await camera.reconfigure(nextConfig);
+      }
     } catch (error) {
       await _ack(command, ok: false, error: '$error');
+      return;
     }
+
+    _config = nextConfig;
+    _settings = _settings.copyWith(fps: requested.fps);
+    _cameraEnum = cameraEnum;
+    _setMode(cameraEnum, requested);
+    await _ack(command, ok: true);
+
+    if (requested.differsFrom(previous)) {
+      // `switch_camera` stores no server state — the protocol doc says so
+      // outright — so the server's `metadata.resolution` / `metadata.fps` are
+      // whatever the registration said. Without re-registering, the next
+      // recording would be recorded as the old mode.
+      await _reregister();
+    }
+  }
+
+  /// Reconnects so the server re-registers with the current modes.
+  ///
+  /// Deliberately routed through [reconfigure] rather than wiring a second
+  /// reconnect path here: that method already owns "stop media, drop the old
+  /// gateway, build a new one, reconnect", and the `401`-terminal-state
+  /// recovery that goes with it. What makes the re-registration carry the new
+  /// mode is bootstrap's gateway factory, which builds the announcements from
+  /// [cameraModes] at the moment it is called.
+  Future<void> _reregister() async {
+    _report('  re-registering: ${_modes.map((m) => m.toString()).join(', ')}');
+    await reconfigure(_connection);
   }
 
   Future<void> _ack(

@@ -132,6 +132,8 @@ class _FakeCameraService implements CameraService {
   final Duration? delay;
 
   int captureCalls = 0;
+  int reconfigureCalls = 0;
+  CaptureConfig? lastConfig;
   int _inFlight = 0;
   int maxConcurrentCaptures = 0;
   int _cameraIndex = 0;
@@ -141,7 +143,11 @@ class _FakeCameraService implements CameraService {
   @override
   Future<void> initialize() async {}
   @override
-  Future<void> reconfigure(CaptureConfig config) async {}
+  Future<void> reconfigure(CaptureConfig config) async {
+    reconfigureCalls++;
+    lastConfig = config;
+  }
+
   @override
   Future<void> switchCamera(int index) async => _cameraIndex = index;
 
@@ -3477,6 +3483,326 @@ Future<void> checkCoordinator() async {
       true,
     );
     eq('the link is live', coordinator.linkState, LinkState.live);
+  }
+
+  // --- camera mode: switch_camera parameters and the requested codec --------
+
+  // What a 1080p webcam really reports. The device runs at the built-in default
+  // 1280x720 @ 5fps, which is *not* one of the probed rates.
+  final measured = CameraCapabilities.of(
+    resolutions: <CameraResolution>[
+      const CameraResolution(width: 1920, height: 1080),
+      const CameraResolution(width: 1280, height: 720),
+      const CameraResolution(width: 640, height: 480),
+    ],
+    framerates: <int>[60, 30, 15],
+  );
+
+  ({
+    AgentCoordinator coordinator,
+    _FakeGateway gateway,
+    _FakeCameraService camera,
+  })
+  buildWithMode({
+    int cameraCount = 1,
+    List<CaptureCodec> announcedCodecs = const <CaptureCodec>[
+      CaptureCodec.mjpeg,
+    ],
+    _FakeGatewayFactory? factory,
+  }) {
+    final gateway = _FakeGateway();
+    final camera = _FakeCameraService(bytes: Uint8List.fromList(<int>[1]));
+    // An explicit closure either way: `factory` and a closure share no
+    // supertype, so the conditional expression would widen to `Object`.
+    final BackendGatewayFactory gatewayFactory = factory == null
+        ? (_) => gateway
+        : (ConnectionSettings c) => factory(c);
+    final coordinator = AgentCoordinator(
+      gatewayFactory: gatewayFactory,
+      cameraProvider: CameraProvider(
+        backends: <CameraBackend>[_FakeBackend('stub', probeResult: _okProbe)],
+      ),
+      pumpFactory: () => _FakeFramePump(),
+      connection: testConnection,
+      initialCamera: camera,
+      capabilities: <CameraCapabilities>[
+        for (var i = 0; i < cameraCount; i++) measured,
+      ],
+      announcedCodecs: announcedCodecs,
+    );
+    return (coordinator: coordinator, gateway: gateway, camera: camera);
+  }
+
+  {
+    // A declared resolution and rate are applied for real: the capture
+    // geometry is rebuilt, not merely recorded.
+    final h = buildWithMode();
+    await h.coordinator.handleCommand(
+      const SwitchCameraCommand(
+        id: 'e',
+        cameraEnum: 0,
+        resolution: CameraResolution(width: 640, height: 480),
+        fps: 30,
+      ),
+    );
+    eq('a declared mode is accepted', h.gateway.acks.single.ok, true);
+    eq(
+      'the mode is recorded against the announced enum',
+      h.coordinator.activeMode.toString(),
+      'CameraMode(640x480 @ 30fps)',
+    );
+    eq(
+      'the camera is rebuilt at the new geometry',
+      h.camera.lastConfig?.width,
+      640,
+    );
+    eq('and at the new height', h.camera.lastConfig?.height, 480);
+    eq('the announced rate follows', h.coordinator.announcedFps, 30);
+  }
+
+  {
+    // A resolution the device never published. Refusing is the point: applying
+    // it would mean capturing at a geometry the server has no record of while
+    // its stream row stays `active`.
+    final h = buildWithMode();
+    await h.coordinator.handleCommand(
+      const SwitchCameraCommand(
+        id: 'e',
+        cameraEnum: 0,
+        resolution: CameraResolution(width: 3840, height: 2160),
+      ),
+    );
+    eq('an undeclared resolution is refused', h.gateway.acks.single.ok, false);
+    check(
+      'and the error names the value',
+      h.gateway.acks.single.error!.contains('3840x2160'),
+    );
+    eq('the camera was not touched', h.camera.cameraIndex, 0);
+    eq('nor rebuilt', h.camera.reconfigureCalls, 0);
+    eq(
+      'and the mode is unchanged',
+      h.coordinator.activeMode.toString(),
+      'CameraMode(1280x720 @ 5fps)',
+    );
+  }
+
+  {
+    // 12 is neither measured nor on the common ladder.
+    final h = buildWithMode();
+    await h.coordinator.handleCommand(
+      const SwitchCameraCommand(id: 'e', cameraEnum: 0, fps: 12),
+    );
+    eq('an undeclared frame rate is refused', h.gateway.acks.single.ok, false);
+    check(
+      'and the error names the rate',
+      h.gateway.acks.single.error!.contains('12'),
+    );
+  }
+
+  {
+    // 25 *is* declared: the common ladder below the ceiling is published too,
+    // and the operator picks from the published list. Refusing it would be the
+    // device contradicting its own announcement.
+    final h = buildWithMode();
+    await h.coordinator.handleCommand(
+      const SwitchCameraCommand(id: 'e', cameraEnum: 0, fps: 25),
+    );
+    eq(
+      'a rate from the published ladder is accepted',
+      h.gateway.acks.single.ok,
+      true,
+    );
+    eq('and applied', h.coordinator.activeMode.fps, 25);
+  }
+
+  {
+    // No parameters: the camera changes, the mode does not.
+    final h = buildWithMode(cameraCount: 2);
+    await h.coordinator.handleCommand(
+      const SwitchCameraCommand(id: 'e', cameraEnum: 1),
+    );
+    eq('a bare switch is accepted', h.gateway.acks.single.ok, true);
+    eq(
+      'the announced enum is handed straight to the service',
+      h.camera.cameraIndex,
+      1,
+    );
+    eq('nothing is rebuilt', h.camera.reconfigureCalls, 0);
+    eq(
+      'and the mode is untouched',
+      h.coordinator.activeMode.toString(),
+      'CameraMode(1280x720 @ 5fps)',
+    );
+    eq(
+      'the other camera keeps its own mode',
+      h.coordinator.cameraModes[0].fps,
+      5,
+    );
+    eq(
+      'which is recorded per announced enum',
+      h.coordinator.cameraModes[1].fps,
+      5,
+    );
+    eq('and reported', h.coordinator.reportStatus()['active_camera'], 1);
+    eq(
+      'with the geometry',
+      h.coordinator.reportStatus()['resolution'],
+      '1280x720',
+    );
+  }
+
+  {
+    // The server stores nothing for `switch_camera`, so its `metadata` snapshot
+    // at `recording/start` is whatever the registration said. A parameter
+    // change therefore has to reconnect.
+    final factory = _FakeGatewayFactory();
+    final h = buildWithMode(factory: factory);
+    await h.coordinator.start();
+    eq('one gateway so far', factory.built.length, 1);
+
+    await h.coordinator.handleCommand(
+      const SwitchCameraCommand(id: 'e', cameraEnum: 0, fps: 30),
+    );
+    eq('a parameter change re-registers', factory.built.length, 2);
+    eq('the retired gateway was stopped', factory.built.first.stopCalls, 1);
+    eq('and the new one is live', h.coordinator.linkState, LinkState.live);
+  }
+
+  {
+    // A camera-only switch changes nothing the server was told about, and
+    // reconnecting would cut media for no reason.
+    final factory = _FakeGatewayFactory();
+    final h = buildWithMode(cameraCount: 2, factory: factory);
+    await h.coordinator.start();
+
+    await h.coordinator.handleCommand(
+      const SwitchCameraCommand(id: 'e', cameraEnum: 1),
+    );
+    eq('a camera-only switch does not re-register', factory.built.length, 1);
+  }
+
+  {
+    // Nor does a refused one.
+    final factory = _FakeGatewayFactory();
+    final h = buildWithMode(factory: factory);
+    await h.coordinator.start();
+
+    await h.coordinator.handleCommand(
+      const SwitchCameraCommand(id: 'e', cameraEnum: 0, fps: 12),
+    );
+    eq('a refused switch does not re-register', factory.built.length, 1);
+  }
+
+  {
+    // The codec. `mjpeg` is what the pipeline actually produces — one
+    // self-contained picture per frame.
+    final h = buildWithMode();
+    await h.coordinator.handleCommand(
+      const StartRecordingCommand(
+        id: 'a',
+        cameraEnum: 0,
+        streamId: streamId,
+        codec: CaptureCodec.mjpeg,
+      ),
+    );
+    eq('mjpeg is accepted', h.gateway.acks.single.ok, true);
+    eq(
+      'and the stream starts',
+      h.coordinator.captureState,
+      CaptureState.recording,
+    );
+  }
+
+  {
+    // The server's stream row is already `active` and nothing rolls it back, so
+    // the device has to be honest rather than encode something else.
+    final h = buildWithMode();
+    await h.coordinator.handleCommand(
+      const StartRecordingCommand(
+        id: 'a',
+        cameraEnum: 0,
+        streamId: streamId,
+        codec: CaptureCodec.h264,
+      ),
+    );
+    eq('an unavailable codec is refused', h.gateway.acks.single.ok, false);
+    check(
+      'and the error names what was asked for',
+      h.gateway.acks.single.error!.contains('h264'),
+    );
+    check(
+      'and what is available',
+      h.gateway.acks.single.error!.contains('mjpeg'),
+    );
+    eq('nothing is pushed', h.coordinator.captureState, CaptureState.idle);
+    eq('and no stream is claimed', h.coordinator.activeStreamId, null);
+  }
+
+  {
+    // An unnamed codec resolves through the announced list, whose first entry
+    // is the preferred one — not a hardcoded default that could drift.
+    final h = buildWithMode();
+    await h.coordinator.handleCommand(
+      const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: streamId),
+    );
+    eq(
+      'an unnamed codec uses the preferred one',
+      h.gateway.acks.single.ok,
+      true,
+    );
+
+    // Even when that preferred codec is one the pipeline cannot produce: an
+    // announcement is a claim, and a wrong claim must not be able to make the
+    // device ack a codec it cannot encode.
+    final wrong = buildWithMode(
+      announcedCodecs: const <CaptureCodec>[
+        CaptureCodec.h264,
+        CaptureCodec.mjpeg,
+      ],
+    );
+    await wrong.coordinator.handleCommand(
+      const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: streamId),
+    );
+    eq(
+      'a preferred codec it cannot produce is refused',
+      wrong.gateway.acks.single.ok,
+      false,
+    );
+  }
+
+  {
+    // A probe that found nothing means the device published exactly the mode it
+    // is in, so a switch to that same mode is a no-op rather than a refusal.
+    final h = buildWithMode(cameraCount: 0);
+    await h.coordinator.handleCommand(
+      const SwitchCameraCommand(
+        id: 'e',
+        cameraEnum: 0,
+        resolution: CameraResolution(width: 1280, height: 720),
+        fps: 5,
+      ),
+    );
+    eq(
+      'an unmeasured camera accepts its own mode',
+      h.gateway.acks.single.ok,
+      true,
+    );
+    eq('and is not rebuilt', h.camera.reconfigureCalls, 0);
+
+    // Anything else is refused, because it was never published.
+    final other = buildWithMode(cameraCount: 0);
+    await other.coordinator.handleCommand(
+      const SwitchCameraCommand(
+        id: 'e',
+        cameraEnum: 0,
+        resolution: CameraResolution(width: 640, height: 480),
+      ),
+    );
+    eq(
+      'but refuses a mode it never published',
+      other.gateway.acks.single.ok,
+      false,
+    );
   }
 }
 
