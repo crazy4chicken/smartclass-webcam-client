@@ -614,6 +614,97 @@ void checkCommandParsing() {
           )!
           as SwitchCameraCommand;
   eq('switch_camera camera', switchCmd.cameraEnum, 2);
+  eq(
+    'switch_camera without parameters asks for nothing',
+    switchCmd.resolution,
+    null,
+  );
+  eq('and no frame rate either', switchCmd.fps, null);
+
+  // Protocol v0.3.0: the server may name the mode along with the camera.
+  final switchWithMode =
+      parseDeviceCommand(
+            '{"channel":"control","type":"switch_camera","id":"e",'
+            '"payload":{"camera_enum":1,"resolution":"1280x720","fps":30}}',
+          )!
+          as SwitchCameraCommand;
+  eq(
+    'switch_camera carries the resolution',
+    switchWithMode.resolution?.label,
+    '1280x720',
+  );
+  eq('switch_camera carries the frame rate', switchWithMode.fps, 30);
+
+  // Lenient on purpose: a value the device cannot read must leave the camera
+  // switch honoured rather than dropping the command — a dropped command is
+  // never acked, and the server does not retry.
+  for (final blank in <String>['', '   ', '720p', '1280x', '0x480']) {
+    final parsed =
+        parseDeviceCommand(
+              '{"channel":"control","type":"switch_camera","id":"e",'
+              '"payload":{"camera_enum":1,"resolution":"$blank"}}',
+            )!
+            as SwitchCameraCommand;
+    check(
+      'an unusable resolution "$blank" is treated as absent',
+      parsed.resolution == null && parsed.cameraEnum == 1,
+    );
+  }
+  for (final value in <String>['0', '-5']) {
+    final parsed =
+        parseDeviceCommand(
+              '{"channel":"control","type":"switch_camera","id":"e",'
+              '"payload":{"camera_enum":1,"fps":$value}}',
+            )!
+            as SwitchCameraCommand;
+    check(
+      'a non-positive fps ($value) is treated as absent',
+      parsed.fps == null,
+    );
+  }
+
+  final withCodec =
+      parseDeviceCommand(
+            '{"channel":"control","type":"start_recording","id":"a",'
+            '"payload":{"camera_enum":0,"stream_id":"$streamId",'
+            '"codec":"mjpeg"}}',
+          )!
+          as StartRecordingCommand;
+  eq(
+    'start_recording carries the requested codec',
+    withCodec.codec,
+    CaptureCodec.mjpeg,
+  );
+
+  final withoutCodec =
+      parseDeviceCommand(
+            '{"channel":"control","type":"start_recording","id":"a",'
+            '"payload":{"camera_enum":0,"stream_id":"$streamId"}}',
+          )!
+          as StartRecordingCommand;
+  eq('an absent codec decodes to null', withoutCodec.codec, null);
+
+  for (final name in <String>['hevc', 'H264', 'MJPEG', 'garbage', '']) {
+    final parsed =
+        parseDeviceCommand(
+              '{"channel":"control","type":"start_recording","id":"a",'
+              '"payload":{"camera_enum":0,"stream_id":"$streamId",'
+              '"codec":"$name"}}',
+            )!
+            as StartRecordingCommand;
+    check('an unknown codec "$name" decodes to null', parsed.codec == null);
+  }
+
+  // A recognised but unavailable codec still decodes: refusing it is the
+  // coordinator's job, and it needs to know what was asked for to say so.
+  final h264 =
+      parseDeviceCommand(
+            '{"channel":"control","type":"start_recording","id":"a",'
+            '"payload":{"camera_enum":0,"stream_id":"$streamId",'
+            '"codec":"h264"}}',
+          )!
+          as StartRecordingCommand;
+  eq('a recognised codec survives parsing', h264.codec, CaptureCodec.h264);
 
   final ping =
       parseDeviceCommand(

@@ -3,6 +3,8 @@ import 'package:webcam_client/src/backend/protocol/device_command.dart';
 import 'package:webcam_client/src/backend/protocol/device_message.dart';
 import 'package:webcam_client/src/backend/protocol/envelope.dart';
 import 'package:webcam_client/src/backend/unrecognized_command_log.dart';
+import 'package:webcam_client/src/capture/camera_resolution.dart';
+import 'package:webcam_client/src/capture/stream_settings.dart';
 
 void main() {
   group('parseDeviceCommand', () {
@@ -69,6 +71,126 @@ void main() {
               )!
               as SwitchCameraCommand;
       expect(cmd.cameraEnum, 1);
+    });
+
+    test('switch_camera carries resolution and fps when they are present', () {
+      // Protocol v0.3.0 lets the server name the mode along with the camera.
+      final cmd =
+          parseDeviceCommand(
+                '{"channel":"control","type":"switch_camera","id":"e",'
+                '"payload":{"camera_enum":1,"resolution":"1280x720","fps":30}}',
+              )!
+              as SwitchCameraCommand;
+
+      expect(cmd.cameraEnum, 1);
+      expect(cmd.resolution, const CameraResolution(width: 1280, height: 720));
+      expect(cmd.fps, 30);
+    });
+
+    test('switch_camera leaves them null when the payload omits them', () {
+      // Absent means "keep what you are doing", which is also the pre-v0.3.0
+      // behaviour — so an older server keeps working unchanged.
+      final cmd =
+          parseDeviceCommand(
+                '{"channel":"control","type":"switch_camera","id":"e",'
+                '"payload":{"camera_enum":0}}',
+              )!
+              as SwitchCameraCommand;
+
+      expect(cmd.resolution, isNull);
+      expect(cmd.fps, isNull);
+    });
+
+    test('a whitespace-only resolution counts as absent', () {
+      // An operator form that leaves the field blank sends `""`.
+      for (final blank in <String>['', '   ', '\t']) {
+        final cmd =
+            parseDeviceCommand(
+                  '{"channel":"control","type":"switch_camera","id":"e",'
+                  '"payload":{"camera_enum":0,"resolution":"$blank"}}',
+                )!
+                as SwitchCameraCommand;
+        expect(cmd.resolution, isNull, reason: 'value: "$blank"');
+      }
+    });
+
+    test('a resolution the device cannot parse is treated as absent', () {
+      // Lenient on purpose: rejecting the payload would drop the command, and a
+      // dropped command is never acked — the server does not retry, so the
+      // operator would see nothing at all. The camera switch that came with it
+      // is still worth honouring.
+      for (final junk in <String>['720p', '1280', '1280x', 'x720', '0x480']) {
+        final cmd =
+            parseDeviceCommand(
+                  '{"channel":"control","type":"switch_camera","id":"e",'
+                  '"payload":{"camera_enum":0,"resolution":"$junk"}}',
+                )!
+                as SwitchCameraCommand;
+        expect(cmd.resolution, isNull, reason: 'value: "$junk"');
+        expect(cmd.cameraEnum, 0);
+      }
+    });
+
+    test('a non-positive fps counts as absent', () {
+      // The server rejects a non-positive `fps` at registration, so one can
+      // never mean a real request.
+      for (final value in <String>['0', '-5']) {
+        final cmd =
+            parseDeviceCommand(
+                  '{"channel":"control","type":"switch_camera","id":"e",'
+                  '"payload":{"camera_enum":0,"fps":$value}}',
+                )!
+                as SwitchCameraCommand;
+        expect(cmd.fps, isNull, reason: 'value: $value');
+      }
+    });
+
+    test('start_recording carries the requested codec', () {
+      final cmd =
+          parseDeviceCommand(
+                '{"channel":"control","type":"start_recording","id":"a",'
+                '"payload":{"camera_enum":0,"stream_id":"s","codec":"mjpeg"}}',
+              )!
+              as StartRecordingCommand;
+
+      expect(cmd.codec, CaptureCodec.mjpeg);
+      expect(cmd.streamId, 's');
+    });
+
+    test('start_recording leaves the codec null when it is absent', () {
+      // Null means "the device's preferred codec", which is the *first* entry
+      // of the announced `supported_codec` — not necessarily mjpeg.
+      final cmd =
+          parseDeviceCommand(
+                '{"channel":"control","type":"start_recording","id":"a",'
+                '"payload":{"camera_enum":0,"stream_id":"s"}}',
+              )!
+              as StartRecordingCommand;
+
+      expect(cmd.codec, isNull);
+    });
+
+    test('an unknown codec string decodes to null rather than throwing', () {
+      for (final name in <String>['hevc', 'H264', 'MJPEG', 'garbage', '']) {
+        final cmd =
+            parseDeviceCommand(
+                  '{"channel":"control","type":"start_recording","id":"a",'
+                  '"payload":{"camera_enum":0,"stream_id":"s",'
+                  '"codec":"$name"}}',
+                )!
+                as StartRecordingCommand;
+        expect(cmd.codec, isNull, reason: 'value: "$name"');
+      }
+
+      // A recognised but unavailable codec still decodes — refusing it is the
+      // coordinator's job, and it has to know what was asked for to say so.
+      final h264 =
+          parseDeviceCommand(
+                '{"channel":"control","type":"start_recording","id":"a",'
+                '"payload":{"camera_enum":0,"stream_id":"s","codec":"h264"}}',
+              )!
+              as StartRecordingCommand;
+      expect(h264.codec, CaptureCodec.h264);
     });
 
     test('unknown command types are ignored, not errors', () {

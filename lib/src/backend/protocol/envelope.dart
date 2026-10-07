@@ -1,5 +1,8 @@
 import 'dart:convert';
 
+import '../../capture/camera_capabilities.dart';
+import '../../capture/camera_resolution.dart';
+import '../../capture/stream_settings.dart';
 import '../unrecognized_command_log.dart';
 import 'device_command.dart';
 
@@ -142,6 +145,8 @@ DeviceCommand? parseDeviceCommand(String raw, {UnrecognizedCommandLog? log}) {
         return SwitchCameraCommand(
           id: message.id,
           cameraEnum: _requireInt(payload, 'camera_enum'),
+          resolution: _optionalResolution(payload, 'resolution'),
+          fps: _optionalPositiveInt(payload, 'fps'),
         );
 
       case 'start_recording':
@@ -149,6 +154,7 @@ DeviceCommand? parseDeviceCommand(String raw, {UnrecognizedCommandLog? log}) {
           id: message.id,
           cameraEnum: _requireInt(payload, 'camera_enum'),
           streamId: _requireNonEmptyString(payload, 'stream_id'),
+          codec: _optionalCodec(payload, 'codec'),
         );
 
       case 'stop_recording':
@@ -207,3 +213,58 @@ String? _optionalString(Map<String, Object?> payload, String key) {
   final value = payload[key];
   return value is String ? value : null;
 }
+
+/// The `WIDTHxHEIGHT` the server asked for, or null.
+///
+/// **Lenient on purpose**, and the leniency is the whole design: an absent
+/// field, an empty string, and a string that is not a `WIDTHxHEIGHT` all mean
+/// "no resolution was requested", which leaves the camera where it is. The
+/// alternative — rejecting the payload — would drop the command, and a dropped
+/// command is never acked: the server does not retry, so the operator would see
+/// a `switch_camera` that produced nothing at all.
+///
+/// The trade is deliberate and narrow. A *usable* value the camera cannot do is
+/// still a refusal, acked `ok:false` by the coordinator — that is the case the
+/// protocol actually has to guard. An unusable string can only come from a
+/// version mismatch or a server bug, and the camera switch that came with it is
+/// still worth honouring.
+///
+/// A whitespace-only value counts as absent because an operator form that
+/// leaves the field blank sends `""`.
+CameraResolution? _optionalResolution(
+  Map<String, Object?> payload,
+  String key,
+) {
+  final value = payload[key];
+  if (value is! String) return null;
+  final trimmed = value.trim();
+  if (trimmed.isEmpty) return null;
+  return parseResolutionLabel(trimmed);
+}
+
+/// A positive frame rate, or null.
+///
+/// Zero and negatives are treated as "not requested" for the same reason as
+/// [_optionalResolution]: the server rejects a non-positive `fps` at
+/// registration, so one can never mean a real request.
+int? _optionalPositiveInt(Map<String, Object?> payload, String key) {
+  final value = payload[key];
+  final parsed = switch (value) {
+    final int v => v,
+    final num v => v.toInt(),
+    _ => null,
+  };
+  if (parsed == null || parsed < 1) return null;
+  return parsed;
+}
+
+/// The codec the server asked for, or null.
+///
+/// `CaptureCodec.tryParse` answers null for anything outside the closed set —
+/// including `hevc`, which is H.265's other name and is rejected rather than
+/// aliased — so an unrecognised name cannot throw. Same reasoning as
+/// [_optionalResolution]: the device keeps working rather than dropping the
+/// command, and a codec it recognises but cannot produce is refused later with
+/// an ack.
+CaptureCodec? _optionalCodec(Map<String, Object?> payload, String key) =>
+    CaptureCodec.tryParse(payload[key]);
