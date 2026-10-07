@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:http/http.dart' as http;
 
+import 'registration_client.dart';
+
 /// What a one-shot reachability check found.
 class HealthProbeResult {
   const HealthProbeResult({
@@ -10,6 +12,12 @@ class HealthProbeResult {
     this.detail,
   });
 
+  /// Whether anything answered at that origin at all.
+  ///
+  /// **This is not "the server is healthy".** It is "a server is listening at
+  /// the address you typed": DNS, routing, the port and any prefix in front of
+  /// it all resolved. A `404` is still an answer, and reporting it as plain
+  /// failure is what made a working device look broken.
   final bool reachable;
 
   /// The HTTP status, when a response arrived at all.
@@ -18,10 +26,15 @@ class HealthProbeResult {
   /// Why it failed, when it did.
   final String? detail;
 
+  /// The probe route answered exactly as the health endpoint should.
+  bool get healthy => reachable && statusCode == 200;
+
   /// One line for the settings screen.
   String get summary {
-    if (reachable) return '可达（HTTP $statusCode）';
-    if (statusCode != null) return '服务端返回 HTTP $statusCode';
+    if (healthy) return '可达（HTTP 200）';
+    if (reachable) {
+      return '地址可达，但探测路由返回 HTTP $statusCode（不影响连接）';
+    }
     return detail ?? '不可达';
   }
 }
@@ -31,12 +44,26 @@ abstract interface class HealthProbe {
   Future<HealthProbeResult> probe(Uri base);
 }
 
-/// Probes `GET {base}/healthz`.
+/// The address the reachability check asks for.
 ///
-/// `healthz` is registered at the **root**, not under the base path, so the
-/// address is built with `replace(path:)` rather than `resolveDevicePath` —
-/// the latter preserves the base path and would ask for `/base/healthz`, which
-/// does not exist.
+/// Built with [resolveDevicePath] — **the same join the registration call uses**
+/// — so the probe and the registration always agree about where the server is.
+///
+/// It previously used `base.replace(path: '/healthz')`, which throws the base
+/// path away. That looked right while reading the server's own router, where
+/// `healthz` really is registered at the root, but it is wrong the moment the
+/// service is mounted behind a route prefix: the deployment guide ships
+/// `route: {prefix: /webcam, strip: true}`, under which the *externally
+/// visible* address of every endpoint — `/healthz` included — is
+/// `/webcam/healthz`. Registration survived because it keeps the base path;
+/// only the probe dropped it, so the device registered fine and then reported
+/// `404` from the root of a prefix it had never asked about.
+///
+/// With no base path this is byte-identical to the old expression, so the
+/// simple case behaves exactly as before.
+Uri healthProbeUri(Uri base) => resolveDevicePath(base, '/healthz');
+
+/// Probes `GET {base}/healthz`.
 ///
 /// This route is deliberately the one used instead of `GET /ws/register`:
 /// it needs no credentials and **does not consume a ticket**, so an operator
@@ -56,13 +83,13 @@ class HttpHealthProbe implements HealthProbe {
 
   @override
   Future<HealthProbeResult> probe(Uri base) async {
-    final uri = base.replace(path: '/healthz');
+    final uri = healthProbeUri(base);
     final client = _client;
     try {
       final response = await (client == null ? http.get(uri) : client.get(uri))
           .timeout(timeout);
       return HealthProbeResult(
-        reachable: response.statusCode == 200,
+        reachable: true,
         statusCode: response.statusCode,
       );
     } on TimeoutException {

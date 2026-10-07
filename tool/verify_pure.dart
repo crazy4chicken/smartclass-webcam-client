@@ -20,6 +20,7 @@ import 'package:webcam_client/src/agent/agent_coordinator.dart';
 import 'package:webcam_client/src/agent/agent_status.dart';
 import 'package:webcam_client/src/backend/backend_gateway.dart';
 import 'package:webcam_client/src/backend/device_credentials.dart';
+import 'package:webcam_client/src/backend/health_probe.dart';
 import 'package:webcam_client/src/backend/mock_backend_gateway.dart';
 import 'package:webcam_client/src/backend/protocol/binary_frame.dart';
 import 'package:webcam_client/src/backend/protocol/device_command.dart';
@@ -1296,6 +1297,51 @@ void checkRegistrationRequest() {
 
 void checkUriHelpers() {
   section('uri helpers and timestamps');
+
+  // The reachability probe must land on the same base path the registration
+  // uses. It used to build the address with `replace(path:)`, which threw the
+  // base path away: against a deployment mounted under a route prefix the
+  // device registered fine and then got a 404 from a path it had never used.
+  eq(
+    'the probe has no base path to keep on a bare origin',
+    healthProbeUri(Uri.parse('http://h:8080')).toString(),
+    'http://h:8080/healthz',
+  );
+  eq(
+    'the probe keeps a base path',
+    healthProbeUri(Uri.parse('http://h:8080/webcam')).toString(),
+    'http://h:8080/webcam/healthz',
+  );
+  eq(
+    'the probe keeps a trailing-slash base path',
+    healthProbeUri(Uri.parse('http://h:8080/webcam/')).toString(),
+    'http://h:8080/webcam/healthz',
+  );
+  eq(
+    'the probe and the registration agree on the base path',
+    healthProbeUri(Uri.parse('http://h:8080/webcam')).path
+        .replaceAll('/healthz', ''),
+    resolveDevicePath(
+      Uri.parse('http://h:8080/webcam'),
+      '/ws/register',
+    ).path.replaceAll('/ws/register', ''),
+  );
+
+  // A response is an answer: 404 still proves the address resolved. Only the
+  // absence of a response means unreachable.
+  check('a 404 is reachable but not healthy', () {
+    final r = const HealthProbeResult(reachable: true, statusCode: 404);
+    return r.reachable && !r.healthy;
+  }());
+  check(
+    'a 200 is healthy',
+    const HealthProbeResult(reachable: true, statusCode: 200).healthy,
+  );
+  check(
+    'no status is unreachable',
+    !const HealthProbeResult(reachable: false, detail: 'timeout').healthy,
+  );
+
   eq(
     'a base path is kept',
     resolveDevicePath(

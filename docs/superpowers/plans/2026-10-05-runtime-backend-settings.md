@@ -16,6 +16,53 @@
 
 ---
 
+## 🐞 变更记录 B（2026-10-07 —— 已修复：「测试连接」404 而链路正常）
+
+**症状：** 设备已连上后端（预览上状态条显示"已连接"），点「测试连接」却报 `HTTP 404`。
+
+**根因：** `HttpHealthProbe` 用 `base.replace(path: '/healthz')` 拼地址 —— **把 base path 丢掉了**。
+而注册走的是 `resolveDevicePath(base, '/ws/register')`，**保留** base path。
+
+于是两者在「服务部署在路由前缀下」时必然分道扬镳。部署文档 `docs/guide/deploy.md` 给的正是这种部署：
+
+```yaml
+route:
+  prefix: /webcam
+  strip: true   # /webcam/api/devices 到达子进程时是 /api/devices
+```
+
+前缀之下，**每个端点对外可见的地址都在前缀里，`/healthz` 也不例外**：
+
+| 请求 | 外部路径 | 到达子进程 | 结果 |
+|---|---|---|---|
+| 注册 | `/webcam/ws/register` | `/ws/register` | ✅ 200 |
+| 探测（修复前） | `/healthz` | —— | ❌ 404，前缀不匹配，ingress 根本不路由 |
+
+**我原先的判断是错的，而且错得有迹可循**：计划里写「healthz 注册在根路径，所以要用 `replace(path:)`」，
+这句是基于**直接读 chi 的 router**（`r.Get("/healthz", …)` 确实在根）—— 那是子进程内部的视图。
+我漏了部署层：**服务被挂在前缀下时，外部可见路径整体平移**。`replace(path:)` 丢掉的正好是那一段。
+已核对：v0.1.0 与 v0.2.0 的 router 里 `/healthz` 都存在，所以"服务端没有这个路由"可以排除。
+
+**修法：** 探测改用 `resolveDevicePath(base, '/healthz')` —— 和注册用同一个拼法。
+无 base path 时结果与旧表达式逐字节相同，简单场景零回归。
+
+**顺带修的第二处：** `reachable` 原为 `statusCode == 200`。但 **404 也是一次应答**，
+它恰恰证明地址是通的；把它报成"失败"正是这次让人以为设备坏了的原因。现改为：
+
+| 情况 | 判定 | 界面 |
+|---|---|---|
+| 200 | `healthy` | 绿：可达（HTTP 200） |
+| 有应答但非 200 | `reachable && !healthy` | 琥珀：地址可达，但探测路由返回 HTTP xxx（**不影响连接**） |
+| 无应答（超时/拒绝） | `!reachable` | 红：不可达 + 原因 |
+
+这样"地址错"和"地址对但探测路由不对"不会再混成一件事。
+
+**改动：** `lib/src/backend/health_probe.dart`（新增纯函数 `healthProbeUri`）、
+`lib/src/ui/screens/settings_screen.dart`（三态配色）、
+新增 `test/backend/health_probe_test.dart`、`tool/verify_pure.dart` 加断言（406/406 通过）。
+
+---
+
 ## 📌 变更记录 A（2026-10-05 追加 —— 原计划已在执行中，就地修订）
 
 > **本文件是唯一计划。变更不另开文件，下文 T5 / T7 已就地改写，与本块一致。**
@@ -437,14 +484,16 @@ if (stored == null) {
   - 新凭据为 null → `linkState == failed` 且 `lastError` 指向设置界面；
   - **401 终态恢复**：让旧 gateway 停在 `failed`，`reconfigure` 后 `linkState` 不再是 `failed`（这条专门守住"换实例能救回 401"这个设计意图）。
 
-- [ ] **T6.6** `test/backend/health_probe_test.dart`：**可达 / 非 200 / 超时 / 非 JSON 响应**四种结果都能正确归类；探测 URL 走 `base.replace(path: '/healthz')`，**带子路径的 base 不会拼出 `/base/healthz`**（专门钉住 T7 里最容易写错的一行）。
+- [x] **T6.6** `test/backend/health_probe_test.dart`：探测 URL **保留 base path**（`http://h/webcam` → `/webcam/healthz`，回归测试，见变更记录 B）；200 → healthy；404 → `reachable && !healthy` 且 summary 提到 404；超时 / 传输异常 → 不可达且**不抛**。
 
 ### T7 ⭐（**必须** —— 变更记录 A 由「可选、可砍」上调）— 「测试连接」按钮
 
 **为什么从可砍变成必须：** 使用者是没有 adb、没有 logcat 的人，只会在手机键盘上手敲 IP。敲错是概率最高的失败，而"链路失败"三个字**分不清是地址不通、防火墙挡了、还是令牌错了** —— 没有这个按钮他唯一的办法就是来问我。
 
-- [ ] **T7.1** `lib/src/backend/health_probe.dart`：`GET {base}/healthz`，5s 超时，200 视为可达。
-  **注意：healthz 注册在根路径**（`internal/httpapi/router.go:72`），不能用 `resolveDevicePath`（那个会保留 base path → 拼出 `/base/healthz`）。用 `base.replace(path: '/healthz')`。
+- [x] **T7.1** `lib/src/backend/health_probe.dart`：`GET {base}/healthz`，5s 超时。
+  **地址必须用 `resolveDevicePath` 拼（即 `healthProbeUri`），和注册同一个拼法** ——
+  不要写 `base.replace(path: '/healthz')`，那会丢掉 base path，在服务挂在前缀下时必然 404
+  （真机踩过，见变更记录 B）。
   该路由**无鉴权、不消耗 ticket**，所以它可以随便点 —— 这是选它而不是调 `/ws/register` 做探测的原因（注册会真的发掉一张一次性 ticket，还会把相机列表写进服务端）。
 
   结果要分四类，**且每一类的措辞要指向不同的下一步**：
@@ -494,7 +543,11 @@ if (stored == null) {
 3. **为什么工厂接收 `ConnectionSettings` 参数而不是捕获外部变量？** —— 捕获写法下"先更新变量 / 先 apply"只有一句之差，写反就造出"用旧地址重连"的幽灵 bug，且不会有任何编译期信号。传参让顺序不可出错。
 4. **`_unbindGateway` 为什么必须存在？** —— `reconfigure` 里把 `_started` 置 false 再走 `start()`，`start()` 会重新 `listen` 三条流；不先取消旧的就会重复监听，同一条命令被处理两遍 → ack 发两次。
 5. **为什么 `reconfigure` 里走 `start()` 而不是自己连线？** —— 凭据为空时 `start()` 已有"置 failed + 提示"的完整路径。自己写一遍就会出现两条行为不同的分支。
-6. **T7 的 healthz 为什么用 `base.replace(path:)`？** —— `resolveDevicePath` 会保留 base path，拼出 `/base/healthz`；而 healthz 是注册在根上的。
+6. **T7 的 healthz 该用哪个拼法？** —— **用 `resolveDevicePath`，和注册同一个拼法**（见变更记录 B）。
+   我原先写的是 `base.replace(path: '/healthz')`，理由是"chi 的 router 里 healthz 在根" —— 那是**子进程内部**的视图。
+   服务一旦挂在路由前缀下（`deploy.md` 的 `route: prefix: /webcam, strip: true`），
+   **外部可见路径整体平移**，`/healthz` 的对外地址变成 `/webcam/healthz`，
+   丢掉 base path 就会打到前缀之外 → 404。真机就是这个症状。
 7. **为什么自动打开的触发条件是 `load() == null`，不是 `!isProvisioned`？** —— 后者会在凭据被清空后每次启动都弹窗，kiosk 不能这样。前者是"从未配置过"的一次性语义，且保存过一次就永不触发。
 8. **为什么地址输入框要关掉 autocorrect？** —— 手机输入法会大写首字母、加空格或"纠正" `http://192.168.1.20:8080`；改过的地址必然连不上，而失败现象跟防火墙挡、令牌错完全一样，无法自查。
 9. **为什么「测试连接」不阻断保存？** —— 经理的服务端还没部署，测必然不通。做成硬门槛会在无法改变的事实面前把人锁死。它只是反馈，不是闸门。

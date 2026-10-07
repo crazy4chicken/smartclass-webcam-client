@@ -326,11 +326,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 child: Text(
                   _probeResult!.summary,
                   key: SettingsScreen.probeResultKey,
+                  // Three ways out, not two. Green means the health route
+                  // answered 200. Amber means something answered but not that
+                  // route — the address is right and the link is unaffected,
+                  // which is a very different situation from a dead address,
+                  // and collapsing the two is what made a connected device
+                  // look broken.
                   style: TextStyle(
                     fontSize: 12,
-                    color: _probeResult!.reachable
-                        ? const Color(0xFF81C784)
-                        : const Color(0xFFEF9A9A),
+                    color: switch (_probeResult!) {
+                      (final r) when r.healthy => const Color(0xFF81C784),
+                      (final r) when r.reachable => const Color(0xFFFFB300),
+                      _ => const Color(0xFFEF9A9A),
+                    },
                   ),
                 ),
               ),
