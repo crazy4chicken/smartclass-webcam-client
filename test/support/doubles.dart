@@ -12,6 +12,7 @@ import 'package:webcam_client/src/backend/registration_client.dart';
 import 'package:webcam_client/src/backend/registration_request.dart';
 import 'package:webcam_client/src/backend/smartclass_backend_gateway.dart';
 import 'package:webcam_client/src/capture/camera_backend.dart';
+import 'package:webcam_client/src/capture/camera_resolution.dart';
 import 'package:webcam_client/src/capture/camera_service.dart';
 import 'package:webcam_client/src/capture/frame_pump.dart';
 import 'package:webcam_client/src/capture/frame_store.dart';
@@ -37,11 +38,20 @@ final String testTicket = List<String>.filled(64, 'b').join();
 /// A 26-character ULID, as the server mints for commands and streams.
 const String testUlid = '01J8ZKQ3B5N7P9R1T3V5X7Z9B2';
 
+/// A camera announcement of the shape `buildAnnouncements` produces.
+///
+/// The declared lists are carried explicitly rather than left empty: since
+/// protocol v0.3.0 an announcement without them is a registration the server
+/// refuses, so a fixture that omitted them would not be a usable one.
 const CameraAnnouncement testCamera = CameraAnnouncement(
   cameraEnum: 0,
   resolution: '1280x720',
   fps: 5,
   supportedCodec: <WireCodec>[WireCodec.mjpeg],
+  supportedResolutions: <CameraResolution>[
+    CameraResolution(width: 1280, height: 720),
+  ],
+  supportedFramerates: <int>[5],
 );
 
 /// mocktail's `registerFallbackValue` is **not** generic in 1.0.5 — it takes a

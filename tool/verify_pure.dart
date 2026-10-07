@@ -110,6 +110,10 @@ const CameraAnnouncement cameraAnnouncement = CameraAnnouncement(
   resolution: '1280x720',
   fps: 5,
   supportedCodec: <WireCodec>[WireCodec.mjpeg],
+  supportedResolutions: <CameraResolution>[
+    CameraResolution(width: 1280, height: 720),
+  ],
+  supportedFramerates: <int>[5],
 );
 
 const List<CameraResolution> nominalResolutions = <CameraResolution>[
@@ -1227,45 +1231,139 @@ void checkCredentials() {
 
 void checkRegistrationRequest() {
   section('registration request');
+
+  const vga = CameraResolution(width: 640, height: 480);
+  const hd = CameraResolution(width: 1280, height: 720);
+  const fhd = CameraResolution(width: 1920, height: 1080);
+
+  // What a 1080p webcam really reports: two rungs on the same real size.
+  final measured = CameraCapabilities.of(
+    resolutions: <CameraResolution>[fhd, hd, hd, vga],
+    framerates: <int>[30, 15],
+  );
+
   final announcements = buildAnnouncements(
-    cameraNames: const ['front', 'back'],
-    resolutions: const <CameraResolution>[
-      CameraResolution(width: 1280, height: 720),
-      CameraResolution(width: 640, height: 480),
+    cameras: <CameraDeclaration>[
+      CameraDeclaration(
+        name: 'back',
+        resolution: fhd,
+        fps: 5,
+        capabilities: measured,
+      ),
+      const CameraDeclaration(name: 'front', resolution: vga, fps: 5),
     ],
-    fps: 5,
     codecs: const <WireCodec>[WireCodec.mjpeg],
   );
+
   eq(
     'camera_enum equals the index',
     announcements.map((c) => c.cameraEnum).join(','),
     '0,1',
   );
-  eq('resolution label', announcements.first.resolution, '1280x720');
+  eq('resolution label', announcements.first.resolution, '1920x1080');
   eq('codec list', announcements.first.supportedCodec.single, WireCodec.mjpeg);
   eq(
     'the camera name travels in attrs.label',
     announcements.first.attrs['label'],
-    'front',
+    'back',
+  );
+
+  // Protocol v0.3.0: without these two lists the server refuses the whole
+  // registration, so an announcement missing them is not a device that lost a
+  // feature — it is a device that cannot connect.
+  eq(
+    'supported_resolutions is declared, deduped and sorted',
+    announcements.first.supportedResolutions.map((r) => r.label).join(','),
+    '1920x1080,1280x720,1024x768,800x600,640x480,320x240',
+  );
+  eq(
+    'supported_framerates is declared with the ladder filled in',
+    announcements.first.supportedFramerates.join(','),
+    '60,50,30,25,24,20,15,10,5',
+  );
+  check(
+    'the current resolution is always among the declared values',
+    announcements.first.supportedResolutions.contains(fhd),
+  );
+  check(
+    'the current frame rate is always among the declared values',
+    announcements.first.supportedFramerates.contains(5),
+  );
+  check(
+    'the declared lists contain no duplicates',
+    announcements.first.supportedResolutions.toSet().length ==
+            announcements.first.supportedResolutions.length &&
+        announcements.first.supportedFramerates.toSet().length ==
+            announcements.first.supportedFramerates.length,
+  );
+
+  // A probe that found nothing must become "only what I am doing", never
+  // nothing: an empty list is a `400`, and a kiosk that cannot register is
+  // worse than one that declares less.
+  final unmeasured = buildAnnouncements(
+    cameras: const <CameraDeclaration>[
+      CameraDeclaration(name: 'front', resolution: hd, fps: 15),
+    ],
+    codecs: const <WireCodec>[WireCodec.mjpeg],
+  );
+  eq(
+    'an unmeasured camera declares exactly its current pair',
+    unmeasured.single.supportedResolutions.map((r) => r.label).join(','),
+    '1280x720',
+  );
+  eq(
+    'and exactly its current rate',
+    unmeasured.single.supportedFramerates.join(','),
+    '15',
+  );
+  check(
+    'so an unmeasured camera is never announced with an empty list',
+    unmeasured.single.supportedResolutions.isNotEmpty &&
+        unmeasured.single.supportedFramerates.isNotEmpty,
+  );
+
+  // The measured set does not contain the current mode, which is the case that
+  // makes `withCurrent` load-bearing.
+  final offLadder = buildAnnouncements(
+    cameras: <CameraDeclaration>[
+      CameraDeclaration(
+        name: 'front',
+        resolution: fhd,
+        fps: 5,
+        capabilities: CameraCapabilities.of(
+          resolutions: <CameraResolution>[vga],
+          framerates: <int>[30, 15],
+        ),
+      ),
+    ],
+    codecs: const <WireCodec>[WireCodec.mjpeg],
+  );
+  check(
+    'a current resolution the probe never produced is still declared',
+    offLadder.single.supportedResolutions.contains(fhd),
+  );
+  check(
+    'and so is a current rate the probe never produced',
+    offLadder.single.supportedFramerates.contains(5),
   );
 
   final clamped = buildAnnouncements(
-    cameraNames: const ['front'],
-    resolutions: const <CameraResolution>[
-      CameraResolution(width: 1280, height: 720),
+    cameras: const <CameraDeclaration>[
+      CameraDeclaration(name: 'front', resolution: hd, fps: 0),
     ],
-    fps: 0,
     codecs: const <WireCodec>[WireCodec.mjpeg],
   );
   eq('fps is clamped to a positive integer', clamped.single.fps, 1);
   check('fps is an int', clamped.single.fps is int);
+  check(
+    'and the clamped value is declared, not just reported',
+    clamped.single.supportedFramerates.contains(minAnnounceableFps),
+  );
 
   final emptyCodecs = buildAnnouncements(
-    cameraNames: const ['front'],
-    resolutions: const <CameraResolution>[
-      CameraResolution(width: 1280, height: 720),
+    cameras: const <CameraDeclaration>[
+      CameraDeclaration(name: 'front', resolution: hd, fps: 5),
     ],
-    fps: 5,
     codecs: const <WireCodec>[],
   );
   eq(
@@ -1284,6 +1382,15 @@ void checkRegistrationRequest() {
     'mjpeg',
   );
   eq('body fps', cam0['fps'], 5);
+  eq(
+    'body supported_resolutions',
+    (cam0['supported_resolutions']! as List).join(','),
+    '1920x1080,1280x720,1024x768,800x600,640x480,320x240',
+  );
+  check(
+    'body supported_framerates is non-empty',
+    (cam0['supported_framerates']! as List).isNotEmpty,
+  );
 
   eq(
     'capture codecs map onto the wire names',

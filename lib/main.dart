@@ -17,6 +17,7 @@ import 'src/capture/camera_backend.dart';
 import 'src/capture/camera_plugin_backend.dart';
 import 'src/capture/camera_provider.dart';
 import 'src/capture/camera_resolution.dart';
+import 'src/capture/camera_service.dart';
 import 'src/capture/codec_probe.dart';
 import 'src/capture/frame_pump.dart';
 import 'src/capture/stream_settings.dart';
@@ -135,21 +136,27 @@ Future<void> _bootstrap() async {
 
   // Announce what this device will actually deliver, not a capability ladder.
   //
-  // `supportedResolutions` is the nominal ladder `[640x480, 1280x720, …]`, and
-  // passing it positionally handed camera 0 the *lowest* rung: the server was
-  // told 640x480 for a stream that is really 1280x720, and that value is what
-  // gets snapshotted into the stream's `metadata.resolution`. Every camera is
-  // driven by the same [CaptureConfig], so one resolution is the truth for all
-  // of them — and a single-element list is exactly how `buildAnnouncements`
-  // expresses "same for every camera".
+  // Every camera is driven by the same [CaptureConfig], so one resolution is
+  // the truth for all of them. The capability lists are empty here because the
+  // probe has not run yet — `buildAnnouncements` then falls back to exactly the
+  // current pair, which is the honest thing to say and, more importantly, is
+  // something the server accepts. (Task 8 replaces this with the probed
+  // inventory.)
   final announcedResolution =
       camera?.appliedResolution ?? captureConfig.resolution;
+  final descriptors =
+      camera?.cameras ??
+      const <CameraDescriptor>[CameraDescriptor(name: 'camera', index: 0)];
 
   final announcements = buildAnnouncements(
-    cameraNames:
-        camera?.cameras.map((c) => c.name).toList() ?? const <String>['camera'],
-    resolutions: <CameraResolution>[announcedResolution],
-    fps: settings.fps,
+    cameras: <CameraDeclaration>[
+      for (final descriptor in descriptors)
+        CameraDeclaration(
+          name: descriptor.name,
+          resolution: announcedResolution,
+          fps: settings.fps,
+        ),
+    ],
     codecs: wireCodecsFor(available),
   );
   debugPrint('[register] announcing $announcements');
