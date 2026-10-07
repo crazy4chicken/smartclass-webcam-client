@@ -36,6 +36,7 @@ import 'package:webcam_client/src/capture/camera_order.dart';
 import 'package:webcam_client/src/capture/camera_provider.dart';
 import 'package:webcam_client/src/capture/camera_resolution.dart';
 import 'package:webcam_client/src/capture/camera_service.dart';
+import 'package:webcam_client/src/capture/capability_probe.dart';
 import 'package:webcam_client/src/capture/codec_probe.dart';
 import 'package:webcam_client/src/capture/frame_pump.dart';
 import 'package:webcam_client/src/capture/frame_store.dart';
@@ -44,6 +45,7 @@ import 'package:webcam_client/src/capture/resolution_selector.dart';
 import 'package:webcam_client/src/capture/serial_lock.dart';
 import 'package:webcam_client/src/capture/stream_settings.dart';
 import 'package:webcam_client/src/capture/video_encoder.dart';
+import 'package:webcam_client/src/config/capabilities_store.dart';
 import 'package:webcam_client/src/config/connection_settings.dart';
 
 // --- harness ----------------------------------------------------------------
@@ -2212,6 +2214,69 @@ void checkCameraOrder() {
   );
 }
 
+void checkCapabilityCache() {
+  section('capability cache key');
+
+  eq(
+    'the fingerprint is stable for the same camera list',
+    cameraFingerprint(<String>['front', 'back']),
+    cameraFingerprint(<String>['front', 'back']),
+  );
+  check(
+    'adding a camera changes the fingerprint',
+    cameraFingerprint(<String>['front']) !=
+        cameraFingerprint(<String>['front', 'back']),
+  );
+  // `camera_enum` is positional, so swapping two cameras changes what index 0
+  // means just as much as swapping the hardware does.
+  check(
+    'swapping two cameras changes the fingerprint',
+    cameraFingerprint(<String>['front', 'back']) !=
+        cameraFingerprint(<String>['back', 'front']),
+  );
+  // Names come from the platform and can contain anything, so the encoding is
+  // length-prefixed rather than joined on a separator.
+  check(
+    'a name containing the separator cannot be forged',
+    cameraFingerprint(<String>['a|b']) != cameraFingerprint(<String>['a', 'b']),
+  );
+  check(
+    'nor can one containing the record separator',
+    cameraFingerprint(<String>['a;1:b;']) !=
+        cameraFingerprint(<String>['a', 'b']),
+  );
+  eq(
+    'an empty camera list has an empty fingerprint',
+    cameraFingerprint(<String>[]),
+    '',
+  );
+
+  // The probe contract itself is pure, so the harness covers the two constants
+  // that shape what gets declared.
+  eq('the frame rates are probed highest first', kProbeFramerates.first, 60);
+  check(
+    'and 5 is reachable, because that is the default capture rate',
+    kCommonFramerates.contains(5),
+  );
+  eq(
+    'an empty probe result reports isEmpty',
+    const CapabilityProbeResult(capabilities: CameraCapabilities.empty).isEmpty,
+    true,
+  );
+  eq(
+    'a measured probe result does not',
+    CapabilityProbeResult(
+      capabilities: CameraCapabilities.of(
+        resolutions: <CameraResolution>[
+          CameraResolution(width: 1280, height: 720),
+        ],
+        framerates: <int>[30],
+      ),
+    ).isEmpty,
+    false,
+  );
+}
+
 void checkMjpegEncoder() {
   section('mjpeg encoder');
   fakeAsync((async) {
@@ -3238,6 +3303,7 @@ Future<void> main() async {
   checkJpegSize();
   checkCameraCapabilities();
   checkCameraOrder();
+  checkCapabilityCache();
   checkMjpegEncoder();
   await checkCameraProvider();
   await checkFrameStore();
