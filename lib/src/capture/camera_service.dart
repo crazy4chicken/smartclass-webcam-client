@@ -16,7 +16,10 @@ class CameraDescriptor {
 
   final String name;
 
-  /// Position in the platform camera list, used by `cmd_switch_camera`.
+  /// The **announced** enum — this camera's position in the canonical order,
+  /// which is what the server sees in `camera_enum` and what `cmd_switch_camera`
+  /// carries. It is not a platform index: the mapping from announced to
+  /// physical lives inside `CameraPluginBackend` and nowhere else.
   final int index;
 
   /// `front` / `back` / `external` / `unknown`, for diagnostics only.

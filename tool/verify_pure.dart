@@ -32,6 +32,7 @@ import 'package:webcam_client/src/backend/smartclass_backend_gateway.dart';
 import 'package:webcam_client/src/backend/unrecognized_command_log.dart';
 import 'package:webcam_client/src/capture/camera_backend.dart';
 import 'package:webcam_client/src/capture/camera_capabilities.dart';
+import 'package:webcam_client/src/capture/camera_order.dart';
 import 'package:webcam_client/src/capture/camera_provider.dart';
 import 'package:webcam_client/src/capture/camera_resolution.dart';
 import 'package:webcam_client/src/capture/camera_service.dart';
@@ -2072,6 +2073,145 @@ void checkCameraCapabilities() {
   );
 }
 
+void checkCameraOrder() {
+  section('canonical camera order');
+
+  eq(
+    'the group order is rear, then external, then front',
+    CameraGroup.values.map((g) => g.name).join(','),
+    'back,external,front',
+  );
+  eq('back maps to the back group', cameraGroupFor('back'), CameraGroup.back);
+  eq(
+    'front maps to the front group',
+    cameraGroupFor('front'),
+    CameraGroup.front,
+  );
+  eq(
+    'external maps to the external group',
+    cameraGroupFor('external'),
+    CameraGroup.external,
+  );
+  eq(
+    'an unknown direction is treated as external',
+    cameraGroupFor('unknown'),
+    CameraGroup.external,
+  );
+
+  const weakBack = RankedCamera(
+    index: 3,
+    group: CameraGroup.back,
+    maxPixels: 640 * 480,
+  );
+  const strongBack = RankedCamera(
+    index: 2,
+    group: CameraGroup.back,
+    maxPixels: 1920 * 1080,
+  );
+  const weakFront = RankedCamera(
+    index: 0,
+    group: CameraGroup.front,
+    maxPixels: 640 * 480,
+  );
+  const strongFront = RankedCamera(
+    index: 1,
+    group: CameraGroup.front,
+    maxPixels: 1280 * 720,
+  );
+
+  const mixed = <RankedCamera>[weakFront, weakBack, strongFront, strongBack];
+  eq(
+    'the strongest back camera lands at index 0',
+    canonicalCameraOrder(mixed).first,
+    2,
+  );
+  eq(
+    'the strongest front camera lands right after the back cameras',
+    canonicalCameraOrder(mixed)[2],
+    1,
+  );
+  eq(
+    'the full order is back, then external, then front',
+    canonicalCameraOrder(mixed).join(','),
+    '2,3,1,0',
+  );
+
+  // Windows reports every camera as `front`; Linux reports every one as
+  // `external`. Both must collapse to plain resolution order with no special
+  // case, and camera 0 must still be the strongest camera.
+  const windows = <RankedCamera>[
+    RankedCamera(index: 0, group: CameraGroup.front, maxPixels: 640 * 480),
+    RankedCamera(index: 1, group: CameraGroup.front, maxPixels: 1920 * 1080),
+    RankedCamera(index: 2, group: CameraGroup.front, maxPixels: 1280 * 720),
+  ];
+  eq(
+    'an all-front device falls back to resolution order',
+    canonicalCameraOrder(windows).join(','),
+    '1,2,0',
+  );
+  eq(
+    'and its camera 0 is the strongest one',
+    canonicalCameraOrder(windows).first,
+    1,
+  );
+
+  const linux = <RankedCamera>[
+    RankedCamera(index: 0, group: CameraGroup.external, maxPixels: 1280 * 720),
+    RankedCamera(index: 1, group: CameraGroup.external, maxPixels: 640 * 480),
+    RankedCamera(index: 2, group: CameraGroup.external, maxPixels: 1920 * 1080),
+  ];
+  eq(
+    'an all-external device falls back to resolution order',
+    canonicalCameraOrder(linux).join(','),
+    '2,0,1',
+  );
+
+  // A camera the ranking pass could not measure must not displace one it did.
+  const unmeasured = RankedCamera(index: 0, group: CameraGroup.back);
+  const measuredBack = RankedCamera(
+    index: 1,
+    group: CameraGroup.back,
+    maxPixels: 640 * 480,
+  );
+  eq(
+    'an unranked camera sorts last within its group',
+    canonicalCameraOrder(<RankedCamera>[unmeasured, measuredBack]).join(','),
+    '1,0',
+  );
+
+  eq(
+    'ties fall back to the physical index, so the order is stable',
+    canonicalCameraOrder(<RankedCamera>[
+      const RankedCamera(index: 2, group: CameraGroup.external, maxPixels: 100),
+      const RankedCamera(index: 0, group: CameraGroup.external, maxPixels: 100),
+      const RankedCamera(index: 1, group: CameraGroup.external, maxPixels: 100),
+    ]).join(','),
+    '0,1,2',
+  );
+
+  // The property that matters most: whatever happens, the result is a
+  // permutation. A dropped or repeated entry silently redefines camera_enum.
+  final messy = <RankedCamera>[
+    const RankedCamera(index: 4, group: CameraGroup.front, maxPixels: 100),
+    const RankedCamera(index: 0, group: CameraGroup.back),
+    const RankedCamera(index: 2, group: CameraGroup.external, maxPixels: 900),
+    const RankedCamera(index: 1, group: CameraGroup.back, maxPixels: 500),
+    RankedCamera(index: 3, group: cameraGroupFor('unknown'), maxPixels: 0),
+  ];
+  final ordered = canonicalCameraOrder(messy);
+  check(
+    'the result is always a permutation of the input indices',
+    ordered.length == messy.length &&
+        ordered.toSet().length == ordered.length &&
+        ordered.toSet().containsAll(<int>[0, 1, 2, 3, 4]),
+  );
+  eq(
+    'the empty list stays empty',
+    canonicalCameraOrder(const <RankedCamera>[]).length,
+    0,
+  );
+}
+
 void checkMjpegEncoder() {
   section('mjpeg encoder');
   fakeAsync((async) {
@@ -3097,6 +3237,7 @@ Future<void> main() async {
   checkJpegTrim();
   checkJpegSize();
   checkCameraCapabilities();
+  checkCameraOrder();
   checkMjpegEncoder();
   await checkCameraProvider();
   await checkFrameStore();

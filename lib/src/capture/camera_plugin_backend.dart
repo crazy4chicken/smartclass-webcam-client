@@ -34,7 +34,16 @@ const List<CameraResolution> kNominalResolutions = <CameraResolution>[
   CameraResolution(width: 3840, height: 2160),
 ];
 
-ResolutionPreset _presetForHeight(int height) {
+/// Maps an absolute pixel height onto the plugin's relative tier.
+///
+/// The mapping is one-way and lossy by nature — `ResolutionPreset` is a
+/// *relative* tier, so the tier chosen here is a request, not a promise. The
+/// value that really took effect is read back from the live controller.
+///
+/// Public because the capability probe needs the same mapping: it has to ask
+/// for a specific tier when testing a frame rate, and two copies of this ladder
+/// would drift.
+ResolutionPreset presetForHeight(int height) {
   if (height <= 240) return ResolutionPreset.low;
   if (height <= 480) return ResolutionPreset.medium;
   if (height <= 720) return ResolutionPreset.high;
@@ -50,7 +59,7 @@ CameraController _defaultControllerFactory(
   // not sound, and skipping it removes a whole permission and failure class.
   return CameraController(
     description,
-    _presetForHeight(config.height),
+    presetForHeight(config.height),
     enableAudio: false,
   );
 }
@@ -97,18 +106,31 @@ CameraFailure cameraFailureFrom(Object error) {
 /// comes from `camera_desktop` (Media Foundation on Windows, AVFoundation on
 /// macOS, GStreamer + V4L2 on Linux). `camera_windows` is deliberately not a
 /// dependency: it lacks an image stream and is strictly less capable.
+///
+/// **This class is the only place a physical camera index exists.** Everything
+/// outside it works in announced (`camera_enum`) order, which
+/// [cameraOrder] establishes.
 class CameraPluginBackend implements CameraBackend {
   CameraPluginBackend({
     CameraLister? listCameras,
     FrameStore frameStore = const IoFrameStore(),
     CameraControllerFactory? controllerFactory,
+    List<int>? cameraOrder,
   }) : _listCameras = listCameras ?? availableCameras,
        _frameStore = frameStore,
-       _controllerFactory = controllerFactory ?? _defaultControllerFactory;
+       _controllerFactory = controllerFactory ?? _defaultControllerFactory,
+       _cameraOrder = cameraOrder;
 
   final CameraLister _listCameras;
   final FrameStore _frameStore;
   final CameraControllerFactory _controllerFactory;
+
+  /// Announced enum → physical index, or null for identity.
+  ///
+  /// Supplied by bootstrap from `canonicalCameraOrder`, so the announcements and
+  /// the backend agree on what camera 0 means. Null keeps the identity mapping,
+  /// which is what every test that does not care about ordering relies on.
+  final List<int>? _cameraOrder;
 
   @override
   String get id {
@@ -133,15 +155,12 @@ class CameraPluginBackend implements CameraBackend {
         );
       }
 
+      final order = _resolvedOrder(cameras.length);
       return BackendProbe(
         available: true,
         devices: [
-          for (var i = 0; i < cameras.length; i++)
-            CameraDescriptor(
-              name: cameras[i].name,
-              index: i,
-              lensDirection: cameras[i].lensDirection.name,
-            ),
+          for (var announced = 0; announced < order.length; announced++)
+            _descriptorFor(cameras, order, announced),
         ],
         supportedResolutions: kNominalResolutions,
         maxFps: 30,
@@ -170,14 +189,54 @@ class CameraPluginBackend implements CameraBackend {
 
     final service = _PluginCameraService(
       cameras: cameras,
+      order: _resolvedOrder(cameras.length),
       config: config,
-      cameraIndex: 0,
+      cameraEnum: 0,
       frameStore: _frameStore,
       controllerFactory: _controllerFactory,
     );
     await service.initialize();
     return service;
   }
+
+  /// The permutation to use, or the identity when it cannot be trusted.
+  ///
+  /// A supplied order that is not a genuine permutation is discarded rather than
+  /// partially honoured: a duplicate would point two announced cameras at the
+  /// same physical device, and an out-of-range entry would index past the list.
+  /// Neither is a recoverable state, and identity is always a valid answer.
+  List<int> _resolvedOrder(int count) {
+    final identity = <int>[for (var i = 0; i < count; i++) i];
+
+    final order = _cameraOrder;
+    if (order == null || order.length != count) return identity;
+
+    final seen = <int>{};
+    for (final index in order) {
+      if (index < 0 || index >= count || !seen.add(index)) return identity;
+    }
+    return List<int>.unmodifiable(order);
+  }
+}
+
+/// The announced camera at [announced], described from the physical camera the
+/// permutation points at.
+///
+/// `index` is the **announced** enum, not the physical index: it is what the
+/// coordinator reports and what the server sends back in `camera_enum`, so
+/// making it anything else would reintroduce a second numbering scheme — the
+/// exact mistake this whole arrangement exists to prevent.
+CameraDescriptor _descriptorFor(
+  List<CameraDescription> cameras,
+  List<int> order,
+  int announced,
+) {
+  final physical = cameras[order[announced]];
+  return CameraDescriptor(
+    name: physical.name,
+    index: announced,
+    lensDirection: physical.lensDirection.name,
+  );
 }
 
 /// [CameraService] backed by `CameraController`.
@@ -185,29 +244,36 @@ class CameraPluginBackend implements CameraBackend {
 /// Rebuilds (reconfigure / switchCamera) are serialised and roll back to the
 /// last working configuration, so a bad command from the backend can never
 /// leave the probe without a camera.
+///
+/// Every index this class takes or reports is an **announced** enum;
+/// [_order] is the only bridge to the physical list.
 class _PluginCameraService implements CameraService, CameraPreviewProvider {
   _PluginCameraService({
     required List<CameraDescription> cameras,
+    required List<int> order,
     required CaptureConfig config,
-    required int cameraIndex,
+    required int cameraEnum,
     required FrameStore frameStore,
     required CameraControllerFactory controllerFactory,
   }) : _cameras = cameras,
+       _order = order,
        _frameStore = frameStore,
        _controllerFactory = controllerFactory,
        _config = config,
-       _cameraIndex = cameraIndex,
+       _cameraEnum = cameraEnum,
        _appliedResolution = config.resolution,
        _descriptors = [
-         for (var i = 0; i < cameras.length; i++)
-           CameraDescriptor(
-             name: cameras[i].name,
-             index: i,
-             lensDirection: cameras[i].lensDirection.name,
-           ),
+         for (var announced = 0; announced < order.length; announced++)
+           _descriptorFor(cameras, order, announced),
        ];
 
   final List<CameraDescription> _cameras;
+
+  /// Announced enum → physical index.
+  final List<int> _order;
+
+  /// Indexed by announced enum, so `_descriptors[_cameraEnum].index ==
+  /// _cameraEnum` always holds.
   final List<CameraDescriptor> _descriptors;
   final FrameStore _frameStore;
   final CameraControllerFactory _controllerFactory;
@@ -219,7 +285,9 @@ class _PluginCameraService implements CameraService, CameraPreviewProvider {
   FrameSource? _frameSource;
 
   CaptureConfig _config;
-  int _cameraIndex;
+
+  /// The announced enum of the active camera — never a physical index.
+  int _cameraEnum;
   CameraResolution _appliedResolution;
   bool _initialized = false;
   bool _previewEnabled = true;
@@ -251,13 +319,13 @@ class _PluginCameraService implements CameraService, CameraPreviewProvider {
   }
 
   @override
-  CameraDescriptor get descriptor => _descriptors[_cameraIndex];
+  CameraDescriptor get descriptor => _descriptors[_cameraEnum];
 
   @override
   List<CameraDescriptor> get cameras => List.unmodifiable(_descriptors);
 
   @override
-  int get cameraIndex => _cameraIndex;
+  int get cameraIndex => _cameraEnum;
 
   @override
   bool get isInitialized => _initialized;
@@ -276,12 +344,14 @@ class _PluginCameraService implements CameraService, CameraPreviewProvider {
 
   @override
   Future<void> initialize() =>
-      _synchronized(() => _rebuild(_config, _cameraIndex, rollback: false));
+      _synchronized(() => _rebuild(_config, _cameraEnum, rollback: false));
 
   @override
   Future<void> reconfigure(CaptureConfig config) =>
-      _synchronized(() => _rebuild(config, _cameraIndex, rollback: true));
+      _synchronized(() => _rebuild(config, _cameraEnum, rollback: true));
 
+  /// [index] is an announced enum. The physical camera it refers to is resolved
+  /// here and never leaves this file.
   @override
   Future<void> switchCamera(int index) =>
       _synchronized(() => _rebuild(_config, index, rollback: true));
@@ -327,18 +397,18 @@ class _PluginCameraService implements CameraService, CameraPreviewProvider {
 
   Future<void> _rebuild(
     CaptureConfig config,
-    int cameraIndex, {
+    int cameraEnum, {
     required bool rollback,
   }) async {
     final previousConfig = _config;
-    final previousIndex = _cameraIndex;
+    final previousEnum = _cameraEnum;
     final previousResolution = _appliedResolution;
     final hadWorkingController = _controller != null;
 
     await _disposeController();
 
     try {
-      await _openController(config, cameraIndex);
+      await _openController(config, cameraEnum);
       return;
     } catch (error) {
       // Preserve a typed failure (permission denied, device busy) instead of
@@ -353,7 +423,7 @@ class _PluginCameraService implements CameraService, CameraPreviewProvider {
       // Restore the last configuration that worked, then still report the
       // failure so the backend learns its command was rejected.
       try {
-        await _openController(previousConfig, previousIndex);
+        await _openController(previousConfig, previousEnum);
       } catch (_) {
         _emitHealth(CameraHealth.lost);
         throw failure;
@@ -363,15 +433,15 @@ class _PluginCameraService implements CameraService, CameraPreviewProvider {
     }
   }
 
-  Future<void> _openController(CaptureConfig config, int cameraIndex) async {
-    if (cameraIndex < 0 || cameraIndex >= _cameras.length) {
+  Future<void> _openController(CaptureConfig config, int cameraEnum) async {
+    if (cameraEnum < 0 || cameraEnum >= _order.length) {
       throw CameraFailure.initFailed(
-        'camera index $cameraIndex is out of range '
-        '(${_cameras.length} available)',
+        'camera $cameraEnum is out of range '
+        '(${_order.length} announced)',
       );
     }
 
-    final description = _cameras[cameraIndex];
+    final description = _cameras[_order[cameraEnum]];
     final controller = _controllerFactory(description, config);
     try {
       await controller.initialize();
@@ -398,7 +468,7 @@ class _PluginCameraService implements CameraService, CameraPreviewProvider {
     _controller = controller;
     _frameSource = source;
     _config = config;
-    _cameraIndex = cameraIndex;
+    _cameraEnum = cameraEnum;
     _appliedResolution = _readAppliedResolution(controller, config);
     _initialized = true;
     _emitHealth(CameraHealth.ok);
