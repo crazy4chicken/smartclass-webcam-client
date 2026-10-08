@@ -5,6 +5,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'src/agent/agent_coordinator.dart';
+import 'src/app/capability_bootstrap.dart';
 import 'src/app/lifecycle_controller.dart';
 import 'src/backend/backend_gateway.dart';
 import 'src/backend/device_credentials.dart';
@@ -14,25 +15,34 @@ import 'src/backend/registration_request.dart';
 import 'src/backend/smartclass_backend_gateway.dart';
 import 'src/backend/unrecognized_command_log.dart';
 import 'src/capture/camera_backend.dart';
+import 'src/capture/camera_capabilities.dart';
 import 'src/capture/camera_plugin_backend.dart';
 import 'src/capture/camera_provider.dart';
 import 'src/capture/camera_resolution.dart';
-import 'src/capture/camera_service.dart';
 import 'src/capture/codec_probe.dart';
 import 'src/capture/frame_pump.dart';
+import 'src/capture/plugin_camera_ranker.dart';
+import 'src/capture/plugin_capability_probe.dart';
 import 'src/capture/stream_settings.dart';
 import 'src/config/app_config.dart';
+import 'src/config/capabilities_store.dart';
 import 'src/config/connection_settings.dart';
 import 'src/config/settings_store.dart';
+import 'src/config/shared_prefs_capabilities_store.dart';
 import 'src/config/shared_prefs_settings_store.dart';
 import 'src/ui/screens/agent_screen.dart';
+import 'src/ui/screens/bootstrap_screen.dart';
 
 /// The ordered camera backend chain.
 ///
 /// `camera` + `camera_desktop` covers all five platforms. A future native or
 /// ffmpeg encoder is added here and nowhere else.
-List<CameraBackend> buildBackendChain() {
-  return <CameraBackend>[CameraPluginBackend()];
+///
+/// [cameraOrder] is the announced → physical permutation the capability probe
+/// produced. Null keeps the identity mapping, which is what a caller with no
+/// inventory — and every test — wants.
+List<CameraBackend> buildBackendChain({List<int>? cameraOrder}) {
+  return <CameraBackend>[CameraPluginBackend(cameraOrder: cameraOrder)];
 }
 
 /// Used only when `USE_MOCK_BACKEND` is on, so the offline path needs no
@@ -123,43 +133,71 @@ Future<void> _bootstrap() async {
   );
 
   final settings = StreamSettings.defaults().copyWith(codec: codec);
-
-  // The camera is opened before the gateway is built, because the camera list
-  // has to be announced on registration.
-  final cameraProvider = CameraProvider(backends: buildBackendChain());
   final captureConfig = CaptureConfig.defaults();
+  final capabilitiesStore = SharedPrefsCapabilitiesStore();
+
+  // `runApp` is called **once**, with a root that probes first. Probing before
+  // `runApp` would mean a black window for as long as the cameras take to rank
+  // and measure — ten seconds on a three-camera machine, which reads as a
+  // crashed app.
+  runApp(
+    BootstrapRoot(
+      probe: () => ensureInventory(
+        enumerate: pluginCameraEnumerator(),
+        ranker: PluginCameraRanker(),
+        probe: PluginCapabilityProbe(),
+        store: capabilitiesStore,
+        fallbackResolution: captureConfig.resolution,
+        fallbackFps: settings.fps,
+        log: debugPrint,
+      ),
+      build: (inventory) => _startKiosk(
+        inventory: inventory,
+        unrecognized: unrecognized,
+        settingsStore: settingsStore,
+        connection: connection,
+        settings: settings,
+        available: available,
+        captureConfig: captureConfig,
+      ),
+    ),
+  );
+}
+
+/// Opens a camera and assembles the running kiosk.
+///
+/// Separate from [_bootstrap] because it can only run once the inventory
+/// exists: the announced camera list and the backend's permutation both come
+/// from it, and they have to agree or the server would be asking for one camera
+/// while the device opened another.
+Future<Widget> _startKiosk({
+  required CameraInventory inventory,
+  required UnrecognizedCommandLog unrecognized,
+  required SettingsStore settingsStore,
+  required ConnectionSettings connection,
+  required StreamSettings settings,
+  required Set<CaptureCodec> available,
+  required CaptureConfig captureConfig,
+}) async {
+  debugPrint('[camera] inventory: $inventory');
+
+  final cameraProvider = CameraProvider(
+    backends: buildBackendChain(cameraOrder: inventory.order),
+  );
   final openResult = await cameraProvider.open(captureConfig);
   final camera = openResult.service;
   if (camera == null) {
     debugPrint('[camera] no backend available: ${openResult.failure}');
   }
 
-  // Announce what this device will actually deliver, not a capability ladder.
-  //
-  // Every camera is driven by the same [CaptureConfig], so one resolution is
-  // the truth for all of them. The capability lists are empty here because the
-  // probe has not run yet — `buildAnnouncements` then falls back to exactly the
-  // current pair, which is the honest thing to say and, more importantly, is
-  // something the server accepts. (Task 8 replaces this with the probed
-  // inventory.)
-  final announcedResolution =
-      camera?.appliedResolution ?? captureConfig.resolution;
-  final descriptors =
-      camera?.cameras ??
-      const <CameraDescriptor>[CameraDescriptor(name: 'camera', index: 0)];
-
-  final announcements = buildAnnouncements(
-    cameras: <CameraDeclaration>[
-      for (final descriptor in descriptors)
-        CameraDeclaration(
-          name: descriptor.name,
-          resolution: announcedResolution,
-          fps: settings.fps,
-        ),
-    ],
-    codecs: wireCodecsFor(available),
-  );
-  debugPrint('[register] announcing $announcements');
+  // The announced codecs, in preference order. Derived from `wireCodecsFor`
+  // rather than ordered again here, so the capture-layer list and the wire list
+  // cannot disagree — that is the whole reason `wireCodecsFor` exists instead
+  // of a cast.
+  final announcedCodecs = <CaptureCodec>[
+    for (final codec in wireCodecsFor(available))
+      CaptureCodec.tryParse(codec.wireName)!,
+  ];
 
   // The gateway and the coordinator refer to each other: the gateway needs the
   // coordinator's live state for its periodic `status`, and the coordinator
@@ -173,12 +211,14 @@ Future<void> _bootstrap() async {
   /// a fresh `UnrecognizedCommandLog` per call would throw away the local
   /// record of every malformed message the moment an operator saved a setting.
   ///
-  /// Known limitation: [announcements] is computed once, from the camera that
-  /// is open at startup, and is **not** recomputed here. That is correct today
-  /// because nothing in the settings screen changes the camera, resolution or
-  /// fps. If those are ever added, they have to be rebuilt inside this factory
-  /// — announcing a stale resolution is exactly the class of bug `45364b2`
-  /// and `d81992b` fixed.
+  /// The announcements are rebuilt **here**, on every call, from the
+  /// coordinator's live modes. That is what makes a parameter-changing
+  /// `switch_camera` visible to the server: it reconnects through
+  /// `reconfigure`, which comes back through this factory, and the registration
+  /// it produces carries the mode the device is actually in. Building them once
+  /// at start-up was the documented limitation that let a local-only switch
+  /// leave the server's `metadata` snapshot describing a mode the device had
+  /// left — exactly the class of bug `45364b2` and `d81992b` fixed.
   BackendGateway buildGateway(ConnectionSettings c) {
     if (AppConfig.useMockBackend) {
       return MockBackendGateway(unrecognizedLog: unrecognized);
@@ -188,7 +228,10 @@ Future<void> _bootstrap() async {
       registration: HttpRegistrationClient(),
       channelFactory: (uri) =>
           WebSocketBackendChannel(WebSocketChannel.connect(uri)),
-      cameras: announcements,
+      cameras: buildAnnouncements(
+        cameras: _declarations(inventory, coordinator, captureConfig),
+        codecs: wireCodecsFor(available),
+      ),
       statusReport: () => coordinator.reportStatus(),
       unrecognizedLog: unrecognized,
     );
@@ -209,6 +252,8 @@ Future<void> _bootstrap() async {
     initialCamera: camera,
     initialBackendId: openResult.backendId,
     settings: settings,
+    capabilities: inventory.capabilities,
+    announcedCodecs: announcedCodecs,
     // The server never waits for an ack and records nothing about most
     // commands, so the console is the only place a refusal is visible. Without
     // this, a device that acks `ok:false` looks identical to one that ignored
@@ -228,22 +273,113 @@ Future<void> _bootstrap() async {
     onResume: coordinator.resume,
   ).attach();
 
-  runApp(
-    AgentApp(
-      coordinator: coordinator,
-      settingsStore: settingsStore,
-      // Persist first, then reconnect: a power cut in between must not lose
-      // what the operator just typed.
-      onConnectionChanged: (next) async {
-        await settingsStore.save(next);
-        await coordinator.reconfigure(next);
-      },
-    ),
-  );
-
   // Opens the camera and registers. The device pushes nothing until the server
-  // sends `start_recording`.
-  await coordinator.start();
+  // sends `start_recording`. Deliberately not awaited: the kiosk screen renders
+  // from `coordinator.status` immediately and reports the link as it settles,
+  // which is friendlier than holding the progress screen through a registration
+  // round trip.
+  unawaited(coordinator.start());
+
+  return AgentApp(
+    coordinator: coordinator,
+    settingsStore: settingsStore,
+    // Persist first, then reconnect: a power cut in between must not lose
+    // what the operator just typed.
+    onConnectionChanged: (next) async {
+      await settingsStore.save(next);
+      await coordinator.reconfigure(next);
+    },
+  );
+}
+
+/// One declaration per announced camera, from the coordinator's live state.
+///
+/// [captureConfig] is only the floor for an index past the end of the mode list,
+/// which the inventory makes unreachable — but the cost of being wrong is a
+/// registration the server refuses, so the fallback stays.
+List<CameraDeclaration> _declarations(
+  CameraInventory inventory,
+  AgentCoordinator coordinator,
+  CaptureConfig captureConfig,
+) {
+  final descriptors = inventory.descriptors;
+  final modes = coordinator.cameraModes;
+  final capabilities = coordinator.capabilities;
+  final liveFps = coordinator.settings.fps;
+
+  if (descriptors.isEmpty) {
+    // No camera at all. Registering one synthetic entry beats not registering:
+    // the operator sees the device online and can fix it from the settings
+    // screen, which is exactly what a fresh install shows.
+    return <CameraDeclaration>[
+      CameraDeclaration(
+        name: 'camera',
+        resolution: captureConfig.resolution,
+        fps: liveFps,
+      ),
+    ];
+  }
+
+  return <CameraDeclaration>[
+    for (var announced = 0; announced < descriptors.length; announced++)
+      CameraDeclaration(
+        name: descriptors[announced].name,
+        resolution: announced < modes.length
+            ? modes[announced].resolution
+            : captureConfig.resolution,
+        fps: announced < modes.length ? modes[announced].fps : liveFps,
+        capabilities: announced < capabilities.length
+            ? capabilities[announced]
+            : CameraCapabilities.empty,
+      ),
+  ];
+}
+
+/// The root widget: probes the cameras, then hands the kiosk what it found.
+///
+/// The probe runs inside the tree rather than before `runApp`, which is what
+/// lets [BootstrapScreen] be the first thing the operator sees instead of a
+/// black window.
+class BootstrapRoot extends StatefulWidget {
+  const BootstrapRoot({super.key, required this.probe, required this.build});
+
+  /// Runs the capability probe. Called once, from [BootstrapScreen].
+  final Future<CameraInventory> Function() probe;
+
+  /// Builds the kiosk once the inventory is known. Slow — it opens the camera —
+  /// so the progress screen stays up until it returns.
+  final Future<Widget> Function(CameraInventory inventory) build;
+
+  @override
+  State<BootstrapRoot> createState() => _BootstrapRootState();
+}
+
+class _BootstrapRootState extends State<BootstrapRoot> {
+  Widget? _app;
+
+  Future<void> _onInventory(CameraInventory inventory) async {
+    final app = await widget.build(inventory);
+    if (!mounted) return;
+    setState(() => _app = app);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Cached rather than rebuilt: a second call to `widget.build` would open a
+    // second camera and build a second coordinator.
+    final app = _app;
+    if (app != null) return app;
+
+    return MaterialApp(
+      title: 'WebCam Edge Probe',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData.dark(useMaterial3: true),
+      home: BootstrapScreen(
+        run: widget.probe,
+        onDone: (inventory) => unawaited(_onInventory(inventory)),
+      ),
+    );
+  }
 }
 
 /// Root widget. Kept tiny so tests can build it without touching bootstrap.

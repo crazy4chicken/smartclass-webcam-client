@@ -42,6 +42,21 @@ class CameraDescriptor {
   String toString() => 'CameraDescriptor($index: $name)';
 }
 
+/// Enumerates the platform's cameras without opening any of them.
+///
+/// The plugin's `availableCameras()` returns `CameraDescription`, which the
+/// Flutter-free layer cannot see, so this narrows it to the domain model: name,
+/// lens direction, and the position in the platform's own list.
+///
+/// The descriptors this returns carry a **physical** index, because the
+/// canonical order does not exist yet — establishing it is the caller's next
+/// step. `ensureInventory` consumes them immediately and rebuilds the list with
+/// announced indices, which is what everything downstream reads.
+///
+/// Enumerating needs no permission on any of the five platforms, so this cannot
+/// be refused; it can still fail, and the caller treats a throw as "no camera".
+typedef CameraEnumerator = Future<List<CameraDescriptor>> Function();
+
 /// Implemented by camera services that can hand a live controller to the UI so
 /// it can render a preview.
 ///

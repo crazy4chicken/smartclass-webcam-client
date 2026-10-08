@@ -15,6 +15,27 @@ import 'serial_lock.dart';
 /// exercised without hardware.
 typedef CameraLister = Future<List<CameraDescription>> Function();
 
+/// The [CameraEnumerator] the app actually uses.
+///
+/// The plugin's list is the only one that can be opened from, so the physical
+/// index is simply the position in it. Everything downstream works in announced
+/// indices; the translation happens in [CameraPluginBackend], which is the only
+/// place that has both.
+CameraEnumerator pluginCameraEnumerator({CameraLister? listCameras}) {
+  final list = listCameras ?? availableCameras;
+  return () async {
+    final cameras = await list();
+    return <CameraDescriptor>[
+      for (var index = 0; index < cameras.length; index++)
+        CameraDescriptor(
+          name: cameras[index].name,
+          index: index,
+          lensDirection: cameras[index].lensDirection.name,
+        ),
+    ];
+  };
+}
+
 /// Builds the plugin controller. Injectable for the same reason.
 typedef CameraControllerFactory = CameraController Function(
   CameraDescription description,

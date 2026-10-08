@@ -18,6 +18,7 @@ import 'dart:typed_data';
 import 'package:fake_async/fake_async.dart';
 import 'package:webcam_client/src/agent/agent_coordinator.dart';
 import 'package:webcam_client/src/agent/agent_status.dart';
+import 'package:webcam_client/src/app/capability_bootstrap.dart';
 import 'package:webcam_client/src/backend/backend_gateway.dart';
 import 'package:webcam_client/src/backend/device_credentials.dart';
 import 'package:webcam_client/src/backend/health_probe.dart';
@@ -2420,7 +2421,6 @@ void checkCameraOrder() {
 
 void checkCapabilityCache() {
   section('capability cache key');
-
   eq(
     'the fingerprint is stable for the same camera list',
     cameraFingerprint(<String>['front', 'back']),
@@ -2479,6 +2479,428 @@ void checkCapabilityCache() {
     ).isEmpty,
     false,
   );
+}
+
+// --- capability bootstrap fixtures ------------------------------------------
+
+/// Three physical cameras, deliberately listed front-first: the ordering pass
+/// has to be what puts the rear ones at the front of the announced list.
+const List<CameraDescriptor> _bootstrapCameras = <CameraDescriptor>[
+  CameraDescriptor(name: 'Laptop Front', index: 0, lensDirection: 'front'),
+  CameraDescriptor(name: 'USB Back A', index: 1, lensDirection: 'back'),
+  CameraDescriptor(name: 'USB Back B', index: 2, lensDirection: 'back'),
+];
+
+const Map<int, int> _bootstrapCeilings = <int, int>{
+  0: 1280 * 720,
+  1: 640 * 480,
+  2: 1920 * 1080,
+};
+
+final Map<int, CameraCapabilities> _bootstrapMeasured =
+    <int, CameraCapabilities>{
+      2: CameraCapabilities.of(
+        resolutions: <CameraResolution>[
+          const CameraResolution(width: 1920, height: 1080),
+          const CameraResolution(width: 1280, height: 720),
+        ],
+        framerates: <int>[60, 30],
+      ),
+      1: CameraCapabilities.of(
+        resolutions: <CameraResolution>[
+          const CameraResolution(width: 640, height: 480),
+        ],
+        framerates: <int>[30],
+      ),
+      0: CameraCapabilities.of(
+        resolutions: <CameraResolution>[
+          const CameraResolution(width: 1280, height: 720),
+        ],
+        framerates: <int>[30],
+      ),
+    };
+
+/// An in-memory [CapabilitiesStore].
+class _MemoryCapabilitiesStore implements CapabilitiesStore {
+  _MemoryCapabilitiesStore([Map<String, CameraCapabilities>? seed])
+    : entries = <String, CameraCapabilities>{...?seed};
+
+  final Map<String, CameraCapabilities> entries;
+  final List<String> loads = <String>[];
+  final List<String> saves = <String>[];
+
+  @override
+  Future<CameraCapabilities?> load(String fingerprint) async {
+    loads.add(fingerprint);
+    return entries[fingerprint];
+  }
+
+  @override
+  Future<void> save(String fingerprint, CameraCapabilities capabilities) async {
+    saves.add(fingerprint);
+    entries[fingerprint] = capabilities;
+  }
+
+  @override
+  Future<void> clear() async => entries.clear();
+}
+
+class _BootstrapHarness {
+  _BootstrapHarness({
+    this.cameras = _bootstrapCameras,
+    Map<int, CameraCapabilities>? measured,
+    _MemoryCapabilitiesStore? store,
+    this.enumerateThrows = false,
+    this.rankThrows = false,
+    this.dropFromRank = 0,
+  }) : measured = measured ?? _bootstrapMeasured,
+       store = store ?? _MemoryCapabilitiesStore();
+
+  final List<CameraDescriptor> cameras;
+  final Map<int, CameraCapabilities> measured;
+  final _MemoryCapabilitiesStore store;
+  final bool enumerateThrows;
+  final bool rankThrows;
+  final int dropFromRank;
+
+  int enumerateCalls = 0;
+  int rankCalls = 0;
+  final List<int> probed = <int>[];
+  final List<String> log = <String>[];
+
+  Future<CameraInventory> run({
+    bool forceReprobe = false,
+    CameraResolution fallbackResolution = const CameraResolution(
+      width: 1280,
+      height: 720,
+    ),
+    int fallbackFps = 5,
+  }) => ensureInventory(
+    enumerate: () async {
+      enumerateCalls++;
+      if (enumerateThrows) throw StateError('no enumeration');
+      return cameras;
+    },
+    ranker: _BootstrapRanker(this),
+    probe: _BootstrapProbe(this),
+    store: store,
+    fallbackResolution: fallbackResolution,
+    fallbackFps: fallbackFps,
+    forceReprobe: forceReprobe,
+    log: log.add,
+  );
+}
+
+class _BootstrapRanker implements CameraRanker {
+  _BootstrapRanker(this.harness);
+  final _BootstrapHarness harness;
+
+  @override
+  Future<List<RankedCamera>> rank(List<CameraDescriptor> devices) async {
+    harness.rankCalls++;
+    if (harness.rankThrows) throw StateError('rank exploded');
+
+    final considered = harness.dropFromRank > 0
+        ? devices.sublist(0, devices.length - harness.dropFromRank)
+        : devices;
+
+    return <RankedCamera>[
+      for (final device in considered)
+        RankedCamera(
+          index: device.index,
+          group: cameraGroupFor(device.lensDirection),
+          maxPixels: _bootstrapCeilings[device.index] ?? 0,
+        ),
+    ];
+  }
+}
+
+class _BootstrapProbe implements CapabilityProbe {
+  _BootstrapProbe(this.harness);
+  final _BootstrapHarness harness;
+
+  @override
+  Future<CapabilityProbeResult> probe(int physicalCameraIndex) async {
+    harness.probed.add(physicalCameraIndex);
+    return CapabilityProbeResult(
+      capabilities:
+          harness.measured[physicalCameraIndex] ?? CameraCapabilities.empty,
+      detail: 'physical $physicalCameraIndex',
+    );
+  }
+}
+
+/// The keys a successful run should produce: the ordered names, per enum.
+List<String> _bootstrapKeys() {
+  final fingerprint = cameraFingerprint(<String>[
+    'USB Back B',
+    'USB Back A',
+    'Laptop Front',
+  ]);
+  return <String>[
+    for (var i = 0; i < 3; i++) capabilityCacheKey(fingerprint, i),
+  ];
+}
+
+Future<void> checkCapabilityBootstrap() async {
+  section('capability bootstrap');
+
+  {
+    final h = _BootstrapHarness();
+    final inventory = await h.run();
+
+    eq('cameras are enumerated once', h.enumerateCalls, 1);
+    eq('they are ranked once', h.rankCalls, 1);
+    // Probed in canonical order, because the cache key is the ordered set.
+    eq('the probe follows the canonical order', h.probed.join(','), '2,1,0');
+    eq('and the permutation matches', inventory.order.join(','), '2,1,0');
+
+    // The physical list was front-first; the announced list is not.
+    eq(
+      'the announced list is rear-then-front, strongest first',
+      inventory.descriptors.map((d) => d.name).join(' → '),
+      'USB Back B → USB Back A → Laptop Front',
+    );
+    eq(
+      'the element position is camera_enum',
+      inventory.descriptors.map((d) => d.index).join(','),
+      '0,1,2',
+    );
+    eq('one capabilities entry per camera', inventory.capabilities.length, 3);
+    eq(
+      'all of them are usable',
+      inventory.capabilities.every((c) => !c.isEmpty),
+      true,
+    );
+    eq(
+      'and the strongest camera leads with its ceiling',
+      inventory.capabilities.first.resolutions.first.label,
+      '1920x1080',
+    );
+    eq(
+      'stored once per camera',
+      h.store.saves.join('|') == _bootstrapKeys().join('|'),
+      true,
+    );
+  }
+
+  {
+    // A cache hit cannot skip the ranking — the key is the *ordered* set, and
+    // the order is what the ranking produces. It skips the probe, which is nine
+    // opens per camera against the ranker's one.
+    final store = _MemoryCapabilitiesStore();
+    for (final key in _bootstrapKeys()) {
+      store.entries[key] = CameraCapabilities.of(
+        resolutions: <CameraResolution>[
+          const CameraResolution(width: 640, height: 480),
+        ],
+        framerates: <int>[15],
+      );
+    }
+
+    final h = _BootstrapHarness(store: store);
+    final inventory = await h.run();
+
+    eq('ranking still runs on a cache hit', h.rankCalls, 1);
+    eq('the probe does not', h.probed.length, 0);
+    eq(
+      'every camera was looked up',
+      h.store.loads.join('|') == _bootstrapKeys().join('|'),
+      true,
+    );
+    eq(
+      'and the cached values are used',
+      inventory.capabilities.every((c) => c.framerates.contains(15)),
+      true,
+    );
+  }
+
+  {
+    // A cache written for a different camera set: the "USB webcam unplugged"
+    // case.
+    final store = _MemoryCapabilitiesStore(<String, CameraCapabilities>{
+      capabilityCacheKey(
+        cameraFingerprint(<String>['Only Camera']),
+        0,
+      ): CameraCapabilities.of(
+        resolutions: <CameraResolution>[
+          const CameraResolution(width: 640, height: 480),
+        ],
+        framerates: <int>[5],
+      ),
+    });
+
+    final h = _BootstrapHarness(store: store);
+    await h.run();
+
+    eq('a stale fingerprint re-probes everything', h.probed.join(','), '2,1,0');
+    eq(
+      'and rewrites the cache under the new keys',
+      h.store.saves.join('|') == _bootstrapKeys().join('|'),
+      true,
+    );
+  }
+
+  {
+    // What the settings screen's re-detect button needs: measure again *and*
+    // leave the next launch with the fresh answer.
+    final store = _MemoryCapabilitiesStore();
+    for (final key in _bootstrapKeys()) {
+      store.entries[key] = CameraCapabilities.of(
+        resolutions: <CameraResolution>[
+          const CameraResolution(width: 640, height: 480),
+        ],
+        framerates: <int>[15],
+      );
+    }
+
+    final h = _BootstrapHarness(store: store);
+    final inventory = await h.run(forceReprobe: true);
+
+    eq('a forced re-probe does not read the cache', h.store.loads.length, 0);
+    eq('it probes everything', h.probed.join(','), '2,1,0');
+    eq('and writes the fresh answer back', h.store.saves.length, 3);
+    eq(
+      'so the stale entry is gone',
+      inventory.capabilities.first.resolutions.first.label,
+      '1920x1080',
+    );
+  }
+
+  {
+    // Nothing could be opened. The server rejects an empty list outright, so
+    // the device has to degrade to "only what I am doing".
+    final h = _BootstrapHarness(measured: const <int, CameraCapabilities>{});
+    final inventory = await h.run(
+      fallbackResolution: const CameraResolution(width: 640, height: 480),
+      fallbackFps: 15,
+    );
+
+    eq(
+      'every camera still gets a usable set',
+      inventory.capabilities.length,
+      3,
+    );
+    eq(
+      'which is never empty',
+      inventory.capabilities.every(
+        (c) => c.resolutions.isNotEmpty && c.framerates.isNotEmpty,
+      ),
+      true,
+    );
+    eq(
+      'and declares the current resolution',
+      inventory.capabilities.every(
+        (c) => c.resolutions.contains(
+          const CameraResolution(width: 640, height: 480),
+        ),
+      ),
+      true,
+    );
+    eq(
+      'and the current frame rate',
+      inventory.capabilities.every((c) => c.framerates.contains(15)),
+      true,
+    );
+  }
+
+  {
+    final inventory = await _BootstrapHarness(cameras: const []).run();
+    eq('no camera at all yields an empty inventory', inventory.isEmpty, true);
+    eq('with no capabilities', inventory.capabilities.length, 0);
+  }
+
+  {
+    final h = _BootstrapHarness(enumerateThrows: true);
+    final inventory = await h.run();
+    eq(
+      'an enumeration that throws is treated as no camera',
+      inventory.isEmpty,
+      true,
+    );
+    check('and is logged', h.log.any((l) => l.contains('enumeration failed')));
+  }
+
+  {
+    // The ranker is documented as never throwing. If it ever does, the device
+    // must still get an order to work with — and the fallback is still
+    // rear-then-front by enumeration order.
+    final h = _BootstrapHarness(rankThrows: true);
+    final inventory = await h.run();
+
+    eq(
+      'a ranker that throws still yields every camera',
+      inventory.descriptors.length,
+      3,
+    );
+    eq('in a usable order', inventory.order.join(','), '1,2,0');
+    eq(
+      'with the rear cameras first',
+      inventory.descriptors.first.lensDirection,
+      'back',
+    );
+    check('and is logged', h.log.any((l) => l.contains('ranking failed')));
+  }
+
+  {
+    // A short result would leave a camera unreachable, and `physical[order[i]]`
+    // would not even be safe.
+    final h = _BootstrapHarness(dropFromRank: 1);
+    final inventory = await h.run();
+
+    eq(
+      'a ranker that drops a camera is ignored',
+      inventory.descriptors.length,
+      3,
+    );
+    eq(
+      'in favour of the enumeration order',
+      inventory.order.join(','),
+      '1,2,0',
+    );
+    check('and is logged', h.log.any((l) => l.contains('falling back')));
+  }
+
+  {
+    // A pair of the same USB webcam enumerates under one name on Windows.
+    // Sharing a cache entry would give camera 1 camera 0's capabilities.
+    const twins = <CameraDescriptor>[
+      CameraDescriptor(name: 'USB Camera', index: 0, lensDirection: 'back'),
+      CameraDescriptor(name: 'USB Camera', index: 1, lensDirection: 'back'),
+    ];
+    final h = _BootstrapHarness(
+      cameras: twins,
+      measured: <int, CameraCapabilities>{
+        0: CameraCapabilities.of(
+          resolutions: <CameraResolution>[
+            const CameraResolution(width: 1920, height: 1080),
+          ],
+          framerates: <int>[30],
+        ),
+        1: CameraCapabilities.of(
+          resolutions: <CameraResolution>[
+            const CameraResolution(width: 640, height: 480),
+          ],
+          framerates: <int>[15],
+        ),
+      },
+    );
+
+    final inventory = await h.run(
+      // Below both ceilings, so the current-mode fold-in does not mask which
+      // camera each entry came from.
+      fallbackResolution: const CameraResolution(width: 640, height: 480),
+    );
+
+    eq('two cameras with one name get two entries', h.store.saves.length, 2);
+    eq('under two different keys', h.store.saves.toSet().length, 2);
+    eq(
+      'and each keeps its own capabilities',
+      '${inventory.capabilities[0].resolutions.first.label},'
+          '${inventory.capabilities[1].resolutions.first.label}',
+      '1920x1080,640x480',
+    );
+  }
 }
 
 void checkMjpegEncoder() {
@@ -3828,6 +4250,7 @@ Future<void> main() async {
   checkCameraCapabilities();
   checkCameraOrder();
   checkCapabilityCache();
+  await checkCapabilityBootstrap();
   checkMjpegEncoder();
   await checkCameraProvider();
   await checkFrameStore();
