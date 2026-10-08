@@ -109,7 +109,7 @@ class SmartClassBackendGateway implements BackendGateway {
     required Uri base,
     required RegistrationClient registration,
     required ChannelFactory channelFactory,
-    required List<CameraAnnouncement> cameras,
+    required List<CameraAnnouncement> Function() cameras,
     Duration? idleStatusInterval,
     Duration Function(int attempt)? backoff,
     Map<String, Object?> Function()? statusReport,
@@ -117,7 +117,7 @@ class SmartClassBackendGateway implements BackendGateway {
   }) : _base = base,
        _registration = registration,
        _channelFactory = channelFactory,
-       _cameras = List<CameraAnnouncement>.unmodifiable(cameras),
+       _cameras = cameras,
        _idleStatusInterval =
            idleStatusInterval ?? const Duration(seconds: idleStatusSeconds),
        _backoff = backoff ?? backoffFor,
@@ -131,7 +131,24 @@ class SmartClassBackendGateway implements BackendGateway {
   final Uri _base;
   final RegistrationClient _registration;
   final ChannelFactory _channelFactory;
-  final List<CameraAnnouncement> _cameras;
+
+  /// Produced at **registration**, not at construction.
+  ///
+  /// A callback rather than a list because the camera list is exactly the thing
+  /// that can change between one registration and the next — a
+  /// parameter-changing `switch_camera` re-registers with a new mode, and the
+  /// "re-detect" button re-registers with a whole new order. A list captured at
+  /// construction would republish whatever the device started with.
+  ///
+  /// It also breaks a construction cycle that is otherwise fatal: the gateway
+  /// and the coordinator refer to each other, and the coordinator builds its
+  /// gateway *inside its own constructor*. Anything the factory reads off the
+  /// coordinator is read while the coordinator is still unassigned, which is a
+  /// `LateInitializationError` — and because that happens inside the awaited
+  /// start-up path, it shows up as a kiosk stuck on the splash screen rather
+  /// than as a crash.
+  final List<CameraAnnouncement> Function() _cameras;
+
   final Duration _idleStatusInterval;
   final Duration Function(int attempt) _backoff;
   final Map<String, Object?> Function() _statusReport;
@@ -222,7 +239,14 @@ class SmartClassBackendGateway implements BackendGateway {
 
     final RegistrationResult result;
     try {
-      result = await _registration.register(_base, credentials, _cameras);
+      result = await _registration.register(
+        _base,
+        credentials,
+        // Read here, not at construction: this is the moment the list is
+        // actually published, and the only moment at which it is guaranteed to
+        // describe the device's current state.
+        List<CameraAnnouncement>.unmodifiable(_cameras()),
+      );
     } on RegistrationException catch (error) {
       if (_isStale(generation)) return;
       if (error.failure == RegistrationFailure.unauthorized) {

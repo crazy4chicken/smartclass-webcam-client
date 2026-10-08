@@ -122,4 +122,45 @@ void main() {
     expect(find.textContaining('检测失败'), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsNothing);
   });
+
+  group('BootstrapFailureView', () {
+    testWidgets('says what went wrong instead of stalling on the splash', (
+      tester,
+    ) async {
+      // The real failure this exists for: the probe succeeded, so the splash
+      // showed "detected 2 cameras", and then a throw inside the kiosk build
+      // left the device there forever looking like it had worked.
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: BootstrapFailureView(message: 'LateInitializationError'),
+        ),
+      );
+
+      expect(find.text('启动失败'), findsOneWidget);
+      expect(find.byKey(BootstrapFailureView.messageKey), findsOneWidget);
+      expect(find.textContaining('LateInitializationError'), findsOneWidget);
+      // No spinner: the kiosk is not coming.
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+    });
+
+    testWidgets('offers a retry only when there is something to retry', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        const MaterialApp(home: BootstrapFailureView(message: 'boom')),
+      );
+      expect(find.byKey(const Key('bootstrap-retry')), findsNothing);
+
+      var retries = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: BootstrapFailureView(message: 'boom', onRetry: () => retries++),
+        ),
+      );
+      await tester.tap(find.byKey(const Key('bootstrap-retry')));
+      await tester.pump();
+
+      expect(retries, 1);
+    });
+  });
 }

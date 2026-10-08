@@ -1,9 +1,12 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webcam_client/main.dart';
+import 'package:webcam_client/src/app/capability_bootstrap.dart';
 import 'package:webcam_client/src/backend/credential_store.dart';
 import 'package:webcam_client/src/backend/device_credentials.dart';
 import 'package:webcam_client/src/config/app_config.dart';
+import 'package:webcam_client/src/ui/screens/bootstrap_screen.dart';
 
 const _creds = DeviceCredentials(
   deviceId: '01J8ZK9WQ7X3YV0M4N5P6Q7R8S',
@@ -57,6 +60,69 @@ void main() {
       expect(loaded, isNotNull);
       expect(loaded!.deviceId, _creds.deviceId);
       expect(loaded.deviceToken, startsWith('wdt_'));
+    });
+  });
+
+  group('BootstrapRoot', () {
+    testWidgets('swaps in the kiosk once the inventory is known', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        BootstrapRoot(
+          probe: () async => CameraInventory.empty,
+          build: (_) async => const MaterialApp(home: Text('kiosk')),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('kiosk'), findsOneWidget);
+    });
+
+    testWidgets('reports a failed start instead of stalling on the splash', (
+      tester,
+    ) async {
+      // The bug this guards: the probe succeeds, the splash shows "detected N
+      // cameras", and then a throw inside the kiosk build leaves the device
+      // there forever — looking exactly like a successful start.
+      await tester.pumpWidget(
+        BootstrapRoot(
+          probe: () async => CameraInventory.empty,
+          build: (_) async => throw StateError('LateInitializationError'),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byKey(BootstrapFailureView.messageKey), findsOneWidget);
+      expect(find.textContaining('LateInitializationError'), findsOneWidget);
+      expect(find.text('kiosk'), findsNothing);
+      // And there is a way out.
+      expect(find.byKey(const Key('bootstrap-retry')), findsOneWidget);
+    });
+
+    testWidgets('retrying a failed start calls build again', (tester) async {
+      var attempts = 0;
+      await tester.pumpWidget(
+        BootstrapRoot(
+          probe: () async => CameraInventory.empty,
+          build: (_) async {
+            attempts++;
+            if (attempts == 1) throw StateError('first time unlucky');
+            return const MaterialApp(home: Text('kiosk'));
+          },
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(attempts, 1);
+
+      await tester.tap(find.byKey(const Key('bootstrap-retry')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(attempts, 2);
+      expect(find.text('kiosk'), findsOneWidget);
     });
   });
 }

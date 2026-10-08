@@ -466,7 +466,7 @@ class _GatewayHarness {
         opened.add(controller);
         return _FakeChannel(controller.stream, sink, readyError: readyError);
       },
-      cameras: const <CameraAnnouncement>[cameraAnnouncement],
+      cameras: () => const <CameraAnnouncement>[cameraAnnouncement],
       backoff: backoff ?? (_) => const Duration(milliseconds: 5),
       idleStatusInterval: idleStatusInterval,
       statusReport: statusReport,
@@ -2932,6 +2932,168 @@ Future<void> checkCapabilityBootstrap() async {
   }
 }
 
+Future<void> checkGatewayCameraList() async {
+  section('the gateway camera list is read at registration');
+
+  // The construction cycle `main.dart` has to survive: the coordinator builds
+  // its gateway **inside its own constructor**, so anything the factory reads
+  // off the coordinator is read while `coordinator` is still an unassigned
+  // `late final`. That is a `LateInitializationError`, and because it happens
+  // inside the awaited start-up path the symptom is not a crash but a kiosk
+  // stuck on the splash screen — which is exactly what shipped.
+  //
+  // The fix is that the camera list is a callback the gateway invokes at
+  // registration. This check fails if anyone makes it eager again.
+  {
+    late final AgentCoordinator coordinator;
+    final registration = _FakeRegistration();
+    var reads = 0;
+    var readsTooEarly = 0;
+    var ready = false;
+
+    List<CameraAnnouncement> currentCameras() {
+      reads++;
+      if (!ready) {
+        // Would be the `LateInitializationError` in the real wiring. Recorded
+        // rather than thrown, so a regression reports as a failed check instead
+        // of taking the whole harness down with it.
+        readsTooEarly++;
+        return const <CameraAnnouncement>[cameraAnnouncement];
+      }
+      return buildAnnouncements(
+        cameras: <CameraDeclaration>[
+          for (final mode in coordinator.cameraModes)
+            CameraDeclaration(
+              name: 'camera',
+              resolution: mode.resolution,
+              fps: mode.fps,
+            ),
+        ],
+        codecs: const <WireCodec>[WireCodec.mjpeg],
+      );
+    }
+
+    coordinator = AgentCoordinator(
+      gatewayFactory: (connection) => SmartClassBackendGateway(
+        base: connection.baseUrl,
+        registration: registration,
+        channelFactory: (_) =>
+            _FakeChannel(StreamController<dynamic>().stream, _FakeSink()),
+        cameras: currentCameras,
+        backoff: (_) => const Duration(milliseconds: 5),
+      ),
+      cameraProvider: CameraProvider(
+        backends: <CameraBackend>[_FakeBackend('stub', probeResult: _okProbe)],
+      ),
+      pumpFactory: () => _FakeFramePump(),
+      connection: testConnection,
+      initialCamera: _FakeCameraService(bytes: Uint8List.fromList(<int>[1])),
+    );
+    ready = true;
+
+    eq(
+      'the list is not read while the coordinator is still being built',
+      readsTooEarly,
+      0,
+    );
+
+    await coordinator.start();
+    await settle();
+
+    eq('it is read at registration', reads, 1);
+    eq('and registration ran once', registration.calls, 1);
+    eq(
+      "carrying the coordinator's current mode",
+      registration.lastCameras!.single.resolution,
+      '1280x720',
+    );
+
+    await coordinator.stop();
+  }
+
+  {
+    // A second registration — the one a parameter-changing `switch_camera`
+    // triggers — must publish the *new* mode, not the one captured when the
+    // gateway was built. That is the other half of why this is a callback.
+    late final AgentCoordinator coordinator;
+    final registration = _FakeRegistration();
+    final built = <SmartClassBackendGateway>[];
+    var ready = false;
+
+    coordinator = AgentCoordinator(
+      gatewayFactory: (connection) {
+        final gateway = SmartClassBackendGateway(
+          base: connection.baseUrl,
+          registration: registration,
+          channelFactory: (_) =>
+              _FakeChannel(StreamController<dynamic>().stream, _FakeSink()),
+          cameras: () => buildAnnouncements(
+            cameras: <CameraDeclaration>[
+              for (final mode
+                  in ready ? coordinator.cameraModes : const <CameraMode>[])
+                CameraDeclaration(
+                  name: 'camera',
+                  resolution: mode.resolution,
+                  fps: mode.fps,
+                ),
+            ],
+            codecs: const <WireCodec>[WireCodec.mjpeg],
+          ),
+          backoff: (_) => const Duration(milliseconds: 5),
+        );
+        built.add(gateway);
+        return gateway;
+      },
+      cameraProvider: CameraProvider(
+        backends: <CameraBackend>[_FakeBackend('stub', probeResult: _okProbe)],
+      ),
+      pumpFactory: () => _FakeFramePump(),
+      connection: testConnection,
+      initialCamera: _FakeCameraService(bytes: Uint8List.fromList(<int>[1])),
+      capabilities: <CameraCapabilities>[
+        CameraCapabilities.of(
+          resolutions: <CameraResolution>[
+            const CameraResolution(width: 1920, height: 1080),
+            const CameraResolution(width: 1280, height: 720),
+            const CameraResolution(width: 640, height: 480),
+          ],
+          framerates: <int>[60, 30, 15],
+        ),
+      ],
+    );
+    ready = true;
+
+    await coordinator.start();
+    await settle();
+    eq(
+      'the first registration announces 1280x720',
+      registration.lastCameras!.single.resolution,
+      '1280x720',
+    );
+
+    await coordinator.handleCommand(
+      const SwitchCameraCommand(
+        id: 'e',
+        cameraEnum: 0,
+        resolution: CameraResolution(width: 640, height: 480),
+        fps: 30,
+      ),
+    );
+    await settle();
+
+    eq('a parameter change rebuilds the gateway', built.length, 2);
+    eq('and re-registers', registration.calls, 2);
+    eq(
+      'with the new mode',
+      registration.lastCameras!.single.resolution,
+      '640x480',
+    );
+    eq('and the new rate', registration.lastCameras!.single.fps, 30);
+
+    await coordinator.stop();
+  }
+}
+
 void checkMjpegEncoder() {
   section('mjpeg encoder');
   fakeAsync((async) {
@@ -3076,7 +3238,7 @@ Future<void> checkSmartClassGateway() async {
         attached = uri;
         return _FakeChannel(incoming.stream, _FakeSink());
       },
-      cameras: const <CameraAnnouncement>[cameraAnnouncement],
+      cameras: () => const <CameraAnnouncement>[cameraAnnouncement],
     );
     await gateway.start(credentials);
     eq('the upgrade uses wss for an https base', attached?.scheme, 'wss');
@@ -4371,6 +4533,7 @@ Future<void> main() async {
   checkCameraOrder();
   checkCapabilityCache();
   await checkCapabilityBootstrap();
+  await checkGatewayCameraList();
   checkMjpegEncoder();
   await checkCameraProvider();
   await checkFrameStore();

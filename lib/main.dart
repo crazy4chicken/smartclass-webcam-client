@@ -222,14 +222,24 @@ Future<Widget> _startKiosk({
   /// a fresh `UnrecognizedCommandLog` per call would throw away the local
   /// record of every malformed message the moment an operator saved a setting.
   ///
-  /// The announcements are rebuilt **here**, on every call, from the
-  /// coordinator's live modes. That is what makes a parameter-changing
-  /// `switch_camera` visible to the server: it reconnects through
-  /// `reconfigure`, which comes back through this factory, and the registration
-  /// it produces carries the mode the device is actually in. Building them once
-  /// at start-up was the documented limitation that let a local-only switch
-  /// leave the server's `metadata` snapshot describing a mode the device had
-  /// left — exactly the class of bug `45364b2` and `d81992b` fixed.
+  /// The announcements are produced **inside a callback**, and that is
+  /// load-bearing twice over.
+  ///
+  /// First, it is what makes a parameter-changing `switch_camera` visible to
+  /// the server: it reconnects through `reconfigure`, which comes back through
+  /// this factory, and the registration then carries the mode the device is
+  /// actually in. Building them once at start-up was the documented limitation
+  /// that let a local-only switch leave the server's `metadata` snapshot
+  /// describing a mode the device had left — the class of bug `45364b2` and
+  /// `d81992b` fixed.
+  ///
+  /// Second, it is the only thing that makes the construction order work. The
+  /// coordinator builds its gateway **inside its own constructor**, so this
+  /// factory runs while `coordinator` is still an unassigned `late final`.
+  /// Reading it here would be a `LateInitializationError` — and because it
+  /// happens inside the awaited start-up path, the symptom is not a crash but a
+  /// kiosk stuck on the splash screen. Deferring to registration time means the
+  /// coordinator is fully built by the time anything is read from it.
   BackendGateway buildGateway(ConnectionSettings c) {
     if (AppConfig.useMockBackend) {
       return MockBackendGateway(unrecognizedLog: unrecognized);
@@ -239,7 +249,7 @@ Future<Widget> _startKiosk({
       registration: HttpRegistrationClient(),
       channelFactory: (uri) =>
           WebSocketBackendChannel(WebSocketChannel.connect(uri)),
-      cameras: buildAnnouncements(
+      cameras: () => buildAnnouncements(
         cameras: _declarations(currentInventory, coordinator, captureConfig),
         codecs: wireCodecsFor(available),
       ),
@@ -399,11 +409,32 @@ class BootstrapRoot extends StatefulWidget {
 
 class _BootstrapRootState extends State<BootstrapRoot> {
   Widget? _app;
+  CameraInventory? _inventory;
+  String? _failure;
 
   Future<void> _onInventory(CameraInventory inventory) async {
-    final app = await widget.build(inventory);
-    if (!mounted) return;
-    setState(() => _app = app);
+    _inventory = inventory;
+    try {
+      final app = await widget.build(inventory);
+      if (!mounted) return;
+      setState(() {
+        _app = app;
+        _failure = null;
+      });
+    } catch (error, stack) {
+      // A throw here used to leave the device on the splash screen forever,
+      // showing the last progress line — which, because the probe had already
+      // succeeded, read as "detected 2 cameras" and looked like success. That
+      // is exactly how the `LateInitializationError` in the gateway factory
+      // presented itself on a real Android device.
+      //
+      // Nothing may take the kiosk down silently, so say what happened and
+      // offer a retry.
+      debugPrint('[bootstrap] could not start the kiosk: $error');
+      debugPrint('$stack');
+      if (!mounted) return;
+      setState(() => _failure = '$error');
+    }
   }
 
   @override
@@ -412,6 +443,25 @@ class _BootstrapRootState extends State<BootstrapRoot> {
     // second camera and build a second coordinator.
     final app = _app;
     if (app != null) return app;
+
+    final failure = _failure;
+    final inventory = _inventory;
+    if (failure != null) {
+      return MaterialApp(
+        title: 'WebCam Edge Probe',
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData.dark(useMaterial3: true),
+        home: BootstrapFailureView(
+          message: failure,
+          onRetry: inventory == null
+              ? null
+              : () {
+                  setState(() => _failure = null);
+                  unawaited(_onInventory(inventory));
+                },
+        ),
+      );
+    }
 
     return MaterialApp(
       title: 'WebCam Edge Probe',

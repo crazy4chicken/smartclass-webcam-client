@@ -49,7 +49,7 @@ _build({
       opened.add(controller);
       return FakeChannel(controller.stream, sink, readyError: readyError);
     },
-    cameras: const [testCamera],
+    cameras: () => const [testCamera],
     backoff: backoff ?? (_) => const Duration(milliseconds: 5),
     idleStatusInterval: idleStatusInterval,
   );
@@ -78,7 +78,7 @@ void main() {
         attached = uri;
         return FakeChannel(incoming.stream, FakeChannelSink());
       },
-      cameras: const [testCamera],
+      cameras: () => const [testCamera],
     );
 
     await gateway.start(testCredentials);
@@ -104,7 +104,7 @@ void main() {
         attached = uri;
         return FakeChannel(incoming.stream, FakeChannelSink());
       },
-      cameras: const [testCamera],
+      cameras: () => const [testCamera],
     );
 
     await gateway.start(testCredentials);
@@ -298,7 +298,7 @@ void main() {
       base: Uri.parse('http://localhost:8080'),
       registration: FakeRegistrationClient(),
       channelFactory: (_) => FakeChannel(incoming.stream, sink),
-      cameras: const [testCamera],
+      cameras: () => const [testCamera],
       idleStatusInterval: const Duration(milliseconds: 5),
       statusReport: () => {'recording': true, 'frames_sent': 7},
     );

@@ -4,6 +4,64 @@ import 'package:flutter/material.dart';
 
 import '../../app/capability_bootstrap.dart';
 
+/// Shown when the kiosk could not be built at all.
+///
+/// This exists because of a real failure. A throw inside the awaited
+/// `build()` — in that case a `LateInitializationError` from the gateway
+/// factory reading the coordinator it was being constructed for — left the
+/// device sitting on the splash screen showing the last progress line, forever,
+/// with nothing to suggest anything had gone wrong. The probe had succeeded, so
+/// the last line read "detected 2 cameras", which looks like success.
+///
+/// A kiosk that cannot start must say so, and must offer a way to try again.
+class BootstrapFailureView extends StatelessWidget {
+  const BootstrapFailureView({super.key, required this.message, this.onRetry});
+
+  final String message;
+  final VoidCallback? onRetry;
+
+  static const Key messageKey = Key('bootstrap-failure');
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.error_outline,
+                size: 42,
+                color: Color(0xFFEF9A9A),
+              ),
+              const SizedBox(height: 20),
+              const Text('启动失败', style: TextStyle(fontSize: 16)),
+              const SizedBox(height: 10),
+              Text(
+                message,
+                key: messageKey,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+              if (onRetry != null) ...[
+                const SizedBox(height: 24),
+                OutlinedButton.icon(
+                  key: const Key('bootstrap-retry'),
+                  onPressed: onRetry,
+                  icon: const Icon(Icons.refresh, size: 18),
+                  label: const Text('重试'),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// What a kiosk shows while it works out what its cameras can do.
 ///
 /// The probe is not instant — it opens every camera once to rank them and then
