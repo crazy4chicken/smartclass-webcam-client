@@ -67,7 +67,7 @@ curl -X POST http://127.0.0.1:8080/api/devices \
 | --- | --- |
 | 后端 | 后端地址（`http://192.168.1.20:8080`；不写 scheme 自动补 `http://`，`ws://` 按 `http://` 处理） |
 | 设备凭据 | 设备 ID（26 位 ULID）、设备令牌（默认遮蔽，可点眼睛显示） |
-| 操作 | 测试连接（`GET /healthz`，不消耗 ticket）· 保存并重连 · 恢复默认 · 清空凭据 |
+| 操作 | 测试连接（`GET /healthz`，不消耗 ticket）· 重新检测（重测摄像头能力）· 保存并重连 · 恢复默认 · 清空凭据 |
 
 保存即生效：**先落盘 → 停推 → 断链 → 用新参数重新注册**。三条要记住的行为：
 
@@ -82,14 +82,15 @@ curl -X POST http://127.0.0.1:8080/api/devices \
   这个 bug 在真机上真的发生过，现在由 `loadBaseUrl()` / `loadCredentials()` 两个问题
   加一条回归断言钉住。
 
-采集参数（fps / 分辨率 / 质量）**不在设置界面里**：它们不是"换个后端就要改"的东西，
-而且 fps 与分辨率是注册时 announce 的，改动必须连带重建 announcements。
+采集参数（fps / 分辨率 / 质量）**仍然不在设置界面里**：它们是注册时 announce 的，
+运行期改它们要走 `switch_camera`（服务端下发），而且改了必须重新注册 ——
+「重新检测」只重测**能力清单**，不动当前模式。
 
 测试与自检：
 
 ```bash
 flutter test
-dart run tool/verify_pure.dart    # 393 项断言的纯 Dart 自检，不需要 Flutter 引擎
+dart run tool/verify_pure.dart    # 586 项断言的纯 Dart 自检，不需要 Flutter 引擎
 ```
 
 端到端联调（真机 × 真服务端）见 `docs/superpowers/plans/2026-10-04-android-server-e2e-test.md`，
@@ -107,12 +108,17 @@ python tool/e2e/s3_stub.py --port 9000 --dir <object-dir>
 ## 架构
 
 ```
+main.dart ── BootstrapRoot ── 先探测摄像头，再换 kiosk（runApp 只调一次）
+        │         └── BootstrapScreen ── 进度/结果文案；onDone 保证恰好一次
+        │
 UI (agent_screen / status_bar_overlay / preview_toggle_button / camera_error_view
     / settings_button → settings_screen)
         │  AgentStatus
 AgentCoordinator ── 命令驱动的状态机：每条命令都 ack，没收到 start_recording 就不推任何媒体
         │            （命令与 ack 结果走可注入的 log sink，控制台可见）
         │            reconfigure() ── 换设置时重建 gateway，而不是改它的 base
+        │            adoptInventory() ── 「重新检测」后换 provider + 能力，再重建 gateway
+        │            _modes[] ── 每个 camera_enum 当前的分辨率/帧率（服务端不存，只有这里有）
         │
         ├── BackendGatewayFactory ── 每个 ConnectionSettings 建一个新实例
         │      BackendGateway ── SmartClassBackendGateway（注册 → 挂载 → 保活 → 退避重注册）
@@ -123,8 +129,18 @@ AgentCoordinator ── 命令驱动的状态机：每条命令都 ack，没收�
         │      MockBackendGateway（离线用，下发真实协议词汇）
         └── CameraProvider ── CameraBackend ── CameraService ── FramePump ── VideoEncoder
                CameraPluginBackend (camera + camera_desktop, 5 平台)
+                 ├── cameraOrder ── announced enum → 物理下标的置换，**只在这个文件里存在**
                  ├── serial_lock ── 串行化「相机重建」与「抓帧」两条互斥路径
-                 └── jpeg ── 裁掉相机 HAL 偶尔追加在 EOI 之后的 0 字节
+                 └── jpeg ── 裁掉相机 HAL 偶尔追加在 EOI 之后的 0 字节；jpegSize 读真实像素
+
+摄像头能力探测（纯 Dart 的部分能在 VM 上直接跑）
+  app/capability_bootstrap ── ensureInventory：枚举 → 排序 → 探测 → 缓存
+  capture/camera_capabilities ── CameraCapabilities / CameraMode / declaredCapabilities
+  capture/camera_order ── canonicalCameraOrder（rear → external → front，组内按像素降序）
+  capture/capability_probe ── CapabilityProbe 接口 + kProbeFramerates
+  capture/plugin_camera_ranker ── 每个摄像头开一次拿上限
+  capture/plugin_capability_probe ── 每档 preset 拍一张，从 JPEG 里读真实尺寸
+  config/capabilities_store ── 按「有序摄像头名 + enum」缓存，独立于 SettingsStore
 
 config (纯 Dart，不依赖 Flutter)
   connection_settings ── ConnectionSettings / validateBaseUrl / resolveConnectionSettings
@@ -147,6 +163,16 @@ config (纯 Dart，不依赖 Flutter)
 - **codec 是闭集且精确小写**：`h264` / `h265` / `mjpeg` / `mpeg4` / `vp8` / `vp9` / `av1`。
   **`hevc` 只是别称，服务端拒收**，线上必须写 `h265`。
 - `camera_enum` 必须等于注册数组下标；`fps` 必须是 **>0 的整数**（`29.97` 直接 400）。
+- **协议 v0.3.0 起，注册必须带 `supported_resolutions` 与 `supported_framerates`**
+  （`531c74f feat(webcam)!`）。二者**非空、去重、且必须包含该摄像头当前的
+  `resolution` / `fps`**，任一条不满足就是 `400` —— 不是"少个功能"，是**设备根本连不上**。
+  详见下面「摄像头能力声明」。
+- **`switch_camera` 可以带 `resolution`（`"1280x720"`）和 `fps`**；不带就是"保持现状"
+  （所以 v0.3.0 之前的服务端行为不变）。**服务端不为这条命令存任何状态**
+  （文档写明 "Server state: None"）→ 改了参数必须**重新注册**，否则服务端 `metadata`
+  里那份快照仍然是旧模式。
+- **`start_recording` 可以带 `codec`**；不带 = 设备首选（= 声明列表的**第一项**）。
+  做不到的 codec 必须 `ack ok:false`，绝不"照跑但假装成功"。
 - **空闲时也要周期性发 `status`**，否则 60s 静默被服务端断开（默认 30s 一次）。
 - **`stop_recording` 之后继续推的帧会被丢弃**，所以收到就立刻停泵。
 - `1008` = ticket 已被别的连接挂载 → 重新注册；`1009` = 单帧超 16 MiB；`1006` 是**正常现象**
@@ -177,12 +203,19 @@ config (纯 Dart，不依赖 Flutter)
 
 ### 代码分层
 
-- `lib/src/backend`、`lib/src/capture`（非插件部分）与 `lib/src/config` **不依赖 Flutter**，
-  所以能在纯 Dart VM 上直接跑 `tool/verify_pure.dart`（**393 项断言**，覆盖协议、注册、
-  两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪、地址校验与设置解析）。
+- `lib/src/backend`、`lib/src/capture`（非插件部分）、`lib/src/config` 与
+  `lib/src/app/capability_bootstrap.dart` **不依赖 Flutter**，
+  所以能在纯 Dart VM 上直接跑 `tool/verify_pure.dart`（**586 项断言**，覆盖协议、注册、
+  两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪与尺寸读取、能力模型与声明、
+  摄像头排序、能力缓存与 `ensureInventory` 编排、地址校验与设置解析）。
   新增代码请保持这条边界：一旦引入 `package:flutter/*`，该模块就再也无法在本机验证。
-  设置层是照着这条边界拆的 —— `connection_settings.dart` / `settings_store.dart` 是纯 Dart，
-  只有 `shared_prefs_settings_store.dart` 碰 `shared_preferences`。
+  这条边界直接决定了三个接口放在哪里：`CameraRanker` 放在纯的 `camera_order.dart`、
+  `CapabilityProbe` 放在纯的 `capability_probe.dart`、`CameraEnumerator` 放在纯的
+  `camera_service.dart`，插件实现各自单独成文件（`plugin_*.dart`）——
+  因为 `ensureInventory` 的编排逻辑（缓存命中、退化、排序失败回退）恰恰是最值得在
+  本机跑起来验证的部分。
+  设置层是照着这条边界拆的 —— `connection_settings.dart` / `settings_store.dart` /
+  `capabilities_store.dart` 是纯 Dart，只有 `shared_prefs_*.dart` 碰 `shared_preferences`。
 - `unrecognized_command_log.dart` 的默认 sink 是 `print` 而不是 `debugPrint`
   （`main.dart` 显式传 `debugPrint`），`AgentCoordinator` 的命令日志走可注入的
   `void Function(String)` sink —— 都是为了上面那条边界。
@@ -219,8 +252,10 @@ config (纯 Dart，不依赖 Flutter)
 **② 注册必须声明"实际生效值"，不是"能力阶梯"。**
 `buildAnnouncements` 曾拿到 `supportedResolutions`（`[640x480, 1280x720, …]`）并按 camera
 下标取值，于是 camera 0 报了最低档 `640x480` —— 而服务端会把它快照进
-`metadata.resolution`，与实际采集的 1280x720 不符。现在传 `camera.appliedResolution`。
-> 规律：announce 出去的必须是**「我会交付什么」**，不是「我支持什么」。
+`metadata.resolution`，与实际采集的 1280x720 不符。
+> 规律：**「我在做什么」（`resolution`/`fps`）和「我能做什么」（`supported_*`）
+> 是两个字段，不能互相代替。** 前者是快照来源，后者是运营侧的选择菜单。
+> v0.3.0 之前只有前者，所以拿阶梯去填它是错的；现在两者都有，而且后者是**实测**的。
 
 **③ 相机 HAL 会在 JPEG 的 EOI 之后追加 0 字节。**
 实测约 **1/20** 的帧比图片本身长 6~8 字节（结构完好，SOI/EOI 都在）。只有**持续推帧**那条
@@ -230,6 +265,77 @@ config (纯 Dart，不依赖 Flutter)
 没有 SOI / 没有 EOI / 尾巴过长 / EOI 后有非零字节 —— **一律不动**，
 否则一个真被截断的帧会被悄悄裁成"看起来合法"。
 > 规律：清理逻辑要**窄到不会掩盖真正的损坏**。这个坑只有 `check_segment.py` 那种字节级校验能发现。
+
+### 摄像头能力声明（协议 v0.3.0）
+
+服务端自 `531c74f feat(webcam)!` 起**要求**注册带 `supported_resolutions` 与
+`supported_framerates`。这不是可选的增强 —— 缺了它设备**根本连不上**（`400`）。
+
+**怎么测的**：插件栈在五个平台上都**没有枚举 API**，`ResolutionPreset` 又只是相对档位
+（文档明说不保证像素尺寸），`controller.value.previewSize` 描述的是预览面而不是静帧。
+所以唯一的诚实来源是**真拍一张**，再从 JPEG 的 SOF 段里读真实宽高（`jpegSize`）。
+两档 preset 解析到同一尺寸是常态，所以去重是硬规则而不是清理。
+
+**三趟，从便宜到贵**：
+
+| 趟 | 做什么 | 代价 |
+| --- | --- | --- |
+| 枚举 | 列摄像头，不开 | 0 次开合 |
+| 排序 | 每个摄像头在 `max` 档开一次，读上限 | n 次开合 |
+| 探测 | 每个摄像头走 6 档 preset 各拍一张，再在最高分辨率上试 3 个帧率 | 9n 次开合 |
+
+结果按**「有序摄像头名 + enum」**缓存（`CapabilitiesStore`，与 `SettingsStore` **分开** ——
+`save()` 的语义是替换，把能力塞进 `ConnectionSettings` 会在每次探测后删掉设备凭据）。
+
+**缓存跳不过排序**：缓存键是"有序的摄像头集合"，而顺序正是排序那趟产出的，
+所以没有排序就没有键。缓存省下的是探测那 8n 次开合 —— 这已经是"开机一秒"和
+"每次开机对着摄像头闪十秒灯"的差别。
+
+**排序规则**：`(group, -maxPixels, index)`，组顺序 = `CameraGroup` 的声明顺序
+（rear → external → front）。末尾的 `index` 是保稳用的，正因如此
+**Windows（全 `front`）和 Linux（全 `external`）会自然退化为纯分辨率排序**，
+不需要特例分支 —— 这两端 `camera_desktop` 把 `lensDirection` 写死成 `0` / `2`，
+只有 macOS 和 Android 报真实方向。**代码和注释都必须写明这一点**，
+否则半年后会有人当"有后置摄像头"是断言。
+
+**声明 = `实测 ∪ 常见阶梯`，再截到实测上限，最后并入当前模式**：
+`declaredCapabilities()` 是注册和 `switch_camera` 校验**共用**的同一个函数 ——
+设备接受的必须恰好等于它公布过的，否则运营侧从一个"设备自己印出来的菜单"里
+选了一个值却收到 `ok:false`。当前模式**永远并入且最后并入**：服务端拒收
+"没声明当前模式"的注册，而 `AppConfig.defaultFps` 是 5、探测只试 60/30/15，
+所以当前帧率真的可能不在探测值里。
+
+**探测失败不能变成空列表**：`supported_resolutions: []` 是 `400`，
+"连不上"比"少声明"糟糕得多，所以探测为空时退化成"只声明我正在用的那一对"。
+
+### `camera_enum` 的规范顺序与「当前模式」
+
+**`camera_enum` 是位置量，所以"顺序"就是协议里"哪个摄像头"的词汇。** 以前 index `i`
+就是平台列出来的第 `i` 个 —— 一台两摄手机和一台三摄笔记本含义完全不同，
+插一个 USB 摄像头还会整体挪位。
+
+- **顺序 = `(group, -maxPixels, index)`**，`CameraGroup` 的声明顺序即组顺序
+  （rear → external → front），组内按实测像素降序。
+- **物理下标只存在于 `CameraPluginBackend` 里。** 它以规范顺序构造
+  `_descriptors`，`switchCamera(enum)` 在碰插件列表之前先过一遍置换。
+  `CameraDescriptor.index` 因此**就是** announced enum，下游再也见不到第二套编号。
+- 置换不是合法排列（长度不对、越界、有重复）时**退回恒等**，而不是"部分采纳" ——
+  一个重复项会让两个 announced 摄像头指向同一台设备。
+
+**「当前模式」只有设备自己记得。** 服务端对 `switch_camera` **不存任何状态**，
+它对某个摄像头分辨率/帧率的认知全部来自注册。所以：
+
+- 设备为每个 `camera_enum` 记一份 `CameraMode{resolution, fps}`；
+- `switch_camera` 带的参数**先对着自己公布过的清单校验**，不在清单里就 `ack ok:false`
+  并且**什么都不做**（绝不"照跑但假装成功"）；
+- 参数**真的变了**就**重新注册** —— 否则服务端在 `recording/start` 时快照进
+  `metadata` 的仍是旧模式。这条走 `reconfigure()`，不另开一条重连路径。
+- 只切摄像头、或校验失败的切换**不重连**：白白掐断媒体没有任何好处。
+
+**「重新检测」按钮**（设置界面）做的是**强制重测**（忽略缓存、测完再写回缓存），
+然后 `adoptInventory()` 把**置换和能力一起换掉**再重连 —— 两者必须同时换，
+否则服务端会去要一台后端没有的摄像头。它走 `reconfigure()` 而不是直接 `start()`，
+因为**摄像头清单是在构造 gateway 时烘进去的**，在同一个实例上重新注册只会把旧清单再发一遍。
 
 ### 命令可观测性
 
@@ -355,7 +461,7 @@ Android 9+ 默认禁止明文流量，而网关是 `ws://`，不开的话连接�
 所以 `flutter run/test/analyze` 在那个 shell 里会失败；用户自己的终端不受影响，与项目无关。
 助手侧改用三条替代路径验证：
 
-1. `dart run tool/verify_pure.dart` —— 进程内执行，393 项断言。
+1. `dart run tool/verify_pure.dart` —— 进程内执行，586 项断言。
 2. 用 Python 直接驱动 `frontend_server_aot` 做单次编译（等价于 `flutter test` 的类型检查）。
 3. **真机联调**：`flutter run` 起不来，但**已经装好的 debug APK 可以完全用 adb 驱动** ——
    详见 `docs/android-setup.md` 的「不用 flutter run 也能驱动真机」。

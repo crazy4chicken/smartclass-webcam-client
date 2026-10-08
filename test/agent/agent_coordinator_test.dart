@@ -641,60 +641,67 @@ void main() {
     List<AckMessage> acksOf(MockGateway g) =>
         verify(() => g.send(captureAny())).captured.cast<AckMessage>();
 
-    test('switch_camera applies a declared resolution and fps and acks ok',
-        () async {
-      final coordinator = build(capabilities: capabilitiesFor(1));
+    test(
+      'switch_camera applies a declared resolution and fps and acks ok',
+      () async {
+        final coordinator = build(capabilities: capabilitiesFor(1));
 
-      await coordinator.handleCommand(
-        const SwitchCameraCommand(
-          id: 'e',
-          cameraEnum: 0,
-          resolution: CameraResolution(width: 640, height: 480),
-          fps: 30,
-        ),
-      );
+        await coordinator.handleCommand(
+          const SwitchCameraCommand(
+            id: 'e',
+            cameraEnum: 0,
+            resolution: CameraResolution(width: 640, height: 480),
+            fps: 30,
+          ),
+        );
 
-      expect(acksOf(gateway).single.ok, isTrue);
-      expect(coordinator.activeMode.resolution,
-          const CameraResolution(width: 640, height: 480));
-      expect(coordinator.activeMode.fps, 30);
+        expect(acksOf(gateway).single.ok, isTrue);
+        expect(
+          coordinator.activeMode.resolution,
+          const CameraResolution(width: 640, height: 480),
+        );
+        expect(coordinator.activeMode.fps, 30);
 
-      // The device has to actually capture at what it just agreed to, not
-      // merely record the number.
-      final config = verify(
-        () => camera.reconfigure(captureAny()),
-      ).captured.single as CaptureConfig;
-      expect(config.width, 640);
-      expect(config.height, 480);
-      expect(coordinator.announcedFps, 30);
-    });
+        // The device has to actually capture at what it just agreed to, not
+        // merely record the number.
+        final config =
+            verify(() => camera.reconfigure(captureAny())).captured.single
+                as CaptureConfig;
+        expect(config.width, 640);
+        expect(config.height, 480);
+        expect(coordinator.announcedFps, 30);
+      },
+    );
 
-    test('switch_camera acks ok:false for a resolution the camera never declared',
-        () async {
-      final coordinator = build(capabilities: capabilitiesFor(1));
+    test(
+      'switch_camera acks ok:false for a resolution the camera never declared',
+      () async {
+        final coordinator = build(capabilities: capabilitiesFor(1));
 
-      await coordinator.handleCommand(
-        const SwitchCameraCommand(
-          id: 'e',
-          cameraEnum: 0,
-          resolution: CameraResolution(width: 3840, height: 2160),
-        ),
-      );
+        await coordinator.handleCommand(
+          const SwitchCameraCommand(
+            id: 'e',
+            cameraEnum: 0,
+            resolution: CameraResolution(width: 3840, height: 2160),
+          ),
+        );
 
-      final ack = acksOf(gateway).single;
-      expect(ack.id, 'e');
-      expect(ack.ok, isFalse);
-      expect(ack.error, contains('3840x2160'));
+        final ack = acksOf(gateway).single;
+        expect(ack.id, 'e');
+        expect(ack.ok, isFalse);
+        expect(ack.error, contains('3840x2160'));
 
-      // Refused means untouched — not "switched and then apologised".
-      verifyNever(() => camera.switchCamera(any()));
-      verifyNever(() => camera.reconfigure(any()));
-      expect(coordinator.activeMode.resolution,
-          const CameraResolution(width: 1280, height: 720));
-    });
+        // Refused means untouched — not "switched and then apologised".
+        verifyNever(() => camera.switchCamera(any()));
+        verifyNever(() => camera.reconfigure(any()));
+        expect(
+          coordinator.activeMode.resolution,
+          const CameraResolution(width: 1280, height: 720),
+        );
+      },
+    );
 
-    test('switch_camera acks ok:false for an fps the camera never declared',
-        () async {
+    test('switch_camera acks ok:false for an fps the camera never declared', () async {
       final coordinator = build(capabilities: capabilitiesFor(1));
 
       // 12 is not in the measured set nor on the common ladder. 25 would pass:
@@ -724,24 +731,27 @@ void main() {
       expect(coordinator.activeMode.fps, 25);
     });
 
-    test('switch_camera with no parameters only changes the active camera',
-        () async {
-      final coordinator = build(capabilities: capabilitiesFor(2));
+    test(
+      'switch_camera with no parameters only changes the active camera',
+      () async {
+        final coordinator = build(capabilities: capabilitiesFor(2));
 
-      await coordinator.handleCommand(
-        const SwitchCameraCommand(id: 'e', cameraEnum: 1),
-      );
+        await coordinator.handleCommand(
+          const SwitchCameraCommand(id: 'e', cameraEnum: 1),
+        );
 
-      expect(acksOf(gateway).single.ok, isTrue);
-      verify(() => camera.switchCamera(1)).called(1);
-      verifyNever(() => camera.reconfigure(any()));
-      expect(coordinator.activeMode.resolution,
-          const CameraResolution(width: 1280, height: 720));
-      expect(coordinator.activeMode.fps, 5);
-    });
+        expect(acksOf(gateway).single.ok, isTrue);
+        verify(() => camera.switchCamera(1)).called(1);
+        verifyNever(() => camera.reconfigure(any()));
+        expect(
+          coordinator.activeMode.resolution,
+          const CameraResolution(width: 1280, height: 720),
+        );
+        expect(coordinator.activeMode.fps, 5);
+      },
+    );
 
-    test('switch_camera resolves the announced enum to the right physical camera',
-        () async {
+    test('switch_camera resolves the announced enum to the right physical camera', () async {
       // The coordinator has no physical indices at all: it hands the announced
       // enum straight to the service, which is the component that owns the
       // mapping. The mode is recorded against the same enum, so the
@@ -787,27 +797,30 @@ void main() {
       expect(coordinator.linkState, LinkState.live);
     });
 
-    test('a switch that only changes the camera does not re-register', () async {
-      final factory = _GatewayFactory();
-      final coordinator = AgentCoordinator(
-        gatewayFactory: factory,
-        cameraProvider: CameraProvider(backends: [_StubBackend(camera)]),
-        pumpFactory: () => pump,
-        connection: testConnection,
-        initialCamera: camera,
-        capabilities: capabilitiesFor(2),
-      );
-      await coordinator.start();
+    test(
+      'a switch that only changes the camera does not re-register',
+      () async {
+        final factory = _GatewayFactory();
+        final coordinator = AgentCoordinator(
+          gatewayFactory: factory,
+          cameraProvider: CameraProvider(backends: [_StubBackend(camera)]),
+          pumpFactory: () => pump,
+          connection: testConnection,
+          initialCamera: camera,
+          capabilities: capabilitiesFor(2),
+        );
+        await coordinator.start();
 
-      await coordinator.handleCommand(
-        const SwitchCameraCommand(id: 'e', cameraEnum: 1),
-      );
+        await coordinator.handleCommand(
+          const SwitchCameraCommand(id: 'e', cameraEnum: 1),
+        );
 
-      // Nothing about the *mode* changed, and the camera list was already
-      // announced, so a reconnect would be pure cost — and would cut any
-      // in-flight media for no reason.
-      expect(factory.built, hasLength(1));
-    });
+        // Nothing about the *mode* changed, and the camera list was already
+        // announced, so a reconnect would be pure cost — and would cut any
+        // in-flight media for no reason.
+        expect(factory.built, hasLength(1));
+      },
+    );
 
     test('a refused switch does not re-register either', () async {
       final factory = _GatewayFactory();
@@ -887,22 +900,21 @@ void main() {
       expect(coordinator.activeStreamId, isNull);
     });
 
-    test('start_recording with no codec uses the first announced codec',
-        () async {
-      final coordinator = build(
-        announcedCodecs: const [CaptureCodec.mjpeg],
-      );
+    test(
+      'start_recording with no codec uses the first announced codec',
+      () async {
+        final coordinator = build(announcedCodecs: const [CaptureCodec.mjpeg]);
 
-      await coordinator.handleCommand(
-        const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: 's'),
-      );
+        await coordinator.handleCommand(
+          const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: 's'),
+        );
 
-      expect(acksOf(gateway).single.ok, isTrue);
-      expect(coordinator.captureState, CaptureState.recording);
-    });
+        expect(acksOf(gateway).single.ok, isTrue);
+        expect(coordinator.captureState, CaptureState.recording);
+      },
+    );
 
-    test('an unnamed codec is refused when the preferred one is unavailable',
-        () async {
+    test('an unnamed codec is refused when the preferred one is unavailable', () async {
       // The preferred codec is the *first* announced entry, so an unnamed
       // request resolves through the announced list rather than to a hardcoded
       // default that could drift from the registration.
@@ -920,24 +932,26 @@ void main() {
       expect(coordinator.captureState, CaptureState.idle);
     });
 
-    test('an unmeasured camera still accepts a switch to the mode it is in',
-        () async {
-      // A probe that found nothing means the device published exactly its
-      // current pair. Switching to that same pair is a no-op and must not be
-      // refused — the operator can pick it from the list.
-      final coordinator = build();
+    test(
+      'an unmeasured camera still accepts a switch to the mode it is in',
+      () async {
+        // A probe that found nothing means the device published exactly its
+        // current pair. Switching to that same pair is a no-op and must not be
+        // refused — the operator can pick it from the list.
+        final coordinator = build();
 
-      await coordinator.handleCommand(
-        const SwitchCameraCommand(
-          id: 'e',
-          cameraEnum: 0,
-          resolution: CameraResolution(width: 1280, height: 720),
-          fps: 5,
-        ),
-      );
+        await coordinator.handleCommand(
+          const SwitchCameraCommand(
+            id: 'e',
+            cameraEnum: 0,
+            resolution: CameraResolution(width: 1280, height: 720),
+            fps: 5,
+          ),
+        );
 
-      expect(acksOf(gateway).single.ok, isTrue);
-      verifyNever(() => camera.reconfigure(any()));
-    });
+        expect(acksOf(gateway).single.ok, isTrue);
+        verifyNever(() => camera.reconfigure(any()));
+      },
+    );
   });
 }
