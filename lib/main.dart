@@ -155,6 +155,7 @@ Future<void> _bootstrap() async {
         inventory: inventory,
         unrecognized: unrecognized,
         settingsStore: settingsStore,
+        capabilitiesStore: capabilitiesStore,
         connection: connection,
         settings: settings,
         available: available,
@@ -174,6 +175,7 @@ Future<Widget> _startKiosk({
   required CameraInventory inventory,
   required UnrecognizedCommandLog unrecognized,
   required SettingsStore settingsStore,
+  required CapabilitiesStore capabilitiesStore,
   required ConnectionSettings connection,
   required StreamSettings settings,
   required Set<CaptureCodec> available,
@@ -198,6 +200,15 @@ Future<Widget> _startKiosk({
     for (final codec in wireCodecsFor(available))
       CaptureCodec.tryParse(codec.wireName)!,
   ];
+
+  /// The live inventory. A re-probe replaces it, and the gateway factory reads
+  /// it at registration time.
+  ///
+  /// Mutable for one reason: a re-probe can change the canonical **order**, and
+  /// the announcements and the backend's permutation have to change together or
+  /// the server would be asking for a camera the backend does not have. See
+  /// [applyInventory] for the ordering that keeps them in step.
+  var currentInventory = inventory;
 
   // The gateway and the coordinator refer to each other: the gateway needs the
   // coordinator's live state for its periodic `status`, and the coordinator
@@ -229,7 +240,7 @@ Future<Widget> _startKiosk({
       channelFactory: (uri) =>
           WebSocketBackendChannel(WebSocketChannel.connect(uri)),
       cameras: buildAnnouncements(
-        cameras: _declarations(inventory, coordinator, captureConfig),
+        cameras: _declarations(currentInventory, coordinator, captureConfig),
         codecs: wireCodecsFor(available),
       ),
       statusReport: () => coordinator.reportStatus(),
@@ -280,6 +291,37 @@ Future<Widget> _startKiosk({
   // round trip.
   unawaited(coordinator.start());
 
+  /// Re-probes every camera and adopts the result.
+  ///
+  /// **The order of the first two statements is load-bearing.** `adoptInventory`
+  /// reconnects, and the gateway factory reads `currentInventory` when it builds
+  /// the registration — so the new inventory has to be in place *before* the
+  /// reconnect, or the device would publish a camera order its backend does not
+  /// implement. Swapping them is a one-line change with no compile-time signal
+  /// and a failure that only shows up as the server opening the wrong camera.
+  Future<CameraInventory> applyInventory() async {
+    final fresh = await ensureInventory(
+      enumerate: pluginCameraEnumerator(),
+      ranker: PluginCameraRanker(),
+      probe: PluginCapabilityProbe(),
+      store: capabilitiesStore,
+      fallbackResolution: captureConfig.resolution,
+      fallbackFps: settings.fps,
+      // The operator pressed a button; a cached answer would be a lie.
+      forceReprobe: true,
+      log: debugPrint,
+    );
+
+    currentInventory = fresh;
+    await coordinator.adoptInventory(
+      cameraProvider: CameraProvider(
+        backends: buildBackendChain(cameraOrder: fresh.order),
+      ),
+      capabilities: fresh.capabilities,
+    );
+    return fresh;
+  }
+
   return AgentApp(
     coordinator: coordinator,
     settingsStore: settingsStore,
@@ -289,6 +331,7 @@ Future<Widget> _startKiosk({
       await settingsStore.save(next);
       await coordinator.reconfigure(next);
     },
+    onRefreshCapabilities: applyInventory,
   );
 }
 
@@ -389,6 +432,7 @@ class AgentApp extends StatelessWidget {
     required this.coordinator,
     this.settingsStore,
     this.onConnectionChanged,
+    this.onRefreshCapabilities,
   });
 
   final AgentCoordinator coordinator;
@@ -400,6 +444,9 @@ class AgentApp extends StatelessWidget {
 
   final Future<void> Function(ConnectionSettings next)? onConnectionChanged;
 
+  /// Runs a forced camera re-probe from the settings screen.
+  final Future<CameraInventory> Function()? onRefreshCapabilities;
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -410,6 +457,7 @@ class AgentApp extends StatelessWidget {
         coordinator: coordinator,
         settingsStore: settingsStore,
         onConnectionChanged: onConnectionChanged,
+        onRefreshCapabilities: onRefreshCapabilities,
       ),
     );
   }

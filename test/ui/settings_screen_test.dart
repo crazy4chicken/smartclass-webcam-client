@@ -1,14 +1,39 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:webcam_client/src/app/capability_bootstrap.dart';
 import 'package:webcam_client/src/backend/backend_gateway.dart';
 import 'package:webcam_client/src/backend/device_credentials.dart';
 import 'package:webcam_client/src/backend/health_probe.dart';
+import 'package:webcam_client/src/capture/camera_capabilities.dart';
+import 'package:webcam_client/src/capture/camera_resolution.dart';
+import 'package:webcam_client/src/capture/camera_service.dart';
 import 'package:webcam_client/src/config/connection_settings.dart';
 import 'package:webcam_client/src/ui/screens/settings_screen.dart';
 
 const _creds = DeviceCredentials(
   deviceId: '01J8ZK9WQ7X3YV0M4N5P6Q7R8S',
   deviceToken: 'wdt_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+);
+
+final CameraInventory _inventory = CameraInventory(
+  descriptors: const [
+    CameraDescriptor(name: 'back', index: 0, lensDirection: 'back'),
+    CameraDescriptor(name: 'front', index: 1, lensDirection: 'front'),
+  ],
+  order: const [1, 0],
+  capabilities: [
+    CameraCapabilities.of(
+      resolutions: const [
+        CameraResolution(width: 1920, height: 1080),
+        CameraResolution(width: 1280, height: 720),
+      ],
+      framerates: const [30],
+    ),
+    CameraCapabilities.of(
+      resolutions: const [CameraResolution(width: 640, height: 480)],
+      framerates: const [30],
+    ),
+  ],
 );
 
 class _FakeProbe implements HealthProbe {
@@ -32,6 +57,7 @@ Future<List<ConnectionSettings>> _open(
   bool isRecording = false,
   LinkState linkState = LinkState.idle,
   HealthProbe? probe,
+  Future<CameraInventory> Function()? onRefreshCapabilities,
 }) async {
   // A tall surface so every field and button is laid out and hit-testable; the
   // default 800x600 would push the action row out of the viewport.
@@ -59,6 +85,7 @@ Future<List<ConnectionSettings>> _open(
                     isRecording: isRecording,
                     linkState: linkState,
                     probe: probe,
+                    onRefreshCapabilities: onRefreshCapabilities,
                     onSaved: (next) async => saved.add(next),
                   ),
                 ),
@@ -75,6 +102,15 @@ Future<List<ConnectionSettings>> _open(
   await tester.pumpAndSettle();
   return saved;
 }
+
+/// Whether the re-detect button can be pressed.
+bool _refreshEnabled(WidgetTester tester) =>
+    tester
+        .widget<OutlinedButton>(
+          find.byKey(SettingsScreen.refreshCapabilitiesKey),
+        )
+        .onPressed !=
+    null;
 
 void main() {
   testWidgets('the fields are seeded from the current settings', (
@@ -315,5 +351,162 @@ void main() {
       'http://10.0.0.9:9000',
       reason: 'the probe uses what is typed, not what is saved',
     );
+  });
+
+  group('re-detect cameras', () {
+    testWidgets('the button is absent when no probe is wired up', (
+      tester,
+    ) async {
+      await _open(tester);
+      expect(find.byKey(SettingsScreen.refreshCapabilitiesKey), findsNothing);
+    });
+
+    testWidgets('a refresh button is present and enabled when idle', (
+      tester,
+    ) async {
+      await _open(tester, onRefreshCapabilities: () async => _inventory);
+
+      expect(find.byKey(SettingsScreen.refreshCapabilitiesKey), findsOneWidget);
+      expect(_refreshEnabled(tester), isTrue);
+      expect(find.text('重新检测'), findsOneWidget);
+    });
+
+    testWidgets(
+      'the refresh button is disabled while the device is recording',
+      (tester) async {
+        // Re-probing reopens every camera, which would kill a live stream — the
+        // same hazard the banner above warns about, except this one is
+        // preventable by simply not offering the button.
+        await _open(
+          tester,
+          isRecording: true,
+          onRefreshCapabilities: () async => _inventory,
+        );
+
+        expect(
+          find.byKey(SettingsScreen.refreshCapabilitiesKey),
+          findsOneWidget,
+        );
+        expect(_refreshEnabled(tester), isFalse);
+      },
+    );
+
+    testWidgets('tapping it runs the probe and reports the outcome', (
+      tester,
+    ) async {
+      var calls = 0;
+      await _open(
+        tester,
+        onRefreshCapabilities: () async {
+          calls++;
+          return _inventory;
+        },
+      );
+
+      await tester.tap(find.byKey(SettingsScreen.refreshCapabilitiesKey));
+      await tester.pump();
+      await tester.pump();
+
+      expect(calls, 1);
+      expect(find.byKey(SettingsScreen.refreshResultKey), findsOneWidget);
+      expect(find.textContaining('2 个摄像头'), findsOneWidget);
+      // Two cameras, three resolutions between them.
+      expect(find.textContaining('3 个分辨率'), findsOneWidget);
+      expect(_refreshEnabled(tester), isTrue);
+    });
+
+    testWidgets('a failed probe reports a message instead of failing silently', (
+      tester,
+    ) async {
+      // The probe swallows its own errors by design, so without this the only
+      // visible result of a broken camera would be a button that does nothing.
+      await _open(
+        tester,
+        onRefreshCapabilities: () async => throw StateError('camera exploded'),
+      );
+
+      await tester.tap(find.byKey(SettingsScreen.refreshCapabilitiesKey));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byKey(SettingsScreen.refreshResultKey), findsOneWidget);
+      expect(find.textContaining('检测失败'), findsOneWidget);
+      expect(find.textContaining('camera exploded'), findsOneWidget);
+      // The button comes back, so a second attempt is possible.
+      expect(_refreshEnabled(tester), isTrue);
+    });
+
+    testWidgets('a probe that finds nothing says so and does not crash', (
+      tester,
+    ) async {
+      await _open(
+        tester,
+        onRefreshCapabilities: () async => CameraInventory.empty,
+      );
+
+      await tester.tap(find.byKey(SettingsScreen.refreshCapabilitiesKey));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.textContaining('未检测到摄像头'), findsOneWidget);
+    });
+
+    testWidgets('every tap probes again, so what gets persisted is fresh', (
+      tester,
+    ) async {
+      // The callback is what re-probes and writes the cache; short-circuiting
+      // on a previous result here would leave the next connection announcing a
+      // measurement the operator has already replaced.
+      var calls = 0;
+      await _open(
+        tester,
+        onRefreshCapabilities: () async {
+          calls++;
+          return _inventory;
+        },
+      );
+
+      await tester.tap(find.byKey(SettingsScreen.refreshCapabilitiesKey));
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.byKey(SettingsScreen.refreshCapabilitiesKey));
+      await tester.pump();
+      await tester.pump();
+
+      expect(calls, 2);
+    });
+
+    testWidgets('the re-detect result does not disturb the connection fields', (
+      tester,
+    ) async {
+      await _open(tester, onRefreshCapabilities: () async => _inventory);
+
+      await tester.tap(find.byKey(SettingsScreen.refreshCapabilitiesKey));
+      await tester.pump();
+      await tester.pump();
+
+      // Capabilities are a different kind of fact from the connection: a probe
+      // must never be able to touch the address or the credentials.
+      expect(
+        tester
+            .widget<TextField>(find.byKey(SettingsScreen.urlFieldKey))
+            .controller!
+            .text,
+        'http://127.0.0.1:8080',
+      );
+      expect(
+        tester
+            .widget<TextField>(find.byKey(SettingsScreen.tokenFieldKey))
+            .controller!
+            .text,
+        _creds.deviceToken,
+      );
+      expect(
+        tester
+            .widget<FilledButton>(find.byKey(SettingsScreen.saveKey))
+            .onPressed,
+        isNotNull,
+      );
+    });
   });
 }

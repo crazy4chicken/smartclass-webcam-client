@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../app/capability_bootstrap.dart';
 import '../../backend/backend_gateway.dart';
 import '../../backend/device_credentials.dart';
 import '../../backend/health_probe.dart';
@@ -15,10 +16,11 @@ import '../widgets/status_bar_overlay.dart';
 /// a rebuild: before it, `BASE_URL` / `DEVICE_ID` / `DEVICE_TOKEN` were
 /// compile-time only.
 ///
-/// Only the **connection** half is editable. Capture parameters (fps,
-/// resolution, quality) are not here: they are not things that change when the
-/// server changes, and fps and resolution are announced at registration, so
-/// editing them would have to rebuild the announcement too.
+/// Only the **connection** half is editable here, plus one action: a forced
+/// re-detection of the cameras. Capture parameters (fps, resolution, quality)
+/// are still not editable — they are announced at registration, and a mode
+/// change comes from the server through `switch_camera`, which is the only
+/// thing that is allowed to move them.
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     super.key,
@@ -27,6 +29,7 @@ class SettingsScreen extends StatefulWidget {
     this.isRecording = false,
     this.linkState = LinkState.idle,
     this.probe,
+    this.onRefreshCapabilities,
   });
 
   /// Seeds the fields.
@@ -45,6 +48,10 @@ class SettingsScreen extends StatefulWidget {
   /// Injected in tests; a real HTTP probe is used otherwise.
   final HealthProbe? probe;
 
+  /// Runs a **forced** re-probe and applies the result. Null hides the button,
+  /// which is what a screen built without a store wants.
+  final Future<CameraInventory> Function()? onRefreshCapabilities;
+
   // Keys for tests. Each piece of text gets its own key so a failure points at
   // the right field, and so no two widgets ever carry the same string.
   static const Key urlFieldKey = Key('settings-url');
@@ -61,6 +68,10 @@ class SettingsScreen extends StatefulWidget {
   static const Key probeResultKey = Key('settings-probe-result');
   static const Key recordingBannerKey = Key('settings-recording-banner');
   static const Key linkStatusKey = Key('settings-link-status');
+  static const Key refreshCapabilitiesKey = Key(
+    'settings-refresh-capabilities',
+  );
+  static const Key refreshResultKey = Key('settings-refresh-result');
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -82,6 +93,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   bool _probing = false;
   HealthProbeResult? _probeResult;
+
+  bool _refreshing = false;
+  String? _refreshResult;
+  bool _refreshFailed = false;
 
   @override
   void initState() {
@@ -219,6 +234,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
+  /// Re-measures every camera and applies the result.
+  ///
+  /// The outcome is reported here rather than through the status bar because
+  /// the probe takes seconds and the screen the operator is looking at is this
+  /// one. A failure has to be *said*: the probe swallows its own errors by
+  /// design (a rung that will not open contributes nothing), so without this
+  /// the only visible result of a device with a broken camera would be a button
+  /// that appears to do nothing.
+  Future<void> _refreshCapabilities() async {
+    final refresh = widget.onRefreshCapabilities;
+    if (refresh == null) return;
+
+    setState(() {
+      _refreshing = true;
+      _refreshResult = null;
+      _refreshFailed = false;
+    });
+
+    try {
+      final inventory = await refresh();
+      if (!mounted) return;
+      final resolutions = inventory.capabilities.fold<int>(
+        0,
+        (total, capabilities) => total + capabilities.resolutions.length,
+      );
+      setState(() {
+        _refreshing = false;
+        _refreshResult = inventory.isEmpty
+            ? '未检测到摄像头。'
+            : '检测到 ${inventory.descriptors.length} 个摄像头，'
+                  '共 $resolutions 个分辨率。';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _refreshing = false;
+        _refreshFailed = true;
+        _refreshResult = '检测失败：$error';
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -299,6 +356,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   icon: const Icon(Icons.wifi_tethering, size: 18),
                   label: Text(_probing ? '测试中…' : '测试连接'),
                 ),
+                // Disabled while recording: re-probing reopens every camera,
+                // which would kill a live stream — the same hazard the banner
+                // above warns about, except this one is preventable.
+                if (widget.onRefreshCapabilities != null)
+                  OutlinedButton.icon(
+                    key: SettingsScreen.refreshCapabilitiesKey,
+                    onPressed: (widget.isRecording || _refreshing)
+                        ? null
+                        : _refreshCapabilities,
+                    icon: const Icon(Icons.refresh, size: 18),
+                    label: Text(_refreshing ? '检测中…' : '重新检测'),
+                  ),
                 FilledButton(
                   key: SettingsScreen.saveKey,
                   onPressed: _canSave ? _save : null,
@@ -339,6 +408,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       (final r) when r.reachable => const Color(0xFFFFB300),
                       _ => const Color(0xFFEF9A9A),
                     },
+                  ),
+                ),
+              ),
+
+            if (_refreshResult != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Text(
+                  _refreshResult!,
+                  key: SettingsScreen.refreshResultKey,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: _refreshFailed
+                        ? const Color(0xFFEF9A9A)
+                        : const Color(0xFF81C784),
                   ),
                 ),
               ),

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../../agent/agent_coordinator.dart';
 import '../../agent/agent_status.dart';
+import '../../app/capability_bootstrap.dart';
 import '../../capture/camera_backend.dart';
 import '../../capture/camera_service.dart';
 import '../../config/connection_settings.dart';
@@ -30,6 +31,7 @@ class AgentScreen extends StatelessWidget {
     required this.coordinator,
     this.settingsStore,
     this.onConnectionChanged,
+    this.onRefreshCapabilities,
   });
 
   final AgentCoordinator coordinator;
@@ -40,6 +42,10 @@ class AgentScreen extends StatelessWidget {
   final SettingsStore? settingsStore;
 
   final Future<void> Function(ConnectionSettings next)? onConnectionChanged;
+
+  /// Runs a forced camera re-probe. Null hides the button on the settings
+  /// screen, which is what a screen built without a store wants.
+  final Future<CameraInventory> Function()? onRefreshCapabilities;
 
   @override
   Widget build(BuildContext context) {
@@ -132,6 +138,7 @@ class AgentScreen extends StatelessWidget {
           isRecording: status.isRecording,
           linkState: status.linkState,
           onSaved: onChanged,
+          onRefreshCapabilities: onRefreshCapabilities,
         ),
       ),
     );

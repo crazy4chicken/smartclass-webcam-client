@@ -4226,6 +4226,97 @@ Future<void> checkCoordinator() async {
       false,
     );
   }
+
+  // --- adopting a freshly probed inventory (the settings screen button) -----
+
+  {
+    final factory = _FakeGatewayFactory();
+    final coordinator = AgentCoordinator(
+      gatewayFactory: factory,
+      cameraProvider: CameraProvider(
+        backends: <CameraBackend>[_FakeBackend('first', probeResult: _okProbe)],
+      ),
+      pumpFactory: () => _FakeFramePump(),
+      connection: testConnection,
+      // No `initialCamera`, so `start()` opens through the provider and the
+      // backend id is meaningful.
+      capabilities: <CameraCapabilities>[measured],
+    );
+    await coordinator.start();
+    eq('one gateway so far', factory.built.length, 1);
+
+    final original = coordinator.cameraService;
+    eq('the first provider was used', coordinator.backendId, 'first');
+
+    await coordinator.adoptInventory(
+      cameraProvider: CameraProvider(
+        backends: <CameraBackend>[
+          _FakeBackend('second', probeResult: _okProbe),
+        ],
+      ),
+      capabilities: <CameraCapabilities>[measured, measured],
+    );
+
+    // Released first: the probe has already opened every camera on the machine,
+    // and holding one open here would make the measurement a coin toss.
+    eq('the old camera was released', original?.isInitialized, false);
+    eq('a new camera was opened', coordinator.cameraService != original, true);
+    eq('through the new provider', coordinator.backendId, 'second');
+    eq('the capabilities were replaced', coordinator.capabilities.length, 2);
+    eq(
+      'and the modes follow the new camera count',
+      coordinator.cameraModes.length,
+      2,
+    );
+    eq('the device re-registered', factory.built.length, 2);
+    eq('on camera 0', coordinator.cameraEnum, 0);
+    eq('and is live again', coordinator.linkState, LinkState.live);
+  }
+
+  {
+    // Backgrounded: nothing may touch the camera or the network. `resume` picks
+    // the new provider up.
+    final factory = _FakeGatewayFactory();
+    final coordinator = AgentCoordinator(
+      gatewayFactory: factory,
+      cameraProvider: CameraProvider(
+        backends: <CameraBackend>[_FakeBackend('first', probeResult: _okProbe)],
+      ),
+      pumpFactory: () => _FakeFramePump(),
+      connection: testConnection,
+      capabilities: <CameraCapabilities>[measured],
+    );
+    await coordinator.start();
+    await coordinator.pause();
+
+    await coordinator.adoptInventory(
+      cameraProvider: CameraProvider(
+        backends: <CameraBackend>[
+          _FakeBackend('second', probeResult: _okProbe),
+        ],
+      ),
+      capabilities: <CameraCapabilities>[measured],
+    );
+
+    // The gateway is still rebuilt — the new camera list has to be baked into
+    // something — but it must not be *started* while the kiosk is backgrounded.
+    eq(
+      'a backgrounded device does not start the link',
+      factory.built.length,
+      2,
+    );
+    eq('the new gateway is idle', factory.built.last.startCalls, 0);
+    eq('and holds no camera', coordinator.cameraService, null);
+
+    await coordinator.resume();
+    eq(
+      'resume opens through the new provider',
+      coordinator.backendId,
+      'second',
+    );
+    eq('and the link comes back', coordinator.linkState, LinkState.live);
+    eq('through the new gateway', factory.built.last.startCalls, 1);
+  }
 }
 
 Future<void> main() async {

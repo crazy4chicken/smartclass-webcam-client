@@ -109,13 +109,16 @@ class AgentCoordinator {
        _log = log;
 
   final BackendGatewayFactory _gatewayFactory;
-  final CameraProvider _cameraProvider;
+
+  /// Replaced wholesale by [adoptInventory]; never mutated in place.
+  CameraProvider _cameraProvider;
+
   final FramePumpFactory _pumpFactory;
 
   /// What each announced camera was measured to accept, indexed by
   /// `camera_enum`. Empty on a device whose probe found nothing, which is not a
   /// failure state — it just means every camera declares only the mode it is in.
-  final List<CameraCapabilities> _capabilities;
+  List<CameraCapabilities> _capabilities;
 
   /// The codecs announced at registration, in order. The **first** is the
   /// preferred one, which is what an unnamed `start_recording.codec` selects.
@@ -133,7 +136,7 @@ class AgentCoordinator {
   /// the real camera list, so a value that gets this far is one the server
   /// believes in, and refusing it locally would be the device inventing a
   /// second opinion.
-  final List<CameraMode> _modes;
+  List<CameraMode> _modes;
 
   /// Replaced wholesale by [reconfigure]; never mutated in place.
   BackendGateway _gateway;
@@ -425,6 +428,51 @@ class AgentCoordinator {
   Future<void> dispose() async {
     await stop();
     await _statuses.close();
+  }
+
+  /// Adopts a freshly probed inventory and reconnects.
+  ///
+  /// Called from the settings screen's "re-detect" button, after a forced
+  /// re-probe. It has to do more than update a list: the canonical order can
+  /// change (a camera was plugged in, or a ceiling changed), and the announced
+  /// `camera_enum` values only mean anything if the backend resolves them the
+  /// same way. So the permutation and the capabilities are swapped **together**
+  /// — [cameraProvider] carries the new permutation — and the device
+  /// re-registers from scratch.
+  ///
+  /// The camera is released first because the probe has already opened every
+  /// camera on the machine to measure it; holding one open here would have made
+  /// the measurement a coin toss on Windows and Linux, where a second open of a
+  /// busy device fails.
+  ///
+  /// [cameraProvider] must be built from the same inventory's order as the
+  /// announcements the gateway factory publishes. Passing one without the other
+  /// is the exact "two indices" mistake this design exists to prevent.
+  Future<void> adoptInventory({
+    required CameraProvider cameraProvider,
+    required List<CameraCapabilities> capabilities,
+  }) async {
+    _report('adopt inventory: ${capabilities.length} camera(s)');
+
+    await _stopRecording();
+    await _camera?.release();
+
+    _cameraProvider = cameraProvider;
+    _capabilities = List<CameraCapabilities>.unmodifiable(capabilities);
+    _modes = _seedModes(
+      capabilities: capabilities,
+      config: _config,
+      settings: _settings,
+    );
+    _camera = null;
+    _cameraEnum = 0;
+
+    // Through [reconfigure] rather than a bare `start()`, and that is
+    // load-bearing: the camera list is baked into a gateway at construction, so
+    // re-registering on the *same* instance would republish the list the device
+    // started with. Rebuilding is what runs the gateway factory again and picks
+    // up the new order and the new capabilities. It also owns the paused case.
+    await reconfigure(_connection);
   }
 
   /// Re-runs camera discovery. Wired to the retry button on the error screen.
