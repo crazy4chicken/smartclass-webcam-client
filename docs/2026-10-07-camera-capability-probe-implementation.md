@@ -4,7 +4,9 @@
 > **跨计划总览**：`docs/implementation-status.md`
 > **记录时点**：2026-10-08，HEAD `61504e9`
 > **验证基线**：`dart run tool/verify_pure.dart` → **598 项断言全绿**；
-> `dart format` 干净；`lib`+`test`+`tool` 共 86 个 Dart 文件类型检查干净。
+> `dart format` 干净；类型检查 36 个编译单元干净
+> （`lib/main.dart` 为入口传递覆盖整个 `lib/`，外加 34 个 `test/` 文件与 `tool/verify_pure.dart`）。
+> 本文的数字都对应上面那个 HEAD；此后新增的功能不在本计划范围内。
 
 ---
 
@@ -230,7 +232,7 @@ Windows（全 `front`）/ Linux（全 `external`）退化为纯分辨率序这�
 | 层 | 工具 | 结果 |
 | --- | --- | --- |
 | 纯 Dart 断言 | `dart run tool/verify_pure.dart` | ✅ 598 项全绿（**唯一能执行**的验证层） |
-| 全量类型检查 | Python 驱动 `frontend_server_aot.dart.snapshot` 单次编译 | ✅ 86 个文件干净 |
+| 全量类型检查 | Python 驱动 `frontend_server_aot.dart.snapshot` 单次编译 | ✅ 36 个编译单元干净 |
 | 语法/格式闸门 | `dart format --output=none --set-exit-if-changed lib test tool` | ✅ 干净 |
 | `flutter test` | —— | ⚠️ 本机跑不了 |
 
@@ -367,7 +369,7 @@ Windows（全 `front`）/ Linux（全 `external`）退化为纯分辨率序这�
 | --- | --- | --- |
 | `dart run tool/verify_pure.dart` | ✅ **598 项断言全绿** | 本机**唯一能执行**的验证层 |
 | `dart format` 闸门 | ✅ 干净 | `--output=none --set-exit-if-changed lib test tool` |
-| 全量类型检查 | ✅ 干净 | 86 个 Dart 文件（`lib` 50 / `test` 35 / `tool` 1） |
+| 全量类型检查 | ✅ 干净 | 36 个编译单元：`lib/main.dart`（传递覆盖全部 `lib/`）+ 34 个 `test/` 文件 + `tool/verify_pure.dart` |
 | `flutter test` | ⚠️ **本机跑不了** | 最后运行 `+333 -2`；两个失败已在 `dbd1135` 修掉并镜像进 harness，**修后未再跑** |
 | 真机 · Android | ⚠️ 部分 | 基础链路跑通过一整轮（另一个计划）。**能力探测（T8/T9）未在真机验过**；`61504e9` 的 kiosk 修复待重出包确认 |
 

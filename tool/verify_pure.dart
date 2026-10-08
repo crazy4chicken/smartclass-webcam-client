@@ -38,6 +38,7 @@ import 'package:webcam_client/src/capture/camera_provider.dart';
 import 'package:webcam_client/src/capture/camera_resolution.dart';
 import 'package:webcam_client/src/capture/camera_service.dart';
 import 'package:webcam_client/src/capture/capability_probe.dart';
+import 'package:webcam_client/src/capture/capability_report.dart';
 import 'package:webcam_client/src/capture/codec_probe.dart';
 import 'package:webcam_client/src/capture/frame_pump.dart';
 import 'package:webcam_client/src/capture/frame_store.dart';
@@ -126,11 +127,27 @@ const List<CameraResolution> nominalResolutions = <CameraResolution>[
 // --- fakes ------------------------------------------------------------------
 
 class _FakeCameraService implements CameraService {
-  _FakeCameraService({this.bytes, this.failTimes = 0, this.delay});
+  _FakeCameraService({
+    this.bytes,
+    this.failTimes = 0,
+    this.delay,
+    List<CameraDescriptor>? cameras,
+  }) : cameras =
+           cameras ??
+           const <CameraDescriptor>[
+             CameraDescriptor(name: 'fake camera', index: 0),
+           ];
 
   final Uint8List? bytes;
   int failTimes;
   final Duration? delay;
+
+  /// The announced camera list, in canonical order.
+  ///
+  /// Overridable because the capability page is per camera, so a check for it
+  /// needs more than one.
+  @override
+  final List<CameraDescriptor> cameras;
 
   int captureCalls = 0;
   int reconfigureCalls = 0;
@@ -186,10 +203,6 @@ class _FakeCameraService implements CameraService {
       const CameraResolution(width: 1280, height: 720);
   @override
   List<CameraResolution> get supportedResolutions => nominalResolutions;
-  @override
-  List<CameraDescriptor> get cameras => const <CameraDescriptor>[
-    CameraDescriptor(name: 'fake camera', index: 0),
-  ];
   @override
   int get cameraIndex => _cameraIndex;
   @override
@@ -3094,6 +3107,224 @@ Future<void> checkGatewayCameraList() async {
   }
 }
 
+void checkCapabilityReport() {
+  section('capability report');
+
+  const vga = CameraResolution(width: 640, height: 480);
+  const hd = CameraResolution(width: 1280, height: 720);
+  const fhd = CameraResolution(width: 1920, height: 1080);
+
+  const cameras = <CameraDescriptor>[
+    CameraDescriptor(name: 'rear', index: 0, lensDirection: 'back'),
+    CameraDescriptor(name: 'front', index: 1, lensDirection: 'front'),
+  ];
+  final modes = <CameraMode>[
+    const CameraMode(resolution: hd, fps: 15),
+    const CameraMode(resolution: vga, fps: 5),
+  ];
+  final declared = <CameraCapabilities>[
+    CameraCapabilities.of(
+      resolutions: <CameraResolution>[fhd, hd, vga],
+      framerates: <int>[30, 15],
+    ),
+    CameraCapabilities.of(
+      resolutions: <CameraResolution>[vga],
+      framerates: <int>[5],
+    ),
+  ];
+
+  final report = buildCapabilityReport(
+    cameras: cameras,
+    modes: modes,
+    declared: declared,
+    activeCameraEnum: 1,
+  );
+
+  eq('one entry per announced camera', report.length, 2);
+  eq(
+    'the enum is the position',
+    report.map((c) => c.cameraEnum).join(','),
+    '0,1',
+  );
+  eq('the camera name comes through', report.first.name, 'rear');
+  eq('so does the lens direction', report.last.lensDirection, 'front');
+  eq(
+    'the current mode is carried, per camera',
+    '${report.first.current?.resolution.label}@${report.first.current?.fps},'
+        '${report.last.current?.resolution.label}@${report.last.current?.fps}',
+    '1280x720@15,640x480@5',
+  );
+  eq(
+    'the declared resolutions are carried verbatim',
+    report.first.resolutions.map((r) => r.label).join(','),
+    '1920x1080,1280x720,640x480',
+  );
+  eq(
+    'the declared frame rates too',
+    report.first.framerates.join(','),
+    '30,15',
+  );
+  eq(
+    'each camera keeps its own set',
+    report.last.resolutions.map((r) => r.label).join(','),
+    '640x480',
+  );
+  final actives = report.where((c) => c.isActive).toList();
+  eq('exactly one camera is active', actives.length, 1);
+  // Deliberately not `singleWhere`: that throws on a regression, which takes
+  // the rest of the harness down with it and hides every check after this one.
+  // A wrong answer here should read as a failed check.
+  eq(
+    'and it is the one that was named',
+    actives.isEmpty ? -1 : actives.single.cameraEnum,
+    1,
+  );
+
+  // The degenerate inputs a screen must survive. A page that fails to build is
+  // worse than one that admits it does not know, so neither of these may throw
+  // and neither may invent a value.
+  final short = buildCapabilityReport(
+    cameras: cameras,
+    modes: const <CameraMode>[CameraMode(resolution: hd, fps: 15)],
+    declared: const <CameraCapabilities>[],
+    activeCameraEnum: 0,
+  );
+  eq(
+    'a short mode list leaves the mode unknown rather than inventing one',
+    short[1].current,
+    null,
+  );
+  eq('a short declared list degrades to empty', short[1].isEmpty, true);
+  eq(
+    'and the camera it did know about is unaffected',
+    short.first.current?.resolution.label,
+    '1280x720',
+  );
+
+  eq(
+    'no camera yields an empty report rather than throwing',
+    buildCapabilityReport(
+      cameras: const <CameraDescriptor>[],
+      modes: const <CameraMode>[],
+      declared: const <CameraCapabilities>[],
+      activeCameraEnum: 0,
+    ).isEmpty,
+    true,
+  );
+}
+
+Future<void> checkCoordinatorCapabilityReport() async {
+  section('the capability page cannot drift from the validator');
+
+  const vga = CameraResolution(width: 640, height: 480);
+  const hd = CameraResolution(width: 1280, height: 720);
+  const fhd = CameraResolution(width: 1920, height: 1080);
+
+  final measured = <CameraCapabilities>[
+    CameraCapabilities.of(
+      resolutions: <CameraResolution>[fhd, hd],
+      framerates: <int>[30],
+    ),
+    CameraCapabilities.of(
+      resolutions: <CameraResolution>[vga],
+      framerates: <int>[15],
+    ),
+  ];
+
+  final factory = _FakeGatewayFactory();
+  final coordinator = AgentCoordinator(
+    gatewayFactory: factory,
+    cameraProvider: CameraProvider(
+      backends: <CameraBackend>[_FakeBackend('stub', probeResult: _okProbe)],
+    ),
+    pumpFactory: () => _FakeFramePump(),
+    connection: testConnection,
+    initialCamera: _FakeCameraService(
+      bytes: Uint8List.fromList(<int>[1]),
+      cameras: const <CameraDescriptor>[
+        CameraDescriptor(name: 'rear', index: 0, lensDirection: 'back'),
+        CameraDescriptor(name: 'front', index: 1, lensDirection: 'front'),
+      ],
+    ),
+    capabilities: measured,
+  );
+  await coordinator.start();
+
+  final report = coordinator.capabilityReport();
+  eq('the page lists every announced camera', report.length, 2);
+  eq(
+    'with the names the backend reports',
+    report.map((c) => c.name).join(','),
+    'rear,front',
+  );
+  eq('camera 0 is the active one at boot', report.first.isActive, true);
+  eq('and the other is not', report.last.isActive, false);
+  eq(
+    'each camera shows its own measured set',
+    '${report.first.resolutions.length}/${report.last.resolutions.length}',
+    '${coordinator.declaredFor(0).resolutions.length}/'
+        '${coordinator.declaredFor(1).resolutions.length}',
+  );
+
+  // The property that makes the page worth reading: every resolution it prints
+  // is one the coordinator accepts, and nothing else is. Two computations of
+  // the declared list would be free to drift, and the drift would surface as an
+  // operator reading a value off the device's own screen and being refused.
+  for (var i = 0; i < report.length; i++) {
+    eq(
+      'the page prints exactly what camera $i will accept',
+      report[i].resolutions.map((r) => r.label).join(','),
+      coordinator.declaredFor(i).resolutions.map((r) => r.label).join(','),
+    );
+    eq(
+      'and the frame rates for camera $i',
+      report[i].framerates.join(','),
+      coordinator.declaredFor(i).framerates.join(','),
+    );
+  }
+
+  // A value the page printed must be honoured, and the page must then show the
+  // new mode — otherwise the screen contradicts the ack.
+  final target = coordinator.declaredFor(1).resolutions.first;
+  final beforeSwitch = factory.built.last;
+  await coordinator.handleCommand(
+    SwitchCameraCommand(id: 'a', cameraEnum: 1, resolution: target, fps: 15),
+  );
+  // Read the *old* gateway on purpose: the ack is written before the
+  // re-registration, so it goes out on the instance that is about to be
+  // replaced. Waiting for `built.last` would be reading a gateway that was
+  // built after the ack and never saw it.
+  eq('a value the page printed is accepted', beforeSwitch.acks.last.ok, true);
+  eq('and the mode change re-registered', factory.built.length, 2);
+
+  final after = coordinator.capabilityReport();
+  eq(
+    'the page follows the mode',
+    after[1].current?.resolution.label,
+    target.label,
+  );
+  eq('the frame rate too', after[1].current?.fps, 15);
+  eq('and the active camera moved', after[1].isActive, true);
+  eq('so the one it left is no longer active', after[0].isActive, false);
+
+  // A value the page never printed is refused, which is the other half of the
+  // same property.
+  final beforeRefusal = factory.built.last;
+  await coordinator.handleCommand(
+    SwitchCameraCommand(
+      id: 'b',
+      cameraEnum: 1,
+      resolution: const CameraResolution(width: 3840, height: 2160),
+    ),
+  );
+  eq(
+    'a value the page never printed is refused',
+    beforeRefusal.acks.last.ok,
+    false,
+  );
+  eq('and a refusal does not reconnect', factory.built.length, 2);
+}
+
 void checkMjpegEncoder() {
   section('mjpeg encoder');
   fakeAsync((async) {
@@ -4534,6 +4765,8 @@ Future<void> main() async {
   checkCapabilityCache();
   await checkCapabilityBootstrap();
   await checkGatewayCameraList();
+  checkCapabilityReport();
+  await checkCoordinatorCapabilityReport();
   checkMjpegEncoder();
   await checkCameraProvider();
   await checkFrameStore();

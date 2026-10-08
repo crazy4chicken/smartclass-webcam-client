@@ -6,9 +6,11 @@ import '../../app/capability_bootstrap.dart';
 import '../../backend/backend_gateway.dart';
 import '../../backend/device_credentials.dart';
 import '../../backend/health_probe.dart';
+import '../../capture/capability_report.dart';
 import '../../config/app_config.dart';
 import '../../config/connection_settings.dart';
 import '../widgets/status_bar_overlay.dart';
+import 'capabilities_screen.dart';
 
 /// Where an installer points the device at a backend and gives it an identity.
 ///
@@ -16,11 +18,12 @@ import '../widgets/status_bar_overlay.dart';
 /// a rebuild: before it, `BASE_URL` / `DEVICE_ID` / `DEVICE_TOKEN` were
 /// compile-time only.
 ///
-/// Only the **connection** half is editable here, plus one action: a forced
-/// re-detection of the cameras. Capture parameters (fps, resolution, quality)
-/// are still not editable — they are announced at registration, and a mode
-/// change comes from the server through `switch_camera`, which is the only
-/// thing that is allowed to move them.
+/// Only the **connection** half is editable here, plus two read-mostly actions:
+/// a forced re-detection of the cameras, and a read-only page listing what they
+/// were measured to accept. Capture parameters (fps, resolution, quality) are
+/// still not editable — they are announced at registration, and a mode change
+/// comes from the server through `switch_camera`, which is the only thing that
+/// is allowed to move them.
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     super.key,
@@ -30,6 +33,7 @@ class SettingsScreen extends StatefulWidget {
     this.linkState = LinkState.idle,
     this.probe,
     this.onRefreshCapabilities,
+    this.readCapabilities,
   });
 
   /// Seeds the fields.
@@ -52,6 +56,11 @@ class SettingsScreen extends StatefulWidget {
   /// which is what a screen built without a store wants.
   final Future<CameraInventory> Function()? onRefreshCapabilities;
 
+  /// Supplies the per-camera capability report for the read-only capability
+  /// page. A callback rather than a list so the page reflects a re-probe that
+  /// happened while this screen was open; null hides the entry point.
+  final List<CameraCapabilityReport> Function()? readCapabilities;
+
   // Keys for tests. Each piece of text gets its own key so a failure points at
   // the right field, and so no two widgets ever carry the same string.
   static const Key urlFieldKey = Key('settings-url');
@@ -72,6 +81,7 @@ class SettingsScreen extends StatefulWidget {
     'settings-refresh-capabilities',
   );
   static const Key refreshResultKey = Key('settings-refresh-result');
+  static const Key viewCapabilitiesKey = Key('settings-view-capabilities');
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -276,6 +286,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  /// Opens the read-only capability page.
+  ///
+  /// The report is read **when the button is tapped**, not when this screen was
+  /// built: a re-probe can have happened while the operator was sitting here,
+  /// and a stale snapshot would contradict the result line right above it.
+  Future<void> _openCapabilities() async {
+    final read = widget.readCapabilities;
+    if (read == null) return;
+
+    final cameras = read();
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => CapabilitiesScreen(cameras: cameras),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -367,6 +394,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         : _refreshCapabilities,
                     icon: const Icon(Icons.refresh, size: 18),
                     label: Text(_refreshing ? '检测中…' : '重新检测'),
+                  ),
+                // Enabled while recording, unlike the button above: this page
+                // only reads what was already measured, so it cannot disturb a
+                // live stream.
+                if (widget.readCapabilities != null)
+                  OutlinedButton.icon(
+                    key: SettingsScreen.viewCapabilitiesKey,
+                    onPressed: _openCapabilities,
+                    icon: const Icon(Icons.tune, size: 18),
+                    label: const Text('查看支持的分辨率'),
                   ),
                 FilledButton(
                   key: SettingsScreen.saveKey,

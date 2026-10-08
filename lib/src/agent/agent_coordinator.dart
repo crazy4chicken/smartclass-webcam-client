@@ -8,6 +8,7 @@ import '../backend/unrecognized_command_log.dart';
 import '../capture/camera_backend.dart';
 import '../capture/camera_capabilities.dart';
 import '../capture/camera_provider.dart';
+import '../capture/capability_report.dart';
 import '../capture/camera_resolution.dart';
 import '../capture/camera_service.dart';
 import '../capture/frame_pump.dart';
@@ -244,6 +245,32 @@ class AgentCoordinator {
     currentResolution: _modeFor(cameraEnum).resolution,
     currentFps: _modeFor(cameraEnum).fps,
   );
+
+  /// One entry per announced camera, for the settings screen's capability page.
+  ///
+  /// Reads through [declaredFor] rather than [_capabilities] directly, so the
+  /// page shows the same set the device publishes and accepts. A third
+  /// computation of the declared list would be free to drift from both, and the
+  /// drift would show up as an operator reading a resolution off the device's
+  /// own screen and being refused.
+  ///
+  /// Built on demand rather than cached: the mode list moves on every
+  /// parameter-changing `switch_camera`, and a snapshot taken at construction
+  /// would be stale exactly when it is worth reading.
+  List<CameraCapabilityReport> capabilityReport() {
+    // The open service is the only place camera names live. Without one there
+    // are no cameras to describe, and the page says so.
+    final cameras = _camera?.cameras ?? const <CameraDescriptor>[];
+
+    return buildCapabilityReport(
+      cameras: cameras,
+      modes: _modes,
+      declared: <CameraCapabilities>[
+        for (var i = 0; i < cameras.length; i++) declaredFor(i),
+      ],
+      activeCameraEnum: _cameraEnum,
+    );
+  }
 
   CameraCapabilities _measuredFor(int cameraEnum) =>
       cameraEnum >= 0 && cameraEnum < _capabilities.length

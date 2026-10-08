@@ -139,6 +139,9 @@ class AgentScreen extends StatelessWidget {
           linkState: status.linkState,
           onSaved: onChanged,
           onRefreshCapabilities: onRefreshCapabilities,
+          // Read on demand, so the page reflects a re-probe done from this
+          // screen rather than what bootstrap happened to measure at start-up.
+          readCapabilities: coordinator.capabilityReport,
         ),
       ),
     );

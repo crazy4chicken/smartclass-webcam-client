@@ -7,7 +7,9 @@ import 'package:webcam_client/src/backend/health_probe.dart';
 import 'package:webcam_client/src/capture/camera_capabilities.dart';
 import 'package:webcam_client/src/capture/camera_resolution.dart';
 import 'package:webcam_client/src/capture/camera_service.dart';
+import 'package:webcam_client/src/capture/capability_report.dart';
 import 'package:webcam_client/src/config/connection_settings.dart';
+import 'package:webcam_client/src/ui/screens/capabilities_screen.dart';
 import 'package:webcam_client/src/ui/screens/settings_screen.dart';
 
 const _creds = DeviceCredentials(
@@ -36,6 +38,20 @@ final CameraInventory _inventory = CameraInventory(
   ],
 );
 
+/// The report the settings screen hands to the capability page, built from the
+/// same fixture the re-detect tests use so the two cannot disagree.
+List<CameraCapabilityReport> _capabilityReport({
+  int active = 0,
+}) => buildCapabilityReport(
+  cameras: _inventory.descriptors,
+  modes: const [
+    CameraMode(resolution: CameraResolution(width: 1280, height: 720), fps: 15),
+    CameraMode(resolution: CameraResolution(width: 640, height: 480), fps: 5),
+  ],
+  declared: _inventory.capabilities,
+  activeCameraEnum: active,
+);
+
 class _FakeProbe implements HealthProbe {
   _FakeProbe(this.result);
 
@@ -58,6 +74,7 @@ Future<List<ConnectionSettings>> _open(
   LinkState linkState = LinkState.idle,
   HealthProbe? probe,
   Future<CameraInventory> Function()? onRefreshCapabilities,
+  List<CameraCapabilityReport> Function()? readCapabilities,
 }) async {
   // A tall surface so every field and button is laid out and hit-testable; the
   // default 800x600 would push the action row out of the viewport.
@@ -86,6 +103,7 @@ Future<List<ConnectionSettings>> _open(
                     linkState: linkState,
                     probe: probe,
                     onRefreshCapabilities: onRefreshCapabilities,
+                    readCapabilities: readCapabilities,
                     onSaved: (next) async => saved.add(next),
                   ),
                 ),
@@ -504,6 +522,91 @@ void main() {
       expect(
         tester
             .widget<FilledButton>(find.byKey(SettingsScreen.saveKey))
+            .onPressed,
+        isNotNull,
+      );
+    });
+  });
+
+  group('the capability page', () {
+    testWidgets('opens from the action row and lists what was measured', (
+      tester,
+    ) async {
+      await _open(tester, readCapabilities: _capabilityReport);
+
+      await tester.tap(find.byKey(SettingsScreen.viewCapabilitiesKey));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CapabilitiesScreen), findsOneWidget);
+      expect(find.byKey(CapabilitiesScreen.cameraKey(0)), findsOneWidget);
+      expect(find.text('back'), findsOneWidget);
+      expect(find.text('front'), findsOneWidget);
+    });
+
+    testWidgets('is absent when nothing can supply it', (tester) async {
+      // A screen built without a coordinator — the mock-backend path, or a
+      // test — must not render a button that opens an empty page.
+      await _open(tester);
+      expect(find.byKey(SettingsScreen.viewCapabilitiesKey), findsNothing);
+    });
+
+    testWidgets('reads fresh data on every tap', (tester) async {
+      // The report is a callback rather than a snapshot: a re-detect can happen
+      // while this screen is open, and a stale list would contradict the result
+      // line sitting right above it.
+      var calls = 0;
+      await _open(
+        tester,
+        readCapabilities: () {
+          calls++;
+          return _capabilityReport(active: calls - 1);
+        },
+      );
+
+      await tester.tap(find.byKey(SettingsScreen.viewCapabilitiesKey));
+      await tester.pumpAndSettle();
+      expect(calls, 1);
+      expect(
+        find.descendant(
+          of: find.byKey(CapabilitiesScreen.cameraKey(0)),
+          matching: find.text('使用中'),
+        ),
+        findsOneWidget,
+      );
+
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(SettingsScreen.viewCapabilitiesKey));
+      await tester.pumpAndSettle();
+      expect(calls, 2);
+      expect(
+        find.descendant(
+          of: find.byKey(CapabilitiesScreen.cameraKey(1)),
+          matching: find.text('使用中'),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('stays reachable while recording, unlike a re-detect', (
+      tester,
+    ) async {
+      // Reading a page cannot disturb a live stream, so it must not inherit the
+      // re-detect button's recording lockout.
+      await _open(
+        tester,
+        isRecording: true,
+        onRefreshCapabilities: () async => _inventory,
+        readCapabilities: _capabilityReport,
+      );
+
+      expect(_refreshEnabled(tester), isFalse);
+      expect(
+        tester
+            .widget<OutlinedButton>(
+              find.byKey(SettingsScreen.viewCapabilitiesKey),
+            )
             .onPressed,
         isNotNull,
       );
