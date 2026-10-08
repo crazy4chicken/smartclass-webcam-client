@@ -645,7 +645,13 @@ void checkCommandParsing() {
   // Lenient on purpose: a value the device cannot read must leave the camera
   // switch honoured rather than dropping the command — a dropped command is
   // never acked, and the server does not retry.
-  for (final blank in <String>['', '   ', '720p', '1280x', '0x480']) {
+  //
+  // `'\\t'` is the two characters backslash-t, so the JSON *text* carries the
+  // escape `\t` and `jsonDecode` turns it into a tab. Writing a raw tab here
+  // instead would produce invalid JSON and the frame would be dropped for a
+  // completely different reason — which is exactly the confusion the check
+  // below pins.
+  for (final blank in <String>['', '   ', '\\t', '720p', '1280x', '0x480']) {
     final parsed =
         parseDeviceCommand(
               '{"channel":"control","type":"switch_camera","id":"e",'
@@ -669,6 +675,29 @@ void checkCommandParsing() {
       parsed.fps == null,
     );
   }
+
+  // Pinned because it looks like "the parser silently dropped my command" and
+  // is really "I built invalid JSON": RFC 8259 requires control characters
+  // inside a string to be escaped, and `jsonDecode` enforces it. A raw tab in a
+  // test fixture produces this, not an absent value.
+  eq(
+    'a raw control character in a JSON string is invalid JSON',
+    parseDeviceCommand(
+      '{"channel":"control","type":"switch_camera","id":"e",'
+      '"payload":{"camera_enum":0,"resolution":"\t"}}',
+    ),
+    null,
+  );
+  eq(
+    'and the escaped form parses to an absent value',
+    (parseDeviceCommand(
+              '{"channel":"control","type":"switch_camera","id":"e",'
+              '"payload":{"camera_enum":0,"resolution":"\\t"}}',
+            )!
+            as SwitchCameraCommand)
+        .resolution,
+    null,
+  );
 
   final withCodec =
       parseDeviceCommand(

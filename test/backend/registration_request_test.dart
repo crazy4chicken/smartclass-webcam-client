@@ -85,7 +85,13 @@ void main() {
       expect(declared.where((r) => r == _hd), hasLength(1));
       expect(declared.where((r) => r == _vga), hasLength(1));
       expect(declared.toSet(), hasLength(declared.length));
-      expect(list.single.supportedFramerates, const [30]);
+
+      // The frame rates get the common ladder on top — that is the point of
+      // `withCommonBaseline` — so the assertion is about the *duplicate* being
+      // announced once, not about the list holding only what was measured.
+      final framerates = list.single.supportedFramerates;
+      expect(framerates.where((f) => f == 30), hasLength(1));
+      expect(framerates.toSet(), hasLength(framerates.length));
     });
 
     test('the current resolution and fps are always among the declared values', () {

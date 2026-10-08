@@ -103,7 +103,13 @@ void main() {
 
     test('a whitespace-only resolution counts as absent', () {
       // An operator form that leaves the field blank sends `""`.
-      for (final blank in <String>['', '   ', '\t']) {
+      //
+      // The tab is written as the **JSON escape** `\t`, not as a raw tab. A raw
+      // control character inside a JSON string is not valid JSON at all —
+      // `jsonDecode` rejects the whole frame — so a raw one would test the
+      // parser's JSON handling rather than this rule. It cost a test failure to
+      // notice, which is why `tool/verify_pure.dart` pins that behaviour too.
+      for (final blank in <String>['', '   ', '\\t', ' \\t ']) {
         final cmd =
             parseDeviceCommand(
                   '{"channel":"control","type":"switch_camera","id":"e",'
