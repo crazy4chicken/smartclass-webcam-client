@@ -28,9 +28,13 @@ git push origin v1.0.0
 
 ## 前置：一个 gate
 
-`verify` job 先跑 `dart run tool/verify_pure.dart`（399 项断言）和 `flutter test`，
+`verify` job 先跑 `dart run tool/verify_pure.dart`（586 项断言）和 `flutter test`，
 全绿才开始构建。任何一项挂了，四个平台都不会出包 —— 这是有意的，
 但如果你确实要在测试红的情况下出包，把 `build.needs: verify` 删掉即可。
+
+`flutter test` 会自动带上 `test/` 下的新文件，所以新增测试**不需要动流水线**；
+`tool/verify_pure.dart` 同理（它是纯 Dart，不需要 Flutter 引擎，但 job 里已经有 Flutter 了）。
+流水线里唯一写死的路径就是这两个。
 
 ## 可选：Android 正式签名
 
