@@ -1,5 +1,11 @@
 # Android 客户端 × smartclass-webcam-server 端到端联调测试计划
 
+> **✅ 已通过（T0–T8）。** 真机（`V2405A`，Android 16）× 真实服务端跑通一整轮，
+> 含字节级校验。落地产物：`docs/android-setup.md`、`tool/e2e/`、README 的
+> 「端到端联调环境」一节。详见 `docs/implementation-status.md`。
+>
+> ⚠️ 注意：该轮通过的是**基础链路**；2026-10-07 加入的能力探测（T8/T9）**未在此覆盖**。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在本机起一个真实的 `smartclass-webcam-server`，让 Android 客户端注册、挂载并保持连接，再由服务端下发 `switch_camera` / `start_recording` / `stop_recording` / `take_photo` 四类命令去控制它，验证到**字节级**：客户端上传的帧确实落到了对象存储，且能被解出来。

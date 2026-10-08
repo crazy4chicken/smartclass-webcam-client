@@ -1,5 +1,14 @@
 # 运行时可配置后端参数（设置界面）Implementation Plan
 
+> **✅ 已实现（T1–T8）。** 提交 `81a0d1f`（主体）、`c8262de`（首轮 `flutter test` 的两个失败）、
+> `95ca378`（播种删凭据的真机 bug）。
+>
+> 两处**有意偏离计划**，都是 bug 修复而非取舍：`SettingsStore.load()` 拆成
+> `loadBaseUrl()` / `loadCredentials()`；`pause`/`resume` 改成对称的 unbind/bind。
+> 采集参数**有意不进设置界面**。
+> T8 真机验收**部分完成**（T8.3「401 恢复」未单独走）。
+> 详见 `docs/implementation-status.md`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让运营/实施人员在客户端界面上直接填写并切换后端参数，不再需要为每台设备重新编一个带 `--dart-define` 的包。范围覆盖**后端地址 + 设备凭据**（`device_id` / `device_token`），保存后立即写盘并强制重连。采集参数（fps / 分辨率 / 质量）**不在本次范围内**。

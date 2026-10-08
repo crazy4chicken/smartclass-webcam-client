@@ -1,5 +1,17 @@
 # Camera Capability Probe & Protocol v0.3.0 Adaptation
 
+> **✅ 已执行完毕（2026-10-08）。** T1–T9 全部落地，提交 `23e7495`…`8be70c7`，
+> 外加文档 `8c2b709`、测试修复 `dbd1135`、真机 bug 修复 `61504e9`。
+>
+> **本计划的逐任务实施报告（实现了什么、8 处有意偏离、与计划冲突的 1 处、
+> 未验证项与 deferred 清单）见
+> `docs/2026-10-07-camera-capability-probe-implementation.md`。**
+> 跨五个计划的总览见 `docs/implementation-status.md`。
+>
+> 本文中的 `- [ ]` 复选框**未逐个勾选（0/57）** —— 该计划是一次性执行的，
+> 其中 18 步是「跑 `flutter test` 期望 PASS」这类本机无法执行的步骤，
+> 逐个勾选会把它们标成已完成，反而不准。执行状态以上面那份报告为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Put the device's cameras into a canonical order, measure what each can actually do (resolutions + frame rates), persist that per camera set, announce it on `GET /ws/register`, and let the server drive the device's mode through the new `switch_camera` parameters and `start_recording.codec`.

@@ -1,5 +1,10 @@
 # 接入 smartclass-webcam-server（重写后端连接层）Implementation Plan
 
+> **✅ T1–T8 已实现，❌ T9 未做（有意）。** 这是现行后端层的来源。
+> T9（ffmpeg 编码通道）因命令式 API 无流式接口 + GPL-3.0 传染而**明确不做**，
+> 接入点已留在 `VideoEncoder` / `CodecProbe`；后果是 `supported_codec` 目前只有 `mjpeg`。
+> 详见 `docs/implementation-status.md`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把已完成的客户端接入真实的 `smartclass-webcam-server`。后端定稿的协议与原计划**完全不同**，本计划按后端实现重写 `lib/src/backend/` 全部内容，并连带改造协调器、采集侧 codec 词汇与配置装配。摄像头四层抽象（`CameraProvider` → `CameraBackend` → `CameraService` → `FrameSource`）保持不变。

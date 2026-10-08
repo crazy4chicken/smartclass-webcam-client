@@ -9,6 +9,9 @@
 **协议权威文档**是后端仓库的 `smartclass-webcam-server/docs/protocol/`
 （index / registration / transport / control / media），本客户端逐条对齐。
 
+> **五个计划各自的实施状态**（实现了什么、有意偏离了什么、明确没做什么、验证到什么程度）
+> 见 **`docs/implementation-status.md`**。作废的计划在其文件顶部有醒目标记。
+
 > ### 服务端是**另一个仓库**，不是本仓库的一部分
 >
 > 本仓库**只包含客户端**。`smartclass-webcam-server/` 若出现在工作区里，那只是一份
