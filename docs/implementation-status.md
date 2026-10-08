@@ -159,7 +159,7 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | 1 | T4：**两个键** `camera_capabilities_fingerprint` + `camera_capabilities_json` | **一个键 `camera_capabilities`**，存一个 JSON 对象 | `SharedPreferences.setString` 是**整份重写**，两次调用就是两次写盘，中间掉电会留下「新指纹 + 旧能力」—— 正是两键布局要防的错配。合成一个对象才真的原子。 |
 | 2 | T4：解析失败返回**空能力** | 返回 **null（= 重探）** | 空会让设备永远只声明「我正在用的那一对」并且**不再刷新**（命中一直在）。null 能自愈。 |
 | 3 | T2：`CameraRanker` 接口放在 `plugin_camera_ranker.dart` | 接口放在纯的 `camera_order.dart` | `ensureInventory` 要编排排序，必须保持 Flutter-free 才能在 `tool/verify_pure.dart` 里跑 —— 而编排逻辑（缓存命中、退化、排序失败回退）恰恰最值得跑。同样处理了 `CapabilityProbe` 与 `CameraEnumerator`。 |
-| 4 | T8：缓存命中「skips **both** the ranking and the probe」 | **跳不过排序**，只省探测 | 缓存键是**有序**摄像头集合，而顺序正是排序那趟的产出 —— 排序之前没有可用的键。实际省下的是每摄像头 8 次开合（9 → 1），仍是「开机一秒」和「每次开机对着摄像头闪十秒灯」的差别。 |
+| 4 | T8：缓存命中「skips **both** the ranking and the probe」 | ~~跳不过排序~~ → **已按计划实现** | 首版只省了探测（键是有序集合，而顺序来自排序，构成循环）。**已关闭**：改为对无序集合指纹化 + 把规范顺序存进缓存内容，命中时按名字映射回当前枚举、重算置换。现在命中零开合。 |
 | 5 | T8：指纹 = 有序摄像头名 | **有序名字 + enum** | 两台同型号 USB 摄像头在 Windows 上**枚举出同一个名字**，只用名字会让 1 号拿到 0 号的能力。这不是假设，是教室里的常见配置。 |
 | 6 | T7：codec 检查 = 是否在 `supported_codec` 里 | 用 `CaptureCodec.isIntraOnly` | 帧泵每帧都是一张自包含的图，需要帧间状态的 codec 根本编不出来。**声明是主张，错误的主张不能让设备 ack 一个它做不到的事。** |
 | 7 | T6：绝不静默忽略被请求的 codec / 分辨率 | `resolution` / `fps` / `codec` 一律**宽松解析成 null** | 拒绝 payload 会让命令**消失** → 协调器看不到 → **永远不 ack**，而服务端不重试 —— 运营侧只看到一个毫无反应的命令。**能用但设备做不到**的值仍然 `ok:false` 拒绝，那才是协议真正要防的。 |
@@ -210,9 +210,9 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 
 | 层 | 状态 | 说明 |
 | --- | --- | --- |
-| `dart run tool/verify_pure.dart` | ✅ **598 项断言全绿** | 本机**唯一能执行**的验证层。覆盖协议、注册、两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪、地址校验、能力算术、规范顺序、能力缓存、启动编排、构造顺序回归 |
+| `dart run tool/verify_pure.dart` | ✅ **652 项断言全绿** | 本机**唯一能执行**的验证层。覆盖协议、注册、两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪、地址校验、能力算术、规范顺序、能力缓存、启动编排、构造顺序回归、能力报告 |
 | `dart format` 闸门 | ✅ 干净 | `dart format --output=none --set-exit-if-changed lib test tool` |
-| 全量类型检查 | ✅ 干净 | 36 个文件，Python 驱动 `frontend_server_aot` 单次编译 |
+| 全量类型检查 | ✅ 干净 | 37 个编译单元，Python 驱动 `frontend_server_aot` 单次编译 |
 | `flutter test` | ⚠️ **本机跑不了** | Dart VM 在助手 shell 里创建不了子进程。最后一次运行 `+333 -2`，两个失败已在 `dbd1135` 修掉并镜像进 harness，**修后未再跑** |
 | 真机 · Android 端到端 | ⚠️ 部分 | 基础链路跑通过一整轮（见计划 4）。**但能力探测这一轮（T8/T9）没在真机上验过**，`61504e9` 的 kiosk 修复也待重出包确认 |
 | CI 四端出包 | ⚠️ 未确认 | `.github/workflows/release.yml` 已建，Android SDK 与 artifact 路径两个问题已修；远端已打 `v1.0.0`–`v1.0.3`，但运行结论本机看不到（GitHub API 限流、无 `gh`） |

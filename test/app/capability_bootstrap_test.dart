@@ -33,23 +33,23 @@ final Map<int, CameraCapabilities> _measured = {
 
 /// An in-memory [CapabilitiesStore].
 class _FakeStore implements CapabilitiesStore {
-  _FakeStore([Map<String, CameraCapabilities>? seed])
-    : entries = <String, CameraCapabilities>{...?seed};
+  _FakeStore([Map<String, CachedCapabilities>? seed])
+    : entries = <String, CachedCapabilities>{...?seed};
 
-  final Map<String, CameraCapabilities> entries;
+  final Map<String, CachedCapabilities> entries;
   final List<String> loads = <String>[];
   final List<String> saves = <String>[];
 
   @override
-  Future<CameraCapabilities?> load(String fingerprint) async {
+  Future<CachedCapabilities?> load(String fingerprint) async {
     loads.add(fingerprint);
     return entries[fingerprint];
   }
 
   @override
-  Future<void> save(String fingerprint, CameraCapabilities capabilities) async {
+  Future<void> save(String fingerprint, CachedCapabilities value) async {
     saves.add(fingerprint);
-    entries[fingerprint] = capabilities;
+    entries[fingerprint] = value;
   }
 
   @override
@@ -143,14 +143,20 @@ class _Probe implements CapabilityProbe {
   }
 }
 
-/// The keys a successful run should produce: the ordered names, per enum.
-List<String> _expectedKeys() {
-  final fingerprint = cameraFingerprint(const [
-    'USB Back B',
-    'USB Back A',
-    'Laptop Front',
-  ]);
-  return [for (var i = 0; i < 3; i++) capabilityCacheKey(fingerprint, i)];
+/// The fingerprint a successful run produces: one value for the whole set.
+String _expectedFingerprint() =>
+    cameraFingerprint(const ['USB Back B', 'USB Back A', 'Laptop Front']);
+
+/// A cache entry for the default camera set, in the canonical order a run
+/// produces.
+CachedCapabilities _cachedSet({CameraCapabilities? each}) {
+  final capabilities =
+      each ??
+      CameraCapabilities.of(resolutions: const [_vga], framerates: const [15]);
+  return CachedCapabilities(
+    order: const ['USB Back B', 'USB Back A', 'Laptop Front'],
+    byEnum: <CameraCapabilities>[for (var i = 0; i < 3; i++) capabilities],
+  );
 }
 
 void main() {
@@ -167,8 +173,7 @@ void main() {
     expect(h.rankedIndices, [0, 1, 2]);
 
     // Probed in *canonical* order: the two rear cameras by resolution, then the
-    // front one. The cache key is the ordered set, so the probe has to follow
-    // the same order the descriptors are in.
+    // front one.
     expect(h.probedIndices, [2, 1, 0]);
     expect(inventory.order, [2, 1, 0]);
   });
@@ -193,46 +198,41 @@ void main() {
     expect(inventory.capabilities, hasLength(3));
   });
 
-  test(
-    'capabilities are stored per camera, keyed by the ordered camera names',
-    () async {
-      final h = _Harness();
+  test('the whole set is stored as one entry, order included', () async {
+    final h = _Harness();
 
-      await h.run();
+    await h.run();
 
-      expect(h.store.saves, _expectedKeys());
-      expect(h.store.entries.keys.toSet(), _expectedKeys().toSet());
-      // Each entry is the *declared* form: the common ladder below the ceiling,
-      // with the current mode folded in.
-      final top = h.store.entries[_expectedKeys()[0]]!;
-      expect(top.resolutions.first, _fhd);
-      expect(top.resolutions, contains(_vga));
-      expect(top.framerates, contains(5));
-    },
-  );
+    // One save for the set. Saving per camera is what broke this: the store
+    // keeps one value, so the second camera's save evicted the first camera's.
+    expect(h.store.saves, [_expectedFingerprint()]);
+    expect(h.store.entries.keys, [_expectedFingerprint()]);
 
-  test('a cached set skips the probe', () async {
-    // The cache cannot skip the ranking: the key is the *ordered* camera set,
-    // and the order is what the ranking pass produces. What it saves is the
-    // probe — nine opens per camera against the ranker's one.
-    final store = _FakeStore();
-    for (final key in _expectedKeys()) {
-      store.entries[key] = CameraCapabilities.of(
-        resolutions: const [_vga],
-        framerates: const [15],
-      );
-    }
+    final entry = h.store.entries[_expectedFingerprint()]!;
+    expect(entry.order, ['USB Back B', 'USB Back A', 'Laptop Front']);
+    expect(entry.byEnum, hasLength(3));
+
+    // Each entry is the *declared* form: the common ladder below the ceiling,
+    // with the current mode folded in.
+    expect(entry.byEnum.first.resolutions.first, _fhd);
+    expect(entry.byEnum.first.resolutions, contains(_vga));
+    expect(entry.byEnum.first.framerates, contains(5));
+  });
+
+  test('a cached set opens nothing at all', () async {
+    // The whole point of the feature: the second launch of a kiosk must not
+    // flash its camera LED. The order travels inside the cached value, so
+    // neither the ranking pass nor the probe is needed.
+    final store = _FakeStore({_expectedFingerprint(): _cachedSet()});
 
     final h = _Harness(store: store);
     final inventory = await h.run();
 
-    expect(h.rankCalls, 1, reason: 'ranking cannot be skipped');
-    expect(
-      h.probedIndices,
-      isEmpty,
-      reason: 'the probe is what the cache saves',
-    );
-    expect(h.store.loads, _expectedKeys());
+    expect(h.store.loads, [_expectedFingerprint()]);
+    expect(h.rankCalls, 0, reason: 'ranking opens every camera once');
+    expect(h.probedIndices, isEmpty, reason: 'the probe opens them nine times');
+    expect(h.store.saves, isEmpty, reason: 'nothing to rewrite');
+    expect(inventory.order, [2, 1, 0]);
     expect(inventory.capabilities, hasLength(3));
     expect(
       inventory.capabilities.every((c) => c.framerates.contains(15)),
@@ -240,16 +240,38 @@ void main() {
     );
   });
 
+  test('a cached order that names an absent camera is a miss', () async {
+    // The fingerprint matches because the *set* matches, so this is the guard
+    // that catches a payload that cannot be applied to the hardware present.
+    final store = _FakeStore({
+      _expectedFingerprint(): CachedCapabilities(
+        order: const ['USB Back B', 'Ghost Camera', 'Laptop Front'],
+        byEnum: <CameraCapabilities>[
+          for (var i = 0; i < 3; i++) CameraCapabilities.empty,
+        ],
+      ),
+    });
+
+    final h = _Harness(store: store);
+    await h.run();
+
+    expect(h.rankCalls, 1);
+    expect(h.probedIndices, [2, 1, 0]);
+    expect(h.store.saves, [_expectedFingerprint()]);
+  });
+
   test('a different fingerprint re-ranks, re-orders and re-probes', () async {
     // A cache written for a different camera set. The extra camera is not even
     // present any more, which is the "USB webcam unplugged" case.
     final store = _FakeStore({
-      capabilityCacheKey(
-        cameraFingerprint(const ['Only Camera']),
-        0,
-      ): CameraCapabilities.of(
-        resolutions: const [_vga],
-        framerates: const [5],
+      cameraFingerprint(const ['Only Camera']): CachedCapabilities(
+        order: const ['Only Camera'],
+        byEnum: [
+          CameraCapabilities.of(
+            resolutions: const [_vga],
+            framerates: const [5],
+          ),
+        ],
       ),
     });
 
@@ -257,19 +279,13 @@ void main() {
     await h.run();
 
     expect(h.probedIndices, [2, 1, 0]);
-    expect(h.store.saves, _expectedKeys());
+    expect(h.store.saves, [_expectedFingerprint()]);
   });
 
   test('forceReprobe ignores the cache but still writes it', () async {
     // What the settings screen's re-detect button needs: measure again *and*
     // leave the next launch with the fresh answer.
-    final store = _FakeStore();
-    for (final key in _expectedKeys()) {
-      store.entries[key] = CameraCapabilities.of(
-        resolutions: const [_vga],
-        framerates: const [15],
-      );
-    }
+    final store = _FakeStore({_expectedFingerprint(): _cachedSet()});
 
     final h = _Harness(store: store);
     await h.run(forceReprobe: true);
@@ -280,9 +296,12 @@ void main() {
       reason: 'the cache is deliberately not read',
     );
     expect(h.probedIndices, [2, 1, 0]);
-    expect(h.store.saves, _expectedKeys());
+    expect(h.store.saves, [_expectedFingerprint()]);
     // The stored value is now the measurement, not the stale entry.
-    expect(h.store.entries[_expectedKeys()[0]]!.resolutions.first, _fhd);
+    expect(
+      h.store.entries[_expectedFingerprint()]!.byEnum.first.resolutions.first,
+      _fhd,
+    );
   });
 
   test('an empty probe result still yields a usable fallback for registration', () async {
@@ -334,9 +353,10 @@ void main() {
     expect(h.log.any((l) => l.contains('enumeration failed')), isTrue);
   });
 
-  test('two cameras sharing a name do not share a cache entry', () async {
-    // A pair of the same USB webcam enumerates under one name on Windows.
-    // Sharing an entry would give camera 1 camera 0's capabilities.
+  test('two cameras sharing a name keep their own measurements', () async {
+    // A pair of the same USB webcam enumerates under one name on Windows. They
+    // share one cache entry — they are one camera set — but the entry has to
+    // hold a distinct measurement per enum, or camera 1 would get camera 0's.
     const twins = [
       CameraDescriptor(name: 'USB Camera', index: 0, lensDirection: 'back'),
       CameraDescriptor(name: 'USB Camera', index: 1, lensDirection: 'back'),
@@ -363,10 +383,20 @@ void main() {
 
     // Both are `back` with different ceilings, so the stronger one is first.
     expect(inventory.order, [0, 1]);
-    expect(h.store.saves, hasLength(2));
-    expect(h.store.saves.toSet(), hasLength(2), reason: 'keys must differ');
+    expect(h.store.saves, hasLength(1));
+    expect(h.store.entries.values.single.byEnum, hasLength(2));
     expect(inventory.capabilities[0].resolutions.first, _fhd);
     expect(inventory.capabilities[1].resolutions.first, _vga);
+
+    // And the next launch is a hit for both of them. This is the case that was
+    // broken: one entry, two saves, so camera 0 was re-probed forever.
+    final again = _Harness(physical: twins, store: h.store);
+    final restored = await again.run();
+
+    expect(again.rankCalls, 0);
+    expect(again.probedIndices, isEmpty);
+    expect(restored.capabilities[0].resolutions.first, _fhd);
+    expect(restored.capabilities[1].resolutions.first, _vga);
   });
 
   test('a ranker that throws still yields a usable order', () async {

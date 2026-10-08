@@ -184,7 +184,7 @@ AgentCoordinator ── 命令驱动的状态机：每条命令都 ack，没收�
   capture/capability_probe ── CapabilityProbe 接口 + kProbeFramerates
   capture/plugin_camera_ranker ── 每个摄像头开一次拿上限
   capture/plugin_capability_probe ── 每档 preset 拍一张，从 JPEG 里读真实尺寸
-  config/capabilities_store ── 按「有序摄像头名 + enum」缓存，独立于 SettingsStore
+  config/capabilities_store ── 按「摄像头集合」缓存（一份，含规范顺序），独立于 SettingsStore
 
 config (纯 Dart，不依赖 Flutter)
   connection_settings ── ConnectionSettings / validateBaseUrl / resolveConnectionSettings
@@ -328,12 +328,22 @@ config (纯 Dart，不依赖 Flutter)
 | 排序 | 每个摄像头在 `max` 档开一次，读上限 | n 次开合 |
 | 探测 | 每个摄像头走 6 档 preset 各拍一张，再在最高分辨率上试 3 个帧率 | 9n 次开合 |
 
-结果按**「有序摄像头名 + enum」**缓存（`CapabilitiesStore`，与 `SettingsStore` **分开** ——
+结果按**摄像头集合**缓存，一份（`CapabilitiesStore`，与 `SettingsStore` **分开** ——
 `save()` 的语义是替换，把能力塞进 `ConnectionSettings` 会在每次探测后删掉设备凭据）。
 
-**缓存跳不过排序**：缓存键是"有序的摄像头集合"，而顺序正是排序那趟产出的，
-所以没有排序就没有键。缓存省下的是探测那 8n 次开合 —— 这已经是"开机一秒"和
-"每次开机对着摄像头闪十秒灯"的差别。
+**缓存命中 = 一次开合都没有。** 键是**无序**的摄像头名集合（排序后指纹化），
+而**规范顺序作为缓存内容的一部分**存下来 —— 命中时用它把「名字顺序」映射回当前枚举顺序，
+重新算出置换。键不能依赖顺序，否则就成了循环：算键要先排序，而排序正是缓存要省掉的开销。
+所以第二次启动：不排序、不探测，只有一次 `availableCameras()`。
+
+> 这里踩过一个真 bug：早先的实现**按摄像头逐个 key 存**，而 `shared_preferences`
+> 那边只留**一个** entry —— 于是后一个摄像头的 save 覆盖了前一个。
+> 双摄设备上 **0 号摄像头每次启动都未命中、永远重新探测**，正是"每次都检测"的现象。
+> 现在整个集合是一个值，这种表示法直接不存在了。
+
+**命中还要过一道置换校验**：缓存里的顺序是按**名字**匹配当前枚举的，每个名字必须不多不少
+对上一次。U 盘摄像头换个口枚举顺序就变了，复用旧**下标**会把 `camera_enum 0` 指到别的设备上。
+校验不过就当作未命中，重探。
 
 **排序规则**：`(group, -maxPixels, index)`，组顺序 = `CameraGroup` 的声明顺序
 （rear → external → front）。末尾的 `index` 是保稳用的，正因如此

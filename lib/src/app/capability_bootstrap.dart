@@ -47,25 +47,20 @@ class CameraInventory {
       '${capabilities.map((c) => c.resolutions.length).join('/')})';
 }
 
-/// The cache key for one camera: the ordered camera set, plus its enum.
-///
-/// The set half is what makes adding or re-ordering a camera invalidate the
-/// cache — `camera_enum` is positional, so a different set means a different
-/// meaning for index 0. The index half is what keeps two identical cameras
-/// apart: a pair of the same USB webcam enumerates under one name on Windows,
-/// and sharing a cache entry would give camera 1 camera 0's capabilities.
-String capabilityCacheKey(String setFingerprint, int cameraEnum) =>
-    '$setFingerprint#$cameraEnum';
-
 /// Produces the ordered camera list and its capabilities, from cache when it
 /// can.
 ///
-/// **Ranking always runs.** The cache key is the *ordered* camera set and the
-/// order comes out of the ranking pass, so there is nothing to key on until it
-/// has finished. What the cache saves is the probe: nine camera opens per
-/// camera against the ranker's one. That is still the difference between a
-/// kiosk that starts in a second and one that spends ten seconds flashing its
-/// camera LED at every boot.
+/// **A cache hit opens nothing.** The fingerprint is over the camera *set*, so
+/// it can be computed from the enumeration alone; the canonical order travels
+/// inside the cached value rather than being derived from it. That is what
+/// makes the second launch of a kiosk cheap: no ranking open per camera and no
+/// probe, so the camera LED does not flash at boot and the device is up in
+/// about the time `availableCameras()` takes.
+///
+/// Anything that would make the cached answer wrong is a miss, not a guess: a
+/// different set of names, a payload that will not parse, or an order that no
+/// longer matches the cameras actually present (see [_fromCache]). A miss
+/// re-probes everything.
 ///
 /// [forceReprobe] skips the cache read but still writes it, which is what the
 /// settings screen's "re-detect" button needs: it must measure again *and*
@@ -86,7 +81,31 @@ Future<CameraInventory> ensureInventory({
     return CameraInventory.empty;
   }
 
-  // 1. One open per camera, to learn each ceiling.
+  final fingerprint = cameraFingerprint(<String>[
+    for (final camera in physical) camera.name,
+  ]);
+
+  // 1. The cache, before anything is opened. A hit returns here.
+  if (!forceReprobe) {
+    final cached = await store.load(fingerprint);
+    if (cached != null) {
+      // A cache that cannot be applied degrades to a re-probe, never to a
+      // failed start. This is a kiosk's boot path, and the worst outcome
+      // available here is a device that does not come up because of a stale
+      // preference — so anything unexpected is treated as a miss and logged.
+      CameraInventory? restored;
+      try {
+        restored = _fromCache(cached: cached, physical: physical, log: log);
+      } catch (error) {
+        log?.call('[probe] cached entry could not be applied: $error');
+        restored = null;
+      }
+      if (restored != null) return restored;
+      log?.call('[probe] cached entry does not match the cameras present');
+    }
+  }
+
+  // 2. One open per camera, to learn each ceiling.
   final ranked = await _rank(ranker, physical, log);
   final order = canonicalCameraOrder(ranked);
   final descriptors = <CameraDescriptor>[
@@ -102,24 +121,9 @@ Future<CameraInventory> ensureInventory({
   ];
   log?.call('[probe] order: ${descriptors.map((d) => d.name).join(' → ')}');
 
-  // 2. The cache, keyed by the ordered set.
-  final setFingerprint = cameraFingerprint(<String>[
-    for (final descriptor in descriptors) descriptor.name,
-  ]);
-
+  // 3. The full probe, in canonical order.
   final capabilities = <CameraCapabilities>[];
   for (var announced = 0; announced < descriptors.length; announced++) {
-    final key = capabilityCacheKey(setFingerprint, announced);
-
-    if (!forceReprobe) {
-      final cached = await store.load(key);
-      if (cached != null) {
-        log?.call('[probe] $announced ${descriptors[announced].name}: cached');
-        capabilities.add(cached);
-        continue;
-      }
-    }
-
     final result = await probe.probe(order[announced]);
     log?.call(
       '[probe] $announced ${descriptors[announced].name}: '
@@ -129,23 +133,88 @@ Future<CameraInventory> ensureInventory({
     // The server rejects an empty list outright, so a probe that found nothing
     // must become "only what I am doing", never nothing. A kiosk that cannot
     // register is worse than one that declares less.
-    final declared = declaredCapabilities(
-      measured: result.capabilities,
-      currentResolution: fallbackResolution,
-      currentFps: fallbackFps,
+    capabilities.add(
+      declaredCapabilities(
+        measured: result.capabilities,
+        currentResolution: fallbackResolution,
+        currentFps: fallbackFps,
+      ),
     );
-
-    // Saved in its declared form. Re-applying the ladder on a later launch is
-    // idempotent — the ceiling is already in the list — so a cache hit and a
-    // fresh probe produce the same answer.
-    await store.save(key, declared);
-    capabilities.add(declared);
   }
+
+  // 4. Stored in its declared form. Re-applying the ladder on a later launch is
+  // idempotent — the ceiling is already in the list — so a cache hit and a
+  // fresh probe produce the same answer.
+  //
+  // One write for the whole set. Writing per camera against a store that keeps
+  // one entry is how the first camera came to be re-probed on every launch.
+  await store.save(
+    fingerprint,
+    CachedCapabilities(
+      order: <String>[for (final descriptor in descriptors) descriptor.name],
+      byEnum: capabilities,
+    ),
+  );
 
   return CameraInventory(
     descriptors: List<CameraDescriptor>.unmodifiable(descriptors),
     order: List<int>.unmodifiable(order),
     capabilities: List<CameraCapabilities>.unmodifiable(capabilities),
+  );
+}
+
+/// Rebuilds an inventory from a cache entry, or null when it cannot be trusted.
+///
+/// The check that matters is the last one: the cached order is matched **by
+/// name** against the cameras actually present, and every camera must be
+/// accounted for exactly once. A cached order is a list of names, and the
+/// permutation it implies is only valid for the enumeration it was measured
+/// against — a USB camera replugged into a different port comes back at a
+/// different index, and reusing the old permutation would point `camera_enum 0`
+/// at a different physical device.
+///
+/// Names, not indices, is what makes a reordered enumeration safe: the same two
+/// cameras in the opposite order still match, and the permutation is rebuilt
+/// against the new order.
+///
+/// Two cameras sharing a name are paired in enumeration order. That is the best
+/// available answer — they are indistinguishable to the platform — and it is
+/// stable, which is what matters for `camera_enum`.
+CameraInventory? _fromCache({
+  required CachedCapabilities cached,
+  required List<CameraDescriptor> physical,
+  void Function(String message)? log,
+}) {
+  if (cached.order.length != physical.length) return null;
+
+  final remaining = <int>[for (var i = 0; i < physical.length; i++) i];
+  final order = <int>[];
+  for (final name in cached.order) {
+    final at = remaining.indexWhere((i) => physical[i].name == name);
+    if (at < 0) return null;
+    order.add(remaining.removeAt(at));
+  }
+  if (remaining.isNotEmpty) return null;
+
+  log?.call(
+    '[probe] cached: ${cached.order.join(' → ')} '
+    '(nothing opened)',
+  );
+
+  return CameraInventory(
+    descriptors: List<CameraDescriptor>.unmodifiable(<CameraDescriptor>[
+      for (var announced = 0; announced < order.length; announced++)
+        CameraDescriptor(
+          name: physical[order[announced]].name,
+          index: announced,
+          lensDirection: physical[order[announced]].lensDirection,
+        ),
+    ]),
+    order: List<int>.unmodifiable(order),
+    // Wrapped rather than passed through: `CachedCapabilities` can be built by
+    // hand with a growable list, and `CameraInventory` promises its lists are
+    // unmodifiable.
+    capabilities: List<CameraCapabilities>.unmodifiable(cached.byEnum),
   );
 }
 

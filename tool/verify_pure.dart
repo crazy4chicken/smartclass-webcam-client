@@ -2473,12 +2473,15 @@ void checkCapabilityCache() {
     cameraFingerprint(<String>['front']) !=
         cameraFingerprint(<String>['front', 'back']),
   );
-  // `camera_enum` is positional, so swapping two cameras changes what index 0
-  // means just as much as swapping the hardware does.
-  check(
-    'swapping two cameras changes the fingerprint',
-    cameraFingerprint(<String>['front', 'back']) !=
-        cameraFingerprint(<String>['back', 'front']),
+  // **Order-insensitive, and it has to be.** The canonical order is part of
+  // what gets cached, so the key cannot depend on it: building the key would
+  // then require ranking the cameras, which is the work the cache exists to
+  // skip. Two orderings of the same names are the same hardware — a USB camera
+  // replugged into another port enumerates differently and must still hit.
+  eq(
+    're-ordering the same cameras does not change the fingerprint',
+    cameraFingerprint(<String>['front', 'back']),
+    cameraFingerprint(<String>['back', 'front']),
   );
   // Names come from the platform and can contain anything, so the encoding is
   // length-prefixed rather than joined on a separator.
@@ -2491,10 +2494,70 @@ void checkCapabilityCache() {
     cameraFingerprint(<String>['a;1:b;']) !=
         cameraFingerprint(<String>['a', 'b']),
   );
+  check(
+    'and the length prefix survives sorting',
+    cameraFingerprint(<String>['a', 'b;']) !=
+        cameraFingerprint(<String>['a;1:b;']),
+  );
   eq(
     'an empty camera list has an empty fingerprint',
     cameraFingerprint(<String>[]),
     '',
+  );
+
+  // The cached value is one entry for the whole set, and it has to round-trip
+  // both halves — the capabilities *and* the order, because a hit has to
+  // reproduce `camera_enum` without opening anything.
+  const vga = CameraResolution(width: 640, height: 480);
+  final cached = CachedCapabilities(
+    order: const <String>['rear', 'front'],
+    byEnum: <CameraCapabilities>[
+      CameraCapabilities.of(
+        resolutions: <CameraResolution>[vga],
+        framerates: <int>[15],
+      ),
+      CameraCapabilities.of(
+        resolutions: <CameraResolution>[vga],
+        framerates: <int>[5],
+      ),
+    ],
+  );
+  final roundTripped = CachedCapabilities.fromJson(cached.toJson());
+  eq('the order round-trips', roundTripped.order.join(' → '), 'rear → front');
+  eq(
+    'and each camera keeps its own set',
+    roundTripped.byEnum.map((c) => c.framerates.join('/')).join('|'),
+    '15|5',
+  );
+  eq('a full entry is not empty', roundTripped.isEmpty, false);
+  eq(
+    'an absent payload is empty',
+    CachedCapabilities.fromJson(null).isEmpty,
+    true,
+  );
+  eq(
+    'a payload with no order is empty',
+    CachedCapabilities.fromJson(<String, Object?>{'cameras': <Object?>[]})
+        .isEmpty,
+    true,
+  );
+  // The two halves must agree: a payload where they disagree describes a camera
+  // set that does not exist, and applying it would put capabilities on the
+  // wrong enums.
+  eq(
+    'a payload whose halves disagree is rejected',
+    CachedCapabilities.fromJson(<String, Object?>{
+      'order': <String>['rear', 'front'],
+      'cameras': <Object?>[
+        <String, Object?>{'resolutions': <String>[], 'framerates': <int>[]},
+      ],
+    }).isEmpty,
+    true,
+  );
+  eq(
+    'a non-map payload is rejected',
+    CachedCapabilities.fromJson('not a map').isEmpty,
+    true,
   );
 
   // The probe contract itself is pure, so the harness covers the two constants
@@ -2564,23 +2627,23 @@ final Map<int, CameraCapabilities> _bootstrapMeasured =
 
 /// An in-memory [CapabilitiesStore].
 class _MemoryCapabilitiesStore implements CapabilitiesStore {
-  _MemoryCapabilitiesStore([Map<String, CameraCapabilities>? seed])
-    : entries = <String, CameraCapabilities>{...?seed};
+  _MemoryCapabilitiesStore([Map<String, CachedCapabilities>? seed])
+    : entries = <String, CachedCapabilities>{...?seed};
 
-  final Map<String, CameraCapabilities> entries;
+  final Map<String, CachedCapabilities> entries;
   final List<String> loads = <String>[];
   final List<String> saves = <String>[];
 
   @override
-  Future<CameraCapabilities?> load(String fingerprint) async {
+  Future<CachedCapabilities?> load(String fingerprint) async {
     loads.add(fingerprint);
     return entries[fingerprint];
   }
 
   @override
-  Future<void> save(String fingerprint, CameraCapabilities capabilities) async {
+  Future<void> save(String fingerprint, CachedCapabilities value) async {
     saves.add(fingerprint);
-    entries[fingerprint] = capabilities;
+    entries[fingerprint] = value;
   }
 
   @override
@@ -2672,16 +2735,37 @@ class _BootstrapProbe implements CapabilityProbe {
   }
 }
 
-/// The keys a successful run should produce: the ordered names, per enum.
-List<String> _bootstrapKeys() {
-  final fingerprint = cameraFingerprint(<String>[
+/// The fingerprint a run over the default camera set produces.
+///
+/// One value for the whole set — the cache is no longer keyed per camera, which
+/// is the point: per-camera keys against a single-entry store meant only the
+/// last camera was ever cached.
+String _bootstrapFingerprint() =>
+    cameraFingerprint(<String>['USB Back B', 'USB Back A', 'Laptop Front']);
+
+/// A cache entry for the default set, in the order a run produces.
+CachedCapabilities _bootstrapCached({
+  CameraCapabilities? each,
+  List<String> order = const <String>[
     'USB Back B',
     'USB Back A',
     'Laptop Front',
-  ]);
-  return <String>[
-    for (var i = 0; i < 3; i++) capabilityCacheKey(fingerprint, i),
-  ];
+  ],
+}) {
+  final capabilities =
+      each ??
+      CameraCapabilities.of(
+        resolutions: <CameraResolution>[
+          const CameraResolution(width: 640, height: 480),
+        ],
+        framerates: <int>[15],
+      );
+  return CachedCapabilities(
+    order: order,
+    byEnum: <CameraCapabilities>[
+      for (var i = 0; i < order.length; i++) capabilities,
+    ],
+  );
 }
 
 Future<void> checkCapabilityBootstrap() async {
@@ -2693,7 +2777,7 @@ Future<void> checkCapabilityBootstrap() async {
 
     eq('cameras are enumerated once', h.enumerateCalls, 1);
     eq('they are ranked once', h.rankCalls, 1);
-    // Probed in canonical order, because the cache key is the ordered set.
+    // Probed in canonical order.
     eq('the probe follows the canonical order', h.probed.join(','), '2,1,0');
     eq('and the permutation matches', inventory.order.join(','), '2,1,0');
 
@@ -2720,55 +2804,113 @@ Future<void> checkCapabilityBootstrap() async {
       '1920x1080',
     );
     eq(
-      'stored once per camera',
-      h.store.saves.join('|') == _bootstrapKeys().join('|'),
-      true,
+      'stored once for the whole set, not once per camera',
+      h.store.saves.join('|'),
+      _bootstrapFingerprint(),
+    );
+    eq(
+      'and the entry carries the order as well as the measurements',
+      h.store.entries[_bootstrapFingerprint()]?.order.join(' → '),
+      'USB Back B → USB Back A → Laptop Front',
     );
   }
 
   {
-    // A cache hit cannot skip the ranking — the key is the *ordered* set, and
-    // the order is what the ranking produces. It skips the probe, which is nine
-    // opens per camera against the ranker's one.
-    final store = _MemoryCapabilitiesStore();
-    for (final key in _bootstrapKeys()) {
-      store.entries[key] = CameraCapabilities.of(
-        resolutions: <CameraResolution>[
-          const CameraResolution(width: 640, height: 480),
-        ],
-        framerates: <int>[15],
-      );
-    }
+    // **The second launch.** A hit must open nothing at all — that is the whole
+    // feature: a kiosk that flashes its camera LED and takes ten seconds every
+    // boot is not caching anything.
+    final store = _MemoryCapabilitiesStore(<String, CachedCapabilities>{
+      _bootstrapFingerprint(): _bootstrapCached(),
+    });
 
     final h = _BootstrapHarness(store: store);
     final inventory = await h.run();
 
-    eq('ranking still runs on a cache hit', h.rankCalls, 1);
-    eq('the probe does not', h.probed.length, 0);
+    eq('the cache is read once, for the whole set', h.store.loads.length, 1);
+    eq('ranking does not run', h.rankCalls, 0);
+    eq('nothing is probed', h.probed.length, 0);
+    eq('nothing is written back', h.store.saves.length, 0);
+
+    // And the cached value still has to produce a usable inventory.
+    eq('every camera is still announced', inventory.descriptors.length, 3);
     eq(
-      'every camera was looked up',
-      h.store.loads.join('|') == _bootstrapKeys().join('|'),
-      true,
+      'in the order that was cached',
+      inventory.descriptors.map((d) => d.name).join(' → '),
+      'USB Back B → USB Back A → Laptop Front',
     );
+    eq('with the permutation to match', inventory.order.join(','), '2,1,0');
     eq(
-      'and the cached values are used',
+      'and the cached capabilities are used',
       inventory.capabilities.every((c) => c.framerates.contains(15)),
       true,
     );
   }
 
   {
+    // A replugged USB camera comes back at a different physical index. The
+    // cached order is a list of *names*, so it still applies — and the
+    // permutation has to be rebuilt against the new enumeration rather than
+    // reused. Reusing it would point camera_enum 0 at a different device.
+    final store = _MemoryCapabilitiesStore(<String, CachedCapabilities>{
+      _bootstrapFingerprint(): _bootstrapCached(),
+    });
+    final reordered = <CameraDescriptor>[
+      _bootstrapCameras[2],
+      _bootstrapCameras[0],
+      _bootstrapCameras[1],
+    ];
+
+    final h = _BootstrapHarness(store: store, cameras: reordered);
+    final inventory = await h.run();
+
+    eq('a reordered enumeration is still a hit', h.probed.length, 0);
+    eq(
+      'and the order follows the names, not the old indices',
+      inventory.descriptors.map((d) => d.name).join(' → '),
+      'USB Back B → USB Back A → Laptop Front',
+    );
+    // The physical list is now [USB Back B, Laptop Front, USB Back A], so the
+    // same announced order resolves to 0, 2, 1. Reusing the cached *indices*
+    // would have given 2, 1, 0 and pointed camera_enum 0 at the wrong device.
+    eq(
+      'so the permutation is rebuilt against the new enumeration',
+      inventory.order.join(','),
+      '0,2,1',
+    );
+  }
+
+  {
+    // A cache entry whose order names a camera that is no longer present. The
+    // fingerprint matched because the *set* matched — this is the guard that
+    // catches a payload that cannot be applied to the hardware in front of it.
+    final store = _MemoryCapabilitiesStore(<String, CachedCapabilities>{
+      _bootstrapFingerprint(): _bootstrapCached(
+        order: const <String>['USB Back B', 'USB Back A', 'Ghost Camera'],
+      ),
+    });
+
+    final h = _BootstrapHarness(store: store);
+    await h.run();
+
+    eq('an order naming an absent camera is a miss', h.rankCalls, 1);
+    eq('so everything is probed', h.probed.join(','), '2,1,0');
+    eq('and the cache is rewritten', h.store.saves.length, 1);
+  }
+
+  {
     // A cache written for a different camera set: the "USB webcam unplugged"
     // case.
-    final store = _MemoryCapabilitiesStore(<String, CameraCapabilities>{
-      capabilityCacheKey(
-        cameraFingerprint(<String>['Only Camera']),
-        0,
-      ): CameraCapabilities.of(
-        resolutions: <CameraResolution>[
-          const CameraResolution(width: 640, height: 480),
+    final store = _MemoryCapabilitiesStore(<String, CachedCapabilities>{
+      cameraFingerprint(<String>['Only Camera']): CachedCapabilities(
+        order: const <String>['Only Camera'],
+        byEnum: <CameraCapabilities>[
+          CameraCapabilities.of(
+            resolutions: <CameraResolution>[
+              const CameraResolution(width: 640, height: 480),
+            ],
+            framerates: <int>[5],
+          ),
         ],
-        framerates: <int>[5],
       ),
     });
 
@@ -2777,31 +2919,26 @@ Future<void> checkCapabilityBootstrap() async {
 
     eq('a stale fingerprint re-probes everything', h.probed.join(','), '2,1,0');
     eq(
-      'and rewrites the cache under the new keys',
-      h.store.saves.join('|') == _bootstrapKeys().join('|'),
-      true,
+      'and rewrites the cache under the new fingerprint',
+      h.store.saves.join('|'),
+      _bootstrapFingerprint(),
     );
   }
 
   {
     // What the settings screen's re-detect button needs: measure again *and*
     // leave the next launch with the fresh answer.
-    final store = _MemoryCapabilitiesStore();
-    for (final key in _bootstrapKeys()) {
-      store.entries[key] = CameraCapabilities.of(
-        resolutions: <CameraResolution>[
-          const CameraResolution(width: 640, height: 480),
-        ],
-        framerates: <int>[15],
-      );
-    }
+    final store = _MemoryCapabilitiesStore(<String, CachedCapabilities>{
+      _bootstrapFingerprint(): _bootstrapCached(),
+    });
 
     final h = _BootstrapHarness(store: store);
     final inventory = await h.run(forceReprobe: true);
 
     eq('a forced re-probe does not read the cache', h.store.loads.length, 0);
+    eq('it ranks again', h.rankCalls, 1);
     eq('it probes everything', h.probed.join(','), '2,1,0');
-    eq('and writes the fresh answer back', h.store.saves.length, 3);
+    eq('and writes the fresh answer back', h.store.saves.length, 1);
     eq(
       'so the stale entry is gone',
       inventory.capabilities.first.resolutions.first.label,
@@ -2934,12 +3071,33 @@ Future<void> checkCapabilityBootstrap() async {
       fallbackResolution: const CameraResolution(width: 640, height: 480),
     );
 
-    eq('two cameras with one name get two entries', h.store.saves.length, 2);
-    eq('under two different keys', h.store.saves.toSet().length, 2);
+    // One entry for the set, holding both cameras. Keying them separately is
+    // what made the first camera re-probe forever: the store keeps one value,
+    // so the second camera's save overwrote the first camera's.
+    eq('the twins are stored as one entry', h.store.saves.length, 1);
     eq(
-      'and each keeps its own capabilities',
+      'and the entry keeps one measurement per enum',
+      h.store.entries.values.single.byEnum.length,
+      2,
+    );
+    eq(
+      'so each keeps its own capabilities',
       '${inventory.capabilities[0].resolutions.first.label},'
           '${inventory.capabilities[1].resolutions.first.label}',
+      '1920x1080,640x480',
+    );
+
+    // And the whole point: the next launch is a hit for both of them. This is
+    // the case that was broken — two cameras, one entry, and only the last one
+    // stored.
+    final again = _BootstrapHarness(cameras: twins, store: h.store);
+    final restored = await again.run();
+    eq('the next launch opens nothing', again.probed.length, 0);
+    eq('and ranks nothing', again.rankCalls, 0);
+    eq(
+      'and both cameras come back with their own measurement',
+      '${restored.capabilities[0].resolutions.first.label},'
+          '${restored.capabilities[1].resolutions.first.label}',
       '1920x1080,640x480',
     );
   }

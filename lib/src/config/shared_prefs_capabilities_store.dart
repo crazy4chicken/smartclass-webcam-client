@@ -30,7 +30,7 @@ class SharedPrefsCapabilitiesStore implements CapabilitiesStore {
       _preferences ??= await SharedPreferences.getInstance();
 
   @override
-  Future<CameraCapabilities?> load(String fingerprint) async {
+  Future<CachedCapabilities?> load(String fingerprint) async {
     final prefs = await _prefs;
     final raw = prefs.getString(key);
     if (raw == null || raw.isEmpty) return null;
@@ -46,23 +46,27 @@ class SharedPrefsCapabilitiesStore implements CapabilitiesStore {
 
     if (decoded['fingerprint'] != fingerprint) return null;
 
-    final capabilities = CameraCapabilities.fromJson(decoded['capabilities']);
-    // Parsed but empty is the same story as unparseable: a camera that can do
-    // nothing is not a fact worth caching, and the server refuses an empty
-    // list outright.
-    if (capabilities.isEmpty) return null;
+    final cached = CachedCapabilities.fromJson(decoded['capabilities']);
+    // Parsed but unusable is the same story as unparseable: a cache that cannot
+    // describe a camera set is not worth acting on, and the server refuses an
+    // empty list outright.
+    if (cached.isEmpty) return null;
 
-    return capabilities;
+    return cached;
   }
 
   @override
-  Future<void> save(String fingerprint, CameraCapabilities capabilities) async {
+  Future<void> save(String fingerprint, CachedCapabilities value) async {
     final prefs = await _prefs;
+    // **One write for the whole camera set.** Writing per camera would mean N
+    // read-modify-write cycles, and a power cut between two of them would leave
+    // a set whose cameras were measured on different days — or, as happened
+    // once, only the last camera stored at all.
     await prefs.setString(
       key,
       jsonEncode(<String, Object?>{
         'fingerprint': fingerprint,
-        'capabilities': capabilities.toJson(),
+        'capabilities': value.toJson(),
       }),
     );
   }

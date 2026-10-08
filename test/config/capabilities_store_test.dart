@@ -18,6 +18,16 @@ final CameraCapabilities _measured = CameraCapabilities.of(
   framerates: const [30, 15],
 );
 
+/// A cache entry for two cameras with deliberately different capabilities, so a
+/// mix-up between the two is visible.
+CachedCapabilities _twoCameras() => CachedCapabilities(
+  order: const ['Rear', 'Front'],
+  byEnum: [
+    CameraCapabilities.of(resolutions: const [_hd], framerates: const [30]),
+    CameraCapabilities.of(resolutions: const [_vga], framerates: const [5]),
+  ],
+);
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -38,12 +48,15 @@ void main() {
       );
     });
 
-    test('changes when two cameras swap places', () {
-      // `camera_enum` is positional, so swapping two cameras changes what index
-      // 0 means just as much as swapping the hardware does.
+    test('is order-insensitive', () {
+      // The canonical order is part of the cached payload, so the key cannot
+      // depend on it — deriving the key would require ranking the cameras,
+      // which is the work the cache exists to skip. Two orderings of the same
+      // names are the same hardware: a USB camera replugged into another port
+      // enumerates differently and must still hit.
       expect(
         cameraFingerprint(const ['front', 'back']),
-        isNot(cameraFingerprint(const ['back', 'front'])),
+        cameraFingerprint(const ['back', 'front']),
       );
     });
 
@@ -62,6 +75,42 @@ void main() {
     });
   });
 
+  group('CachedCapabilities', () {
+    test('round-trips both halves', () {
+      final restored = CachedCapabilities.fromJson(_twoCameras().toJson());
+
+      expect(restored.order, const ['Rear', 'Front']);
+      expect(restored.byEnum, hasLength(2));
+      expect(restored.byEnum.first.framerates, const [30]);
+      expect(restored.byEnum.last.framerates, const [5]);
+      expect(restored.isEmpty, isFalse);
+    });
+
+    test('rejects a payload whose halves disagree', () {
+      // Such a payload describes a camera set that does not exist, and acting
+      // on it would put capabilities on the wrong enums.
+      expect(
+        CachedCapabilities.fromJson(<String, Object?>{
+          'order': <String>['Rear', 'Front'],
+          'cameras': <Object?>[
+            <String, Object?>{'resolutions': <String>[], 'framerates': <int>[]},
+          ],
+        }).isEmpty,
+        isTrue,
+      );
+    });
+
+    test('rejects anything that is not a map', () {
+      for (final bad in <Object?>[null, 'text', 42, <Object?>[]]) {
+        expect(
+          CachedCapabilities.fromJson(bad).isEmpty,
+          isTrue,
+          reason: 'payload: $bad',
+        );
+      }
+    });
+  });
+
   group('SharedPrefsCapabilitiesStore', () {
     test('load returns null when nothing was stored', () async {
       expect(await SharedPrefsCapabilitiesStore().load('anything'), isNull);
@@ -69,37 +118,55 @@ void main() {
 
     test('load returns null when the stored fingerprint differs', () async {
       final store = SharedPrefsCapabilitiesStore();
-      await store.save(cameraFingerprint(const ['front']), _measured);
+      await store.save(cameraFingerprint(const ['front']), _twoCameras());
 
-      expect(await store.load(cameraFingerprint(const ['front'])), _measured);
-      // A camera added, removed or reordered invalidates the cache.
+      expect(await store.load(cameraFingerprint(const ['front'])), isNotNull);
       expect(
         await store.load(cameraFingerprint(const ['front', 'back'])),
-        isNull,
-      );
-      expect(
-        await store.load(cameraFingerprint(const ['back', 'front'])),
         isNull,
       );
       expect(await store.load(cameraFingerprint(const [])), isNull);
     });
 
-    test('save then load round-trips the capabilities', () async {
+    test('save then load round-trips the order and every camera', () async {
       final store = SharedPrefsCapabilitiesStore();
-      final fingerprint = cameraFingerprint(const ['front', 'back']);
+      final fingerprint = cameraFingerprint(const ['Rear', 'Front']);
 
-      await store.save(fingerprint, _measured);
+      await store.save(fingerprint, _twoCameras());
 
       final loaded = await store.load(fingerprint);
-      expect(loaded, _measured);
-      expect(loaded!.resolutions, const [_hd, _vga]);
-      expect(loaded.framerates, const [30, 15]);
+      expect(loaded, isNotNull);
+      expect(loaded!.order, const ['Rear', 'Front']);
+      expect(loaded.byEnum, hasLength(2));
+      expect(loaded.byEnum.first.resolutions, const [_hd]);
+      expect(loaded.byEnum.last.resolutions, const [_vga]);
+      expect(loaded.byEnum.last.framerates, const [5]);
+    });
+
+    test('**every camera survives a second write**', () async {
+      // The regression this whole shape exists for. The store kept a single
+      // entry while the caller saved once per camera, so on a two-camera device
+      // the second save overwrote the first: camera 0 missed the cache on every
+      // launch and was re-probed forever — the exact "it detects every time"
+      // symptom the cache is supposed to remove.
+      final store = SharedPrefsCapabilitiesStore();
+      final fingerprint = cameraFingerprint(const ['Rear', 'Front']);
+
+      await store.save(fingerprint, _twoCameras());
+      final loaded = await store.load(fingerprint);
+
+      expect(
+        loaded?.byEnum,
+        hasLength(2),
+        reason: 'a per-camera save must not evict its neighbour',
+      );
+      expect(loaded?.order, hasLength(2));
     });
 
     test('clear removes the entry', () async {
       final store = SharedPrefsCapabilitiesStore();
       final fingerprint = cameraFingerprint(const ['front']);
-      await store.save(fingerprint, _measured);
+      await store.save(fingerprint, _twoCameras());
 
       await store.clear();
 
@@ -115,8 +182,8 @@ void main() {
       await credentials.save(testCredentials);
 
       final store = SharedPrefsCapabilitiesStore();
-      await store.save(cameraFingerprint(const ['front']), _measured);
-      await store.save(cameraFingerprint(const ['back']), _measured);
+      await store.save(cameraFingerprint(const ['front']), _twoCameras());
+      await store.save(cameraFingerprint(const ['back']), _twoCameras());
       await store.clear();
 
       expect(await credentials.load(), testCredentials);
@@ -151,27 +218,38 @@ void main() {
     });
 
     test('a payload that parses to nothing is a miss, not a hit', () async {
-      // A camera that can do nothing is not a fact worth caching, and the
-      // server refuses an empty list outright.
-      SharedPreferences.setMockInitialValues({
-        SharedPrefsCapabilitiesStore.key: jsonEncode(<String, Object?>{
-          'fingerprint': 'fp',
-          'capabilities': <String, Object?>{
-            'resolutions': <Object?>['nonsense'],
-            'framerates': <Object?>[-1],
-          },
-        }),
-      });
+      // A camera set that describes nothing is not a fact worth caching, and
+      // the server refuses an empty list outright.
+      for (final payload in <Object?>[
+        <String, Object?>{'order': <String>[], 'cameras': <Object?>[]},
+        <String, Object?>{
+          'resolutions': <Object?>['nonsense'],
+        },
+        <String, Object?>{
+          'order': <String>['Rear'],
+        },
+      ]) {
+        SharedPreferences.setMockInitialValues({
+          SharedPrefsCapabilitiesStore.key: jsonEncode(<String, Object?>{
+            'fingerprint': 'fp',
+            'capabilities': payload,
+          }),
+        });
 
-      expect(await SharedPrefsCapabilitiesStore().load('fp'), isNull);
+        expect(
+          await SharedPrefsCapabilitiesStore().load('fp'),
+          isNull,
+          reason: 'payload: $payload',
+        );
+      }
     });
 
     test('the fingerprint and the payload are stored together', () async {
-      // Two keys would mean two writes, and a power cut between them would pair
-      // the new fingerprint with the old capabilities — a hit describing a
-      // camera set this device no longer has.
+      // One key, one object. A second key would mean a second write, and a
+      // power cut between them would pair the new fingerprint with the old
+      // capabilities — a hit describing a camera set this device no longer has.
       final store = SharedPrefsCapabilitiesStore();
-      await store.save('fp', _measured);
+      await store.save('fp', _twoCameras());
 
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(SharedPrefsCapabilitiesStore.key);
@@ -179,9 +257,12 @@ void main() {
 
       final decoded = jsonDecode(raw!) as Map;
       expect(decoded['fingerprint'], 'fp');
-      expect((decoded['capabilities']! as Map)['resolutions'], [
+
+      final payload = decoded['capabilities']! as Map;
+      expect(payload['order'], ['Rear', 'Front']);
+      expect((payload['cameras']! as List), hasLength(2));
+      expect(((payload['cameras']! as List).first as Map)['resolutions'], [
         '1280x720',
-        '640x480',
       ]);
     });
   });

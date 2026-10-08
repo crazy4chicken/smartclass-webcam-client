@@ -6,7 +6,9 @@
 > **验证基线**：`dart run tool/verify_pure.dart` → **598 项断言全绿**；
 > `dart format` 干净；类型检查 36 个编译单元干净
 > （`lib/main.dart` 为入口传递覆盖整个 `lib/`，外加 34 个 `test/` 文件与 `tool/verify_pure.dart`）。
-> 本文的数字都对应上面那个 HEAD；此后新增的功能不在本计划范围内。
+>
+> **后续修订**：偏离 #4（缓存命中跳不过排序）已由后续提交关闭，断言数随之到 **652**
+> （37 个编译单元）。§四 的表格里标注了，§九 的验证表也已更新。其余数字仍对应上面那个 HEAD。
 
 ---
 
@@ -252,7 +254,7 @@ Windows（全 `front`）/ Linux（全 `external`）退化为纯分辨率序这�
 | 1 | T4：**两个键** `camera_capabilities_fingerprint` + `camera_capabilities_json` | **一个键 `camera_capabilities`**，存一个 JSON 对象 | `SharedPreferences.setString` 是**整份重写**，两次调用就是两次写盘，中间掉电会留下「新指纹 + 旧能力」—— 正是双键布局要防的错配。合成一个对象才真的原子。 |
 | 2 | T4：解析失败返回**空能力** | 返回 **null（= 重探）** | 空会让设备永远只声明「我正在用的那一对」并且**不再刷新**（命中一直在）。null 能自愈。 |
 | 3 | T2：`CameraRanker` 接口放在 `plugin_camera_ranker.dart` | 接口放在纯的 `camera_order.dart` | `ensureInventory` 要编排排序，必须保持 Flutter-free 才能在 harness 里跑 —— 而编排逻辑（缓存命中、退化、排序失败回退）恰恰最值得跑。同样处理了 `CapabilityProbe` 与 `CameraEnumerator`。 |
-| 4 | T8：缓存命中「skips **both** the ranking and the probe」 | **跳不过排序**，只省探测 | 缓存键是**有序**摄像头集合，而顺序正是排序那趟的产出 —— 排序之前没有可用的键。实际省下的是每摄像头 8 次开合（9 → 1），仍是「开机一秒」与「每次开机对着摄像头闪十秒灯」的差别。 |
+| 4 | T8：缓存命中「skips **both** the ranking and the probe」 | ~~跳不过排序~~ → **已按计划实现**（见下方补充） | 首版实现里缓存键是**有序**摄像头集合，而顺序正是排序那趟的产出 —— 排序之前没有可用的键，所以只省了探测。**这条偏离已关闭**：改成对**无序**集合指纹化，并把规范顺序作为缓存内容的一部分存下来，命中时按名字映射回当前枚举顺序、重新算出置换。现在命中确实一次开合都没有。 |
 | 5 | T8：指纹 = 有序摄像头名 | **有序名字 + enum**（`<setFingerprint>#<cameraEnum>`） | 两台同型号 USB 摄像头在 Windows 上**枚举出同一个名字**，只用名字会让 1 号拿到 0 号的能力。这不是假设，是教室里的常见配置。 |
 | 6 | T7：codec 检查 = 是否在 `supported_codec` 里 | 用 `CaptureCodec.isIntraOnly` | 帧泵每帧都是一张自包含的图，需要帧间状态的 codec 根本编不出来。**声明是主张，错误的主张不能让设备 ack 一个它做不到的事。** |
 | 7 | T6：绝不静默忽略被请求的 codec / 分辨率 | `resolution` / `fps` / `codec` 一律**宽松解析成 null** | 拒绝 payload 会让命令**消失** → 协调器看不到 → **永远不 ack**，而服务端不重试 —— 运营侧只看到一个毫无反应的命令。**能用但设备做不到**的值仍然 `ok:false` 拒绝，那才是协议真正要防的。见 §五。 |
@@ -341,6 +343,31 @@ Windows（全 `front`）/ Linux（全 `external`）退化为纯分辨率序这�
 
 ### 3. T9 的 `adoptInventory` 改走 `reconfigure()`（见 §二 T9）
 
+摄像头清单是在**构造 gateway 时**烘进去的，所以在同一个实例上重新注册只会把旧清单再发一遍。
+最初写成 `start()`，断言 `factory.built.length` 从 1 变 2 才抓住它。
+
+### 4. 用户报「每次启动都在检测分辨率」→ 能力缓存**只存了最后一个摄像头**
+
+用户第二次报同一个问题时才挖到底：缓存**看起来**在工作（有 save、有 load），
+但**双摄设备上 0 号摄像头每次启动都未命中**。
+
+根因是两半各自都对、合起来错：`ensureInventory` **按摄像头逐个 `save()`**（key =
+`<集合指纹>#<enum>`），而 `SharedPrefsCapabilitiesStore` **只维护一个 entry**。
+于是第二个摄像头的 save 覆盖了第一个，下次启动 `load(key0)` 指纹不匹配 → 未命中 → 重探。
+
+**修法**：整个摄像头集合变成**一个值**（`CachedCapabilities{order, byEnum}`），
+一次 save 写完整套 —— 那种表示法从此不存在。同时把**规范顺序**也存进缓存，
+命中时按名字映射回当前枚举、重算置换，于是**缓存命中真的零开合**（排序那趟也省掉了），
+偏离 #4 随之关闭。
+
+顺带修掉一个健壮性问题：`_fromCache` 的异常现在被当作**未命中**而不是向上抛 ——
+启动路径上，一份坏缓存绝不能让设备起不来。
+
+**这一条为什么会漏过去**：harness 和 widget test 用的都是 `Map` 替身，
+天然支持多 entry；只有真的 `shared_preferences` 实现是单 entry。
+**测试替身和真实现的语义差一点，bug 就整个藏进去了。**
+补的回归断言跑在 `SharedPrefsCapabilitiesStore` 上，不是替身上。
+
 ---
 
 ## 八、没有实现的
@@ -367,7 +394,7 @@ Windows（全 `front`）/ Linux（全 `external`）退化为纯分辨率序这�
 
 | 层 | 状态 | 说明 |
 | --- | --- | --- |
-| `dart run tool/verify_pure.dart` | ✅ **598 项断言全绿** | 本机**唯一能执行**的验证层 |
+| `dart run tool/verify_pure.dart` | ✅ **598 项断言全绿**（后续修订后 **652**） | 本机**唯一能执行**的验证层 |
 | `dart format` 闸门 | ✅ 干净 | `--output=none --set-exit-if-changed lib test tool` |
 | 全量类型检查 | ✅ 干净 | 36 个编译单元：`lib/main.dart`（传递覆盖全部 `lib/`）+ 34 个 `test/` 文件 + `tool/verify_pure.dart` |
 | `flutter test` | ⚠️ **本机跑不了** | 最后运行 `+333 -2`；两个失败已在 `dbd1135` 修掉并镜像进 harness，**修后未再跑** |
@@ -388,6 +415,14 @@ Windows（全 `front`）/ Linux（全 `external`）退化为纯分辨率序这�
 | `adoptInventory` 改回 `start()` | 5 |
 | `adoptInventory` 不先释放摄像头 | 1 |
 | gateway 改回构造时读摄像头清单 | 2 |
+| 缓存顺序按位置套用（不按名字匹配） | 7 |
+| 指纹重新变成顺序敏感（去掉排序） | 7 |
+| 缓存载荷的两半长度不一致仍被接受（同时弱化 `isEmpty`） | 1 |
+
+> 有一条变异是**等价变异**，值得记下来：去掉 `_fromCache` 里「名字找不到就返回 null」
+> 那道守卫，行为**不变** —— 因为 `removeAt(-1)` 会抛，而 `ensureInventory` 现在把
+> `_fromCache` 的异常也当作未命中（见下）。两道防线都通向"重探"，所以没有可观察差异。
+> 守卫仍然保留：让控制流走显式分支，而不是靠异常。
 
 ---
 
