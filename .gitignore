@@ -54,3 +54,6 @@ output_temp.txt
 android/key.properties
 *.jks
 *.keystore
+
+# Scratch output the human pastes back (e.g. `flutter test` runs).
+temp_output.txt
