@@ -11,6 +11,7 @@
 
 #include "camera.h"
 #include "device_enumerator.h"
+#include "encoded_stream_handler.h"
 #include "pipewire_portal.h"
 
 int64_t camera_desktop_ffi_register_stream_handle(Camera* camera);
@@ -95,6 +96,27 @@ static void handle_get_platform_capabilities(FlMethodCall* method_call) {
                            fl_value_new_bool(true));
   fl_value_set_string_take(result, "supportsVideoBitrateControl",
                            fl_value_new_bool(true));
+  fl_method_call_respond_success(method_call, result, nullptr);
+}
+
+// Which codecs this machine can actually encode.
+//
+// Answered without a camera: registration has to know what is worth
+// announcing before any recording is commanded, and a device that never opens
+// a camera still has to answer. A machine with no encoder for a codec says so
+// rather than failing — announcing H.264 only is a correct answer, and the
+// device always has `mjpeg` on top of whatever comes back.
+//
+// Reported as a map of wire name -> bool rather than a list, matching
+// `getPlatformCapabilities`: the same two value constructors, and a codec the
+// device has never heard of is simply absent instead of a lookup that misses.
+static void handle_available_encoders(FlMethodCall* method_call) {
+  const std::vector<std::string> codecs =
+      EncodedStreamHandler::AvailableEncoders();
+  g_autoptr(FlValue) result = fl_value_new_map();
+  for (const std::string& codec : codecs) {
+    fl_value_set_string_take(result, codec.c_str(), fl_value_new_bool(true));
+  }
   fl_method_call_respond_success(method_call, result, nullptr);
 }
 
@@ -374,6 +396,8 @@ static void camera_desktop_plugin_handle_method_call(
     handle_available_cameras(self, method_call);
   } else if (strcmp(method, "getPlatformCapabilities") == 0) {
     handle_get_platform_capabilities(method_call);
+  } else if (strcmp(method, "availableEncoders") == 0) {
+    handle_available_encoders(method_call);
   } else if (strcmp(method, "create") == 0) {
     handle_create(self, method_call);
   } else if (strcmp(method, "initialize") == 0) {
