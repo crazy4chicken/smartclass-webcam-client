@@ -34,10 +34,15 @@ class EncodedFrame {
 
 /// Turns camera frames into encoded frames of one [codec].
 ///
-/// This is the seam the H.265/H.264 work plugs into. Today the only
-/// implementation is [MjpegEncoder], which is not a placeholder: the server's
-/// `mjpeg` codec is defined as "one JPEG picture per `recording.frame`", and
-/// that is exactly what the still-picture path produces.
+/// Two implementations, and the difference between them is where the encoding
+/// happens. [MjpegEncoder] takes JPEGs off the still-picture path — not a
+/// placeholder, since a JPEG *is* an mjpeg frame — and is capped by the cost of
+/// `takePicture()` at roughly 5-10 fps at 1080p. [NativeVideoEncoder] receives
+/// bytes a native plugin has already encoded, which is the only way past that
+/// ceiling, because the limit is in the capture path and not in the codec.
+///
+/// Which one a recording gets is the coordinator's choice, made per stream
+/// from the codec the server asked for and what the device measurably holds.
 abstract interface class VideoEncoder {
   CaptureCodec get codec;
 

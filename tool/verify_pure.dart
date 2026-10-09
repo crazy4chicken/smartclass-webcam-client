@@ -43,6 +43,7 @@ import 'package:webcam_client/src/capture/codec_probe.dart';
 import 'package:webcam_client/src/capture/frame_pump.dart';
 import 'package:webcam_client/src/capture/frame_store.dart';
 import 'package:webcam_client/src/capture/jpeg.dart';
+import 'package:webcam_client/src/capture/native_video_encoder.dart';
 import 'package:webcam_client/src/capture/resolution_selector.dart';
 import 'package:webcam_client/src/capture/serial_lock.dart';
 import 'package:webcam_client/src/capture/stream_settings.dart';
@@ -313,6 +314,78 @@ class _FakeFramePump implements FramePump {
   Future<void> stop() async => stopCalls++;
 
   void emit(CapturedFrame frame) => _controller.add(frame);
+}
+
+/// One H.264 NAL of [type], start code included.
+///
+/// Only the type matters to the splitter, so `nal_ref_idc` is left at zero and
+/// [type] goes into the header byte as-is.
+Uint8List _h264Nal(int type, List<int> payload, {bool fourByte = true}) =>
+    Uint8List.fromList(<int>[
+      if (fourByte) 0x00,
+      0x00,
+      0x00,
+      0x01,
+      type,
+      ...payload,
+    ]);
+
+/// One HEVC NAL of [type]. The type sits in bits 1-6 of the header byte, not
+/// in the low five as in H.264.
+Uint8List _h265Nal(int type, List<int> payload) => Uint8List.fromList(<int>[
+  0x00,
+  0x00,
+  0x00,
+  0x01,
+  type << 1,
+  ...payload,
+]);
+
+Uint8List _cat(List<Uint8List> parts) => Uint8List.fromList(<int>[
+  for (final part in parts) ...part,
+]);
+
+/// A channel whose packets the test drives by hand.
+class _FakeEncodedChannel implements EncodedStreamChannel {
+  final StreamController<EncodedPacket> _controller =
+      StreamController<EncodedPacket>();
+
+  int openCalls = 0;
+  int closeCalls = 0;
+  int? lastCameraEnum;
+  int? lastWidth;
+  int? lastHeight;
+  int? lastFps;
+  int? lastQuality;
+
+  /// What the plugin pushes while flushing — that is, from inside [close].
+  Future<void> Function()? onClose;
+
+  @override
+  Future<Stream<EncodedPacket>> open({
+    required int cameraEnum,
+    required int width,
+    required int height,
+    required int fps,
+    required int quality,
+  }) async {
+    openCalls++;
+    lastCameraEnum = cameraEnum;
+    lastWidth = width;
+    lastHeight = height;
+    lastFps = fps;
+    lastQuality = quality;
+    return _controller.stream;
+  }
+
+  @override
+  Future<void> close() async {
+    closeCalls++;
+    await onClose?.call();
+    await _controller.close();
+  }
+
+  void emit(EncodedPacket packet) => _controller.add(packet);
 }
 
 /// A gateway that records everything the device hands it.
@@ -3547,6 +3620,176 @@ void checkMjpegEncoder() {
   });
 }
 
+void checkNativeVideoEncoder() {
+  section('native video encoder');
+
+  // A codec with no Annex B form has nothing to cut.
+  {
+    Object? error;
+    try {
+      NativeVideoEncoder(
+        codec: CaptureCodec.vp9,
+        cameraEnum: 0,
+        streamId: streamId,
+        channel: _FakeEncodedChannel(),
+      );
+    } catch (e) {
+      error = e;
+    }
+    check('a codec with no Annex B form is refused', error is ArgumentError);
+  }
+
+  fakeAsync((async) {
+    final sps = _h264Nal(7, [1, 2]);
+    final pps = _h264Nal(8, [3]);
+    final idr = _h264Nal(5, [4, 5, 6]);
+    final slice = _h264Nal(1, [7]);
+
+    final channel = _FakeEncodedChannel();
+    final encoder = NativeVideoEncoder(
+      codec: CaptureCodec.h264,
+      cameraEnum: 3,
+      streamId: streamId,
+      channel: channel,
+      clock: () => DateTime.utc(2026),
+    );
+    eq(
+      'the encoder advertises the codec it was built for',
+      encoder.codec,
+      CaptureCodec.h264,
+    );
+    eq('and the camera it is bound to', encoder.cameraEnum, 3);
+    eq('and the stream it feeds', encoder.streamId, streamId);
+
+    final received = <EncodedFrame>[];
+    encoder.frames.listen(received.add);
+
+    encoder.start(width: 1920, height: 1080, fps: 60, quality: 80);
+    async.flushMicrotasks();
+    eq('the channel was opened once', channel.openCalls, 1);
+    eq('for the bound camera', channel.lastCameraEnum, 3);
+    eq('at absolute pixels', '${channel.lastWidth}x${channel.lastHeight}', '1920x1080');
+    eq('and the declared rate', channel.lastFps, 60);
+    eq('a channel that was never opened is not closed', channel.closeCalls, 0);
+
+    // Parameter sets travel on their own and hold no picture.
+    channel.emit(EncodedPacket(bytes: _cat([sps, pps]), pictures: 0));
+    async.flushMicrotasks();
+    eq('parameter sets alone are not a frame', received.length, 0);
+
+    // The picture that follows them claims them, two packets later.
+    channel.emit(EncodedPacket(bytes: idr, pictures: 1));
+    async.flushMicrotasks();
+    eq('one frame per access unit', received.length, 1);
+    eqBytes(
+      'the parameter sets ride in front of the picture',
+      received.single.bytes,
+      _cat([sps, pps, idr]),
+    );
+    eq('an IDR is a key frame', received.single.isKeyFrame, true);
+    eq('seq starts at zero', received.single.seq, 0);
+    eq('the clock stamps the frame', received.single.ts, DateTime.utc(2026));
+
+    channel.emit(EncodedPacket(bytes: slice, pictures: 1));
+    async.flushMicrotasks();
+    eq('a second access unit is a second frame', received.length, 2);
+    eq('a predictive frame is not a key frame', received.last.isKeyFrame, false);
+    eq('seq advances', received.last.seq, 1);
+    eqBytes(
+      'and carries only its own bytes',
+      received.last.bytes,
+      slice,
+    );
+
+    // The count is the only cross-check Annex B allows. A packet holding two
+    // pictures while claiming one is not a stream anybody can decode.
+    channel.emit(EncodedPacket(bytes: _cat([idr, slice]), pictures: 1));
+    async.flushMicrotasks();
+    eq('a packet whose units disagree with its count is dropped whole', received.length, 2);
+    eq('the dropped packet is counted', encoder.droppedPackets, 1);
+    eq('and so are the units it was dropped for', encoder.droppedUnits, 2);
+
+    // The plugin flushes when told to stop, and that tail is the end of the
+    // recording — cancelling first would throw it away.
+    final trailing = _h264Nal(1, [9]);
+    channel.onClose = () async {
+      channel.emit(EncodedPacket(bytes: trailing, pictures: 1));
+    };
+    encoder.stop();
+    async.flushMicrotasks();
+    eq('the tail the plugin flushes still reaches the wire', received.length, 3);
+    eqBytes('as its own frame', received.last.bytes, trailing);
+    eq('stop closed the channel', channel.closeCalls, 1);
+
+    encoder.stop();
+    async.flushMicrotasks();
+    eq('stop is idempotent', channel.closeCalls, 1);
+  });
+
+  // Bytes nothing can be made of. Kept on their own stream: a start code whose
+  // NAL never arrives is held, and whatever follows it lands inside that NAL,
+  // so these are only meaningful as the last thing a stream ever says.
+  fakeAsync((async) {
+    final channel = _FakeEncodedChannel();
+    final encoder = NativeVideoEncoder(
+      codec: CaptureCodec.h264,
+      cameraEnum: 0,
+      streamId: streamId,
+      channel: channel,
+    );
+    final received = <EncodedFrame>[];
+    encoder.frames.listen(received.add);
+    encoder.start(width: 640, height: 480, fps: 15, quality: 60);
+    async.flushMicrotasks();
+
+    // Nothing to cut is not an error — it is simply not a frame.
+    channel.emit(
+      EncodedPacket(bytes: Uint8List.fromList([0x00, 0x00, 0x01]), pictures: 0),
+    );
+    async.flushMicrotasks();
+    eq('a start code with nothing behind it is not a frame', received.length, 0);
+    channel.emit(
+      EncodedPacket(bytes: Uint8List.fromList([0xAB, 0xCD, 0xEF]), pictures: 0),
+    );
+    async.flushMicrotasks();
+    eq('bytes with no start code are not a frame', received.length, 0);
+  });
+
+  // HEVC: a different header layout, the same rules.
+  fakeAsync((async) {
+    final vps = _h265Nal(32, [1]);
+    final sps = _h265Nal(33, [2]);
+    final pps = _h265Nal(34, [3]);
+    final idr = _h265Nal(19, [4]);
+
+    final channel = _FakeEncodedChannel();
+    final encoder = NativeVideoEncoder(
+      codec: CaptureCodec.h265,
+      cameraEnum: 0,
+      streamId: streamId,
+      channel: channel,
+    );
+    final received = <EncodedFrame>[];
+    encoder.frames.listen(received.add);
+    encoder.start(width: 1280, height: 720, fps: 30, quality: 70);
+    async.flushMicrotasks();
+
+    channel.emit(EncodedPacket(bytes: _cat([vps, sps, pps]), pictures: 0));
+    async.flushMicrotasks();
+    eq('an HEVC parameter-set run is not a frame', received.length, 0);
+
+    channel.emit(EncodedPacket(bytes: idr, pictures: 1));
+    async.flushMicrotasks();
+    eq('an HEVC IDR is one frame', received.length, 1);
+    eq('and a key frame', received.single.isKeyFrame, true);
+    eqBytes(
+      'with the VPS in front of it',
+      received.single.bytes,
+      _cat([vps, sps, pps, idr]),
+    );
+  });
+}
+
 Future<void> checkMockGateway() async {
   section('mock gateway');
   final gateway = MockBackendGateway(
@@ -5081,6 +5324,7 @@ Future<void> main() async {
   checkCapabilityReport();
   await checkCoordinatorCapabilityReport();
   checkMjpegEncoder();
+  checkNativeVideoEncoder();
   await checkCameraProvider();
   await checkFrameStore();
   await checkMockGateway();
