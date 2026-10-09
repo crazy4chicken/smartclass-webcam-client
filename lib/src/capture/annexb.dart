@@ -29,7 +29,7 @@ class AccessUnit {
   String toString() => 'AccessUnit(${bytes.length}B, key=$isKeyFrame)';
 }
 
-/// Splits an Annex B elementary stream into access units.
+/// Splits one complete Annex B stream into access units.
 ///
 /// Start codes are either `00 00 00 01` or `00 00 01`; both are recognised,
 /// and a 4-byte code is never mistaken for a 3-byte one. A NAL unit is
@@ -57,72 +57,153 @@ class AccessUnit {
 ///   HEVC's `first_slice_segment_in_pic_flag`, which this does not parse).
 ///   Without B-frames there is also no reordering, so emission order is
 ///   presentation order.
-/// * **A trailing tail with no VCL in it is dropped.** A buffer can end after
+/// * **A trailing tail with no VCL in it is dropped.** A stream can end after
 ///   the parameter sets but before the picture they belong to, and there is no
 ///   length prefix in Annex B to tell "complete" from "still arriving" — only
-///   the next start code does. So such a tail is never emitted; it is held
-///   back for the next buffer to complete. The server stores bytes verbatim
-///   and cannot spot a broken unit, so a partial one must never reach it.
+///   the next start code does. So such a tail is never emitted: it carries no
+///   picture, and the server stores bytes verbatim and cannot spot a broken
+///   unit, so a partial one must never reach it. It is **dropped, not held** —
+///   this function is stateless and there is no next buffer to hold it for.
+///
+/// That second point is why a caller whose stream arrives in pieces must use
+/// [AnnexBSplitter] instead. libavcodec emits SPS and PPS as AVPackets of
+/// their own, so the run that opens a key frame and the key frame itself
+/// easily land in two buffers: `splitAnnexB` on each one drops the parameter
+/// sets with the first call and emits the IDR without them on the second, and
+/// the server keeps a key frame no decoder can start from.
 ///
 /// [codec] selects the NAL header layout. Only [CaptureCodec.h264] and
 /// [CaptureCodec.h265] are Annex B; any other codec yields no units, because
 /// there is nothing to cut — an `mjpeg` frame is already one whole picture,
 /// and the remaining codecs have no Annex B form.
-List<AccessUnit> splitAnnexB(Uint8List bytes, {required CaptureCodec codec}) {
-  if (codec != CaptureCodec.h264 && codec != CaptureCodec.h265) {
-    return const <AccessUnit>[];
-  }
-  final bool hevc = codec == CaptureCodec.h265;
+List<AccessUnit> splitAnnexB(Uint8List bytes, {required CaptureCodec codec}) =>
+    AnnexBSplitter(codec: codec).add(bytes);
 
-  // Indexes of every start code, and of the first byte of the NAL after it.
-  final List<int> starts = <int>[];
-  final List<int> headers = <int>[];
-  var i = 0;
-  while (i + 3 <= bytes.length) {
-    if (bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1) {
-      // A 4-byte code matches here too, one byte late and with a zero in
-      // front: claim that zero so it is not read as a 3-byte code. (A NAL may
-      // not end in 0x00, so a zero here can only be part of the start code.)
-      final bool fourByte = i > 0 && bytes[i - 1] == 0;
-      starts.add(fourByte ? i - 1 : i);
-      headers.add(i + 3);
-      i += 3;
-    } else {
-      i++;
+/// Accumulates an Annex B byte *stream* across chunk boundaries.
+///
+/// [splitAnnexB] is this class fed once and thrown away. Use that when the
+/// whole stream is already in one buffer and this when it arrives in pieces —
+/// one encoder packet at a time, say. The cutting rules are the ones
+/// [splitAnnexB] documents; what [add] adds is memory:
+///
+/// * A run of parameter sets, SEI and AUD is held until a picture claims it,
+///   however many chunks it spans. A `[SPS][PPS]` chunk followed by an `[IDR]`
+///   chunk is one key frame, and this is what keeps it that way.
+/// * A NAL cut in half by a chunk boundary is put back together before it is
+///   classified, so where the boundary fell cannot change what the bytes mean.
+///
+/// Two things are deliberately *not* carried:
+///
+/// * **A chunk boundary closes the NAL it ends in.** The last NAL of a chunk
+///   is taken as complete, so an `[IDR]` chunk emits its unit straight away
+///   rather than waiting for a start code that may never arrive. A chunk must
+///   therefore not end inside a *picture* NAL: the rest of that NAL would
+///   arrive with no start code in front of it and be dropped. Non-VCL NALs are
+///   exempt — they are held as pending bytes, so a boundary inside a parameter
+///   set is fine. Chunks are encoder packets here, which is what makes the
+///   assumption safe.
+/// * **An unclaimed run is dropped.** There is no `flush()`: pending bytes
+///   only ever reach the caller as part of a unit, so a run the stream ends on
+///   goes away with the splitter. That is the point — bytes with no picture
+///   after them are not a unit, and a unit the server cannot decode is worse
+///   than a frame that never arrived.
+class AnnexBSplitter {
+  AnnexBSplitter({required this.codec});
+
+  /// Selects the NAL header layout. Only [CaptureCodec.h264] and
+  /// [CaptureCodec.h265] are Annex B; any other codec yields no units.
+  final CaptureCodec codec;
+
+  /// Bytes that belong to no emitted unit: the parameter sets, SEI and AUD
+  /// still waiting for a picture, and the head of a NAL a chunk boundary cut.
+  ///
+  /// Copied out of every chunk it is built from, so the caller may reuse the
+  /// buffer it passed to [add].
+  Uint8List _pending = Uint8List(0);
+
+  /// Feeds the next chunk and returns every access unit completed by it.
+  ///
+  /// Units come back in stream order and complete: a unit is returned once its
+  /// picture NAL is in hand, and bytes still waiting for that picture are held
+  /// for the next call.
+  List<AccessUnit> add(Uint8List chunk) {
+    if (codec != CaptureCodec.h264 && codec != CaptureCodec.h265) {
+      return const <AccessUnit>[];
     }
-  }
-  if (starts.isEmpty) return const <AccessUnit>[];
+    final bool hevc = codec == CaptureCodec.h265;
 
-  final List<AccessUnit> units = <AccessUnit>[];
-  // Where the run of not-yet-emitted non-VCL NALs starts. They belong to the
-  // picture that follows them, never to a unit of their own, so they stay
-  // pending until a VCL NAL claims them. NALs are contiguous — one ends where
-  // the next start code begins — so the pending run plus that picture is one
-  // unbroken slice of the input.
-  int? pendingStart;
-  for (var k = 0; k < starts.length; k++) {
-    final int start = starts[k];
-    final int header = headers[k];
-    final int end = k + 1 < starts.length ? starts[k + 1] : bytes.length;
-    // A start code with nothing behind it: the NAL it opens arrives in the
-    // next buffer, so there is no type to read and nothing to attribute.
-    if (header >= end) continue;
+    // Whatever is still open goes in front of this chunk, so a NAL the last
+    // boundary cut in half is whole again before anything is classified.
+    final Uint8List buffer = _pending.isEmpty
+        ? chunk
+        : Uint8List.fromList(<int>[..._pending, ...chunk]);
+    _pending = Uint8List(0);
 
-    final int type = hevc ? (bytes[header] >> 1) & 0x3F : bytes[header] & 0x1F;
-    if (_isVcl(type, hevc)) {
-      units.add(
-        AccessUnit(
-          bytes: bytes.sublist(pendingStart ?? start, end),
-          isKeyFrame: _isIdr(type, hevc),
-        ),
-      );
-      pendingStart = null;
-    } else {
-      pendingStart ??= start;
+    // Indexes of every start code, and of the first byte of the NAL after it.
+    final List<int> starts = <int>[];
+    final List<int> headers = <int>[];
+    var i = 0;
+    while (i + 3 <= buffer.length) {
+      if (buffer[i] == 0 && buffer[i + 1] == 0 && buffer[i + 2] == 1) {
+        // A 4-byte code matches here too, one byte late and with a zero in
+        // front: claim that zero so it is not read as a 3-byte code. (A NAL may
+        // not end in 0x00, so a zero here can only be part of the start code.)
+        final bool fourByte = i > 0 && buffer[i - 1] == 0;
+        starts.add(fourByte ? i - 1 : i);
+        headers.add(i + 3);
+        i += 3;
+      } else {
+        i++;
+      }
     }
+    // Not one start code in sight: either the tail of a NAL whose start code
+    // came in an earlier chunk, or bytes ahead of the first one. Held either
+    // way — the next chunk says which, and neither is a unit on its own.
+    if (starts.isEmpty) {
+      _pending = buffer.sublist(0);
+      return const <AccessUnit>[];
+    }
+
+    final List<AccessUnit> units = <AccessUnit>[];
+    // Where the run of not-yet-emitted non-VCL NALs starts. They belong to the
+    // picture that follows them, never to a unit of their own, so they stay
+    // pending until a VCL NAL claims them. NALs are contiguous — one ends where
+    // the next start code begins — so the pending run plus that picture is one
+    // unbroken slice of the input.
+    int? pendingStart;
+    for (var k = 0; k < starts.length; k++) {
+      final int start = starts[k];
+      final int header = headers[k];
+      final int end = k + 1 < starts.length ? starts[k + 1] : buffer.length;
+      // A start code with nothing behind it: the NAL it opens arrives in the
+      // next chunk, so there is no type to read and nothing to attribute.
+      // Holding the code itself is what makes those bytes land inside it.
+      if (header >= end) {
+        pendingStart ??= start;
+        continue;
+      }
+
+      final int type = hevc ? (buffer[header] >> 1) & 0x3F : buffer[header] & 0x1F;
+      if (_isVcl(type, hevc)) {
+        units.add(
+          AccessUnit(
+            bytes: buffer.sublist(pendingStart ?? start, end),
+            isKeyFrame: _isIdr(type, hevc),
+          ),
+        );
+        pendingStart = null;
+      } else {
+        pendingStart ??= start;
+      }
+    }
+    // Still pending: parameter sets whose picture has not arrived, or the head
+    // of a NAL this chunk ended inside. Carried into the next one; if the
+    // stream ends first, it is dropped with the splitter.
+    if (pendingStart != null) {
+      _pending = buffer.sublist(pendingStart);
+    }
+    return units;
   }
-  // Anything still pending is a tail with no picture after it: dropped.
-  return units;
 }
 
 /// True for NAL types that carry picture data: 0-31 in HEVC, 1-5 in H.264

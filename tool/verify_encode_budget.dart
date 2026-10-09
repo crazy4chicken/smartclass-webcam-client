@@ -1,36 +1,17 @@
-// Exercises the encoder-budget rules on a plain Dart VM.
+// Exercises the encoder-budget rules, folded into the single gate.
 //
-// `flutter test` cannot run in this environment, so this is a standalone
-// harness for the one module it covers. It is merged into
-// `tool/verify_pure.dart` separately — that file is one big `main()` with no
-// parts, so its helpers cannot be reused from here.
+// `flutter test` cannot run in this environment, so these run on a plain Dart
+// VM as part of `tool/verify_pure.dart` — the project's one gate:
 //
-//   dart run tool/verify_encode_budget.dart
+//   dart run tool/verify_pure.dart
 //
-// Exits non-zero if anything fails.
-import 'dart:io';
-
+// `check` and `eq` are the harness's, imported from there so every section
+// lands in the one pass/fail count.
 import 'package:webcam_client/src/capture/camera_resolution.dart';
 import 'package:webcam_client/src/capture/encode_budget.dart';
 import 'package:webcam_client/src/capture/stream_settings.dart';
 
-// --- harness ----------------------------------------------------------------
-
-int _passed = 0;
-final List<String> _failures = <String>[];
-
-void check(String name, bool condition) {
-  if (condition) {
-    _passed++;
-  } else {
-    _failures.add(name);
-    print('  FAIL: $name');
-  }
-}
-
-void eq(String name, Object? actual, Object? expected) {
-  check('$name  (got: $actual, want: $expected)', actual == expected);
-}
+import 'verify_pure.dart';
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -54,7 +35,7 @@ String _fmt(Map<CaptureCodec, List<int>> rates) => <String>[
 String _fmtCodecs(List<CaptureCodec> codecs) =>
     codecs.map((c) => c.wireName).join(',');
 
-void main() {
+void runEncodeBudgetChecks() {
   // --- 58 measured: declares up to 58, never 60 -----------------------------
   {
     final rates = sustainableRates(
@@ -288,16 +269,5 @@ void main() {
     eq('no samples: empty map', _fmt(rates), '');
     eq('no samples: no codecs', _fmtCodecs(sustainableCodecs(rates)), '');
     check('no samples: map is empty', rates.isEmpty);
-  }
-
-  // --- ---------------------------------------------------------------------
-  if (_failures.isEmpty) {
-    print('encode_budget: $_passed checks passed.');
-  } else {
-    print('encode_budget: ${_failures.length} FAILED, $_passed passed.');
-    for (final failure in _failures) {
-      print('  - $failure');
-    }
-    exit(1);
   }
 }

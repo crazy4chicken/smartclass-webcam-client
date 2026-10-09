@@ -1,46 +1,20 @@
-// Gate for `lib/src/capture/annexb.dart` on a plain Dart VM.
+// Checks for `lib/src/capture/annexb.dart`, folded into the single gate.
 //
-// `flutter test` cannot run in this environment, so this is a standalone
-// harness in the shape of `tool/verify_pure.dart`, trimmed to the ~10 lines of
-// preamble it needs. It exits non-zero if anything fails:
+// `flutter test` cannot run in this environment, so these run on a plain Dart
+// VM as part of `tool/verify_pure.dart` — the project's one gate:
 //
-//   dart run tool/verify_annexb.dart
+//   dart run tool/verify_pure.dart
+//
+// `check`, `eq`, `eqBytes` and `section` are the harness's, imported from
+// there so every section lands in the one pass/fail count.
 //
 // Every vector is handcrafted here: no fixture files, no golden blobs.
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:webcam_client/src/capture/annexb.dart';
 import 'package:webcam_client/src/capture/stream_settings.dart';
 
-// --- harness ----------------------------------------------------------------
-
-int passed = 0;
-final List<String> failures = <String>[];
-
-void check(String name, bool condition) {
-  if (condition) {
-    passed++;
-  } else {
-    failures.add(name);
-    print('  FAIL: $name');
-  }
-}
-
-void eq(String name, Object? actual, Object? expected) =>
-    check('$name  (got: $actual, want: $expected)', actual == expected);
-
-void eqBytes(String name, List<int> actual, List<int> expected) {
-  var same = actual.length == expected.length;
-  if (same) {
-    for (var i = 0; i < actual.length; i++) {
-      if (actual[i] != expected[i]) same = false;
-    }
-  }
-  check('$name  (got: $actual, want: $expected)', same);
-}
-
-void section(String name) => print(name);
+import 'verify_pure.dart';
 
 // --- NAL builders -----------------------------------------------------------
 //
@@ -322,9 +296,140 @@ void checkNonAnnexBCodec() {
       0,
     );
   }
+  eq(
+    'and yields nothing chunk by chunk either',
+    AnnexBSplitter(codec: CaptureCodec.mjpeg)
+        .add(u8(<int>[...sps, ...pps, ...idr]))
+        .length,
+    0,
+  );
 }
 
-void main() {
+// --- the chunked stream -----------------------------------------------------
+//
+// The case the module exists for: libavcodec emits SPS and PPS as AVPackets of
+// their own, so the run that opens a key frame and the key frame itself arrive
+// in two buffers. A stateless splitter drops the first and emits the second
+// without it, and the server — which stores frame bodies verbatim, with no
+// container — keeps a key frame no decoder can start from.
+
+void checkParameterSetsSurviveAChunk() {
+  section('parameter sets survive a chunk boundary');
+  final List<int> stream = <int>[...sps, ...pps, ...idr];
+  final AnnexBSplitter splitter = AnnexBSplitter(codec: CaptureCodec.h264);
+
+  eq(
+    'SPS+PPS alone claim nothing',
+    splitter.add(u8(<int>[...sps, ...pps])).length,
+    0,
+  );
+  final List<AccessUnit> units = splitter.add(u8(idr));
+  eq('the IDR closes one unit', units.length, 1);
+  if (units.length != 1) return;
+  check('and it is a key frame', units[0].isKeyFrame);
+  eqBytes('carrying SPS+PPS+IDR verbatim', units[0].bytes, stream);
+
+  // Same shape, three chunks: one parameter set per buffer, as libavcodec
+  // hands them out.
+  final perPacket = AnnexBSplitter(codec: CaptureCodec.h264);
+  eq('SPS alone', perPacket.add(u8(sps)).length, 0);
+  eq('PPS alone', perPacket.add(u8(pps)).length, 0);
+  final key = perPacket.add(u8(idr));
+  eq('IDR: one unit', key.length, 1);
+  if (key.length == 1) {
+    check('still a key frame', key[0].isKeyFrame);
+    eqBytes('still carrying all three NALs', key[0].bytes, stream);
+  }
+
+  // HEVC spreads the same way, three NALs deep.
+  final List<int> hevcStream = <int>[...hVps, ...hSps, ...hPps, ...hIdr];
+  final hevc = AnnexBSplitter(codec: CaptureCodec.h265);
+  eq(
+    'hevc: VPS+SPS+PPS claim nothing',
+    hevc.add(u8(<int>[...hVps, ...hSps, ...hPps])).length,
+    0,
+  );
+  final List<AccessUnit> hevcUnits = hevc.add(u8(hIdr));
+  eq('hevc: the IDR closes one unit', hevcUnits.length, 1);
+  if (hevcUnits.length == 1) {
+    check('hevc: and it is a key frame', hevcUnits[0].isKeyFrame);
+    eqBytes('hevc: carrying all four NALs', hevcUnits[0].bytes, hevcStream);
+  }
+}
+
+void checkChunkBoundaryInsideNal() {
+  section('a chunk boundary inside a NAL');
+  final List<int> stream = <int>[...sps, ...pps, ...idr];
+
+  // Three cuts through the PPS: inside its start code, right after it, and
+  // inside its payload. The chunk ends while a parameter set is still
+  // arriving, so nothing can be attributed yet — and the unit that comes out
+  // once the rest arrives has to be the stream as it was sent.
+  final List<int> cuts = <int>[
+    sps.length + 2, // mid start code
+    sps.length + 3, // start code complete, header still missing
+    sps.length + 5, // header in hand, payload cut
+  ];
+  for (final int cut in cuts) {
+    final AnnexBSplitter splitter = AnnexBSplitter(codec: CaptureCodec.h264);
+    eq(
+      'cut at $cut: the head claims nothing',
+      splitter.add(u8(stream.sublist(0, cut))).length,
+      0,
+    );
+    final List<AccessUnit> units = splitter.add(u8(stream.sublist(cut)));
+    eq('cut at $cut: one unit once the rest arrives', units.length, 1);
+    if (units.length != 1) continue;
+    check('cut at $cut: and it is a key frame', units[0].isKeyFrame);
+    eqBytes('cut at $cut: the stream comes back whole', units[0].bytes, stream);
+  }
+
+  // A start code split across the boundary is the nastiest of the three: the
+  // two halves are only a start code once they are back together.
+  final acrossCode = AnnexBSplitter(codec: CaptureCodec.h264);
+  final int atCode = sps.length + pps.length + 2;
+  eq(
+    'a split start code: nothing yet',
+    acrossCode.add(u8(stream.sublist(0, atCode))).length,
+    0,
+  );
+  final List<AccessUnit> after = acrossCode.add(u8(stream.sublist(atCode)));
+  eq('a split start code: one unit', after.length, 1);
+  if (after.length == 1)
+    eqBytes('and the IDR is inside it, not lost', after[0].bytes, stream);
+}
+
+void checkUnclaimedRunIsNeverEmitted() {
+  section('a pending run that is never claimed');
+  final AnnexBSplitter splitter = AnnexBSplitter(codec: CaptureCodec.h264);
+
+  eq('SPS+PPS alone', splitter.add(u8(<int>[...sps, ...pps])).length, 0);
+  eq('more of the same', splitter.add(u8(<int>[...aud, ...sei])).length, 0);
+  eq('an empty chunk changes nothing', splitter.add(Uint8List(0)).length, 0);
+
+  // One picture claims the whole run, however many chunks it came in.
+  final List<AccessUnit> units = splitter.add(u8(slice));
+  eq('a slice closes one unit', units.length, 1);
+  if (units.length != 1) return;
+  check('and it is not a key frame', !units[0].isKeyFrame);
+  eqBytes('with everything held in front of it', units[0].bytes, <int>[
+    ...sps,
+    ...pps,
+    ...aud,
+    ...sei,
+    ...slice,
+  ]);
+
+  // The next key frame's headers, unclaimed when the stream ends: held, and
+  // dropped with the splitter rather than emitted as a unit of its own.
+  eq(
+    'a tail no picture claims is never emitted',
+    splitter.add(u8(<int>[...sps, ...pps])).length,
+    0,
+  );
+}
+
+void runAnnexBChecks() {
   checkFourByteStartCodes();
   checkThreeByteStartCodes();
   checkMixedStartCodes();
@@ -335,8 +440,7 @@ void main() {
   checkTrailingFragmentDropped();
   checkEmptyAndCodelessInput();
   checkNonAnnexBCodec();
-
-  print('');
-  print('passed: $passed, failed: ${failures.length}');
-  if (failures.isNotEmpty) exitCode = 1;
+  checkParameterSetsSurviveAChunk();
+  checkChunkBoundaryInsideNal();
+  checkUnclaimedRunIsNeverEmitted();
 }
