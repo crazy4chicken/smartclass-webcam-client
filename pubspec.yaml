@@ -37,7 +37,14 @@ dependencies:
   camera: ^0.12.1
   # Desktop implementations for Linux / macOS / Windows. `camera` itself only
   # ships android / ios / web, and `camera_windows` is deliberately not used.
-  camera_desktop: ^2.0.0
+  #
+  # Vendored at `packages/camera_desktop` rather than taken from pub: the
+  # plugin's capture pipeline is where an encoder has to live (see
+  # `packages/camera_desktop/VENDORED.md`). Only the pipeline is meant to
+  # change — keep the rest identical to upstream 2.0.0 so the fork stays
+  # rebasable.
+  camera_desktop:
+    path: packages/camera_desktop
   # No permission_handler: camera_android_camerax and camera_avfoundation each
   # request camera access during initialize(), and permission_handler_windows
   # does not compile against current MSVC (it forces /await and C++/WinRT
