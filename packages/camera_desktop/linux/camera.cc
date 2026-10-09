@@ -231,6 +231,22 @@ bool Camera::BuildPipeline(GError** error) {
   // Release our ref on the appsink (pipeline holds one).
   gst_object_unref(appsink_);
 
+  // Attach the encoded branch. Deliberately not fatal: a machine with no
+  // encoder, or one where the branch fails to build, still has a working
+  // camera and still records mjpeg. It just cannot answer `start_recording`
+  // for a predictive codec, and says so with `ok:false` rather than recording
+  // something else.
+  encoded_stream_handler_ = std::make_unique<EncodedStreamHandler>();
+  GError* encoded_error = nullptr;
+  if (!encoded_stream_handler_->Setup(pipeline_, tee_, method_channel_,
+                                      camera_id_, &encoded_error)) {
+    g_warning("[camera_desktop] Camera %d: encoded stream branch unavailable: %s",
+              camera_id_,
+              encoded_error ? encoded_error->message : "unknown error");
+    if (encoded_error) g_error_free(encoded_error);
+    encoded_stream_handler_.reset();
+  }
+
   return true;
 }
 
@@ -664,6 +680,71 @@ void Camera::StopVideoRecording(FlMethodCall* method_call) {
   record_handler_->StopRecording(method_call);
 }
 
+void Camera::StartEncodedStream(FlMethodCall* method_call) {
+  const CameraState s = state_.load();
+  if (s != CameraState::kRunning && s != CameraState::kPaused) {
+    g_info("[camera_desktop] Camera %d: StartEncodedStream called but camera is"
+           " not running (state=%d)", camera_id_, static_cast<int>(s));
+    g_autoptr(FlValue) details = fl_value_new_null();
+    fl_method_call_respond_error(method_call, "not_running",
+                                 "Camera is not running", details, nullptr);
+    return;
+  }
+
+  if (!encoded_stream_handler_) {
+    g_autoptr(FlValue) details = fl_value_new_null();
+    fl_method_call_respond_error(method_call, "no_encoder",
+                                 "No H.264 or H.265 encoder on this machine",
+                                 details, nullptr);
+    return;
+  }
+
+  FlValue* args = fl_method_call_get_args(method_call);
+  FlValue* codec_value = fl_value_lookup_string(args, "codec");
+  if (codec_value == nullptr || fl_value_get_type(codec_value) != FL_VALUE_TYPE_STRING) {
+    g_autoptr(FlValue) details = fl_value_new_null();
+    fl_method_call_respond_error(method_call, "unsupported_codec",
+                                 "An encoded stream needs an explicit codec",
+                                 details, nullptr);
+    return;
+  }
+
+  EncodedCodec codec = EncodedCodec::kH264;
+  if (!EncodedStreamHandler::ParseCodec(fl_value_get_string(codec_value),
+                                        &codec)) {
+    g_autoptr(FlValue) details = fl_value_new_null();
+    g_autofree gchar* message = g_strdup_printf(
+        "This machine cannot encode %s", fl_value_get_string(codec_value));
+    fl_method_call_respond_error(method_call, "unsupported_codec", message,
+                                 details, nullptr);
+    return;
+  }
+
+  GError* error = nullptr;
+  if (!encoded_stream_handler_->Start(codec, config_.target_fps,
+                                      config_.target_bitrate, &error)) {
+    g_autoptr(FlValue) details = fl_value_new_null();
+    fl_method_call_respond_error(method_call, "encoder_unavailable",
+                                 error ? error->message : "Encoder unavailable",
+                                 details, nullptr);
+    if (error) g_error_free(error);
+    return;
+  }
+
+  g_info("[camera_desktop] Camera %d: encoded stream started", camera_id_);
+  g_autoptr(FlValue) result = fl_value_new_null();
+  fl_method_call_respond_success(method_call, result, nullptr);
+}
+
+void Camera::StopEncodedStream(FlMethodCall* method_call) {
+  if (encoded_stream_handler_) {
+    encoded_stream_handler_->Stop();
+  }
+  g_info("[camera_desktop] Camera %d: encoded stream stopped", camera_id_);
+  g_autoptr(FlValue) result = fl_value_new_null();
+  fl_method_call_respond_success(method_call, result, nullptr);
+}
+
 void Camera::StartImageStream() {
   g_info("[camera_desktop] Camera %d: starting image stream", camera_id_);
   image_streaming_ = true;
@@ -741,6 +822,10 @@ void Camera::Dispose() {
     gst_object_unref(pipeline_);
     pipeline_ = nullptr;
     appsink_ = nullptr;
+    // Only now: the branch holds borrowed element pointers and its appsink
+    // callback carries `this`. Setting the pipeline to NULL above is what
+    // guarantees the streaming thread has exited and no callback is in flight.
+    encoded_stream_handler_.reset();
   }
 
   // Now safe: the GStreamer streaming thread is guaranteed to have exited

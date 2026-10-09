@@ -302,6 +302,22 @@ static void handle_stop_video_recording(CameraDesktopPlugin* self,
   camera->StopVideoRecording(method_call);
 }
 
+// The encoded branch is per camera: a unit is stamped with the camera it came
+// from, and `camera_enum` is what the server files it under.
+static void handle_start_encoded_stream(CameraDesktopPlugin* self,
+                                        FlMethodCall* method_call) {
+  Camera* camera = find_camera(self, method_call);
+  if (!camera) return;
+  camera->StartEncodedStream(method_call);
+}
+
+static void handle_stop_encoded_stream(CameraDesktopPlugin* self,
+                                       FlMethodCall* method_call) {
+  Camera* camera = find_camera(self, method_call);
+  if (!camera) return;
+  camera->StopEncodedStream(method_call);
+}
+
 static void handle_start_image_stream(CameraDesktopPlugin* self,
                                       FlMethodCall* method_call) {
   Camera* camera = find_camera(self, method_call);
@@ -408,6 +424,10 @@ static void camera_desktop_plugin_handle_method_call(
     handle_start_video_recording(self, method_call);
   } else if (strcmp(method, "stopVideoRecording") == 0) {
     handle_stop_video_recording(self, method_call);
+  } else if (strcmp(method, "startEncodedStream") == 0) {
+    handle_start_encoded_stream(self, method_call);
+  } else if (strcmp(method, "stopEncodedStream") == 0) {
+    handle_stop_encoded_stream(self, method_call);
   } else if (strcmp(method, "startImageStream") == 0) {
     handle_start_image_stream(self, method_call);
   } else if (strcmp(method, "stopImageStream") == 0) {

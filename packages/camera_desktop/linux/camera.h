@@ -11,6 +11,7 @@
 
 #include "camera_texture.h"
 #include "device_enumerator.h"
+#include "encoded_stream_handler.h"
 #include "record_handler.h"
 
 enum class CameraBackend {
@@ -81,6 +82,16 @@ class Camera {
   void StartImageStream();
   void StopImageStream();
 
+  // Opens/closes the encoded branch. Units are pushed to Dart as
+  // `encodedStreamPacket` events; this is the producer behind the device's
+  // `recording.frame` bodies for a predictive codec.
+  //
+  // `startEncodedStream` fails — and the caller must ack `ok:false` — when
+  // this machine has no encoder for the requested codec. Recording something
+  // else and calling it success is the one thing that must never happen here.
+  void StartEncodedStream(FlMethodCall* method_call);
+  void StopEncodedStream(FlMethodCall* method_call);
+
   // FFI image stream access.
   void* GetImageStreamBuffer() const { return image_stream_buffer_; }
   void RegisterImageStreamCallback(void (*callback)(int32_t));
@@ -124,6 +135,11 @@ class Camera {
   guint init_timeout_id_;
 
   std::unique_ptr<RecordHandler> record_handler_;
+
+  // The encoded branch. Built once, at pipeline construction, and nulled when
+  // no encoder exists or the branch failed to build — in which case recordings
+  // fall back to the still-picture path and the codec is acked `ok:false`.
+  std::unique_ptr<EncodedStreamHandler> encoded_stream_handler_;
 
   // Pending async initialization, stores the FlMethodCall until first frame.
   // Only accessed from the main thread (set in Initialize, cleared in

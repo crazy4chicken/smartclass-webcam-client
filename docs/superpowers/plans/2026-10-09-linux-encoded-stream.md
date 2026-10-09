@@ -74,31 +74,31 @@ One new class, `EncodedStreamHandler`, shaped exactly like the existing `RecordH
 
 **Files:** `linux/encoded_stream_handler.{h,cc}`
 
-- [ ] **Step 1** `Setup(GstElement* pipeline, GstElement* tee, GError** error)` — create `queue`, `videoconvert`, `encoder`, `parse`, `capsfilter`, `appsink`; add and link; `gst_element_sync_state_with_parent`. Mirror `RecordHandler::Setup` field for field.
-- [ ] **Step 2** Queue bounds: `max-size-time=1s` plus a `leaky` setting that sheds frames rather than growing latency. Confirm the leak direction on the target box and write the measured choice into a comment.
-- [ ] **Step 3** Encoder properties: `x264enc` → `tune=zerolatency`, `speed-preset=ultrafast`, `key-int-max`; `x265enc` equivalent. Set them by name only when the chosen element is the software one — a property a hardware element lacks is a hard error, not a warning.
-- [ ] **Step 4** `parse` → `config-interval=-1` (see Decision 3).
-- [ ] **Step 5** `capsfilter` → `video/x-h264,stream-format=byte-stream,alignment=au` (`x-h265` for HEVC), and assert the caps actually negotiated — a caps filter that silently failed is a stream of AVC-length-prefixed bytes that Dart will mangle.
-- [ ] **Step 6** `appsink`: `sync=false`, `emit-signals=true`, `max-buffers=1`.
-- [ ] **Step 7** `Start()` / `Stop()` that only move the branch: set the valve/queue state, do not touch the pipeline as a whole. `Stop()` sends EOS down the branch so the encoder flushes, and only then tears it down — that flush is the tail of the recording.
+- [x] **Step 1** `Setup(pipeline, tee, channel, camera_id, error)` — creates a branch per codec this machine can encode, each with `queue`, `valve`, `videoconvert`, `encoder`, `parse`, `capsfilter`, `appsink`; adds and links them; requests a tee pad the way `RecordHandler::Setup` does. *Deviation:* one branch **per codec** rather than one branch configured at `Start` — adding elements to a PLAYING pipeline is legal but the failure modes are ugly, and there are at most two branches. Each idles behind a shut valve.
+- [x] **Step 2** Queue bounds: `max-size-buffers=2` with `leaky=2`. *Deviation from "1s":* a time bound is meaningless at 60fps with a 2-buffer cap, and the real requirement is "shed, never accumulate". **The leak direction still has to be confirmed on the target box** — if `2` turns out to be the other direction the symptom is latency creeping up, not a crash.
+- [x] **Step 3** Encoder properties, restricted to exactly what `RecordHandler::ConfigureEncoder` already sets on the same elements (`x264enc` tune/speed-preset/bitrate, `openh264enc` bitrate, VAAPI bitrate) plus `key-int-max` on the two software elements. Everything else is left at its default rather than guessed at: `g_object_set` on a property an element lacks raises a GLib critical and carries on, which is worse than not setting it.
+- [x] **Step 4** `parse` → `config-interval=-1` (see Decision 3). **Unverified** — the single property in this plan I am least sure of.
+- [x] **Step 5** `capsfilter` → `video/x-h264,stream-format=byte-stream,alignment=au` (`x-h265` for HEVC). **Not done:** asserting the caps actually negotiated. A caps filter that silently failed is a stream of AVC-length-prefixed bytes Dart will mangle — worth adding once there is a box to test it on.
+- [x] **Step 6** `appsink`: `sync=false`, `emit-signals=true`, `max-buffers=1`, `drop=false`.
+- [x] **Step 7** `Start()` / `Stop()`. *Deviation:* **no EOS.** The branch is configured for zero-latency, no-B-frame encoding, so the encoder holds nothing back and there is no tail to flush; `Stop` closes the valve and parks the branch in NULL instead. That parking is what makes the *next* recording correct — a fresh encoder opens with an IDR carrying its parameter sets, whereas an encoder left running would continue with a P-frame and the recording would begin with an undecodable unit. (Add B-frames and both statements stop being true.)
 
 ## Task 3: Handing bytes to Dart
 
 **Files:** `linux/encoded_stream_handler.cc`, `linux/camera.h`
 
-- [ ] **Step 1** `new-sample` callback: take the buffer, extract the bytes, and hand them to the main thread with `g_idle_add`. Nothing but the copy happens on the streaming thread.
-- [ ] **Step 2** Main-thread callback: `fl_value_new_map` with `cameraId`, `pictures` (= 1, Decision 2) and `bytes` (`fl_value_new_uint8_list`); `fl_method_channel_invoke_method(channel, "encodedStreamPacket", …)`. Same shape as `Camera::SendError`.
-- [ ] **Step 3** Bound in flight with an atomic counter, the way `image_stream_in_flight_` does. Over the bound: drop the buffer and count it.
-- [ ] **Step 4** Threading comments on every field the streaming thread touches, matching the `C-2`…`C-5` convention already in `camera.h`.
+- [x] **Step 1** `new-sample` callback: pulls the sample, maps the buffer, copies into a `GBytes`, and queues delivery with `g_idle_add`. Nothing Flutter-shaped is touched from the streaming thread.
+- [x] **Step 2** `DeliverUnit` on the main thread: `fl_value_new_map` with `cameraId`, `pictures` (= 1, Decision 2) and `bytes` (`fl_value_new_uint8_list`); `fl_method_channel_invoke_method(channel, "encodedStreamPacket", …)`. Same shape as `Camera::SendError`.
+- [x] **Step 3** Bounded in flight at 4 with a `shared_ptr<atomic<int>>` carried *inside* the queued unit, so a delivery landing after the handler is gone still decrements a live counter. Over the bound: drop and count.
+- [ ] **Step 4** Threading comments on every field the streaming thread touches. *Partially done* — the reasoning is written where it matters (the counter, the delivery, the `Dispose` ordering) but **not** in the `C-2`…`C-5` numbering the rest of `camera.h` uses. Do that when the file settles.
 
 ## Task 4: Wire it into `Camera`
 
 **Files:** `linux/camera.{h,cc}`, `linux/camera_desktop_plugin.cc`
 
-- [ ] **Step 1** Add `std::unique_ptr<EncodedStreamHandler> encoded_stream_handler_` and call `Setup` from `BuildPipeline`, right after the existing `record_handler_->Setup(…)`.
-- [ ] **Step 2** `StartEncodedStream(FlMethodCall*)` / `StopEncodedStream(FlMethodCall*)` on `Camera`, responding exactly like `StartVideoRecording` does (including the not-running error).
-- [ ] **Step 3** Add both to the dispatch in `camera_desktop_plugin.cc`, alphabetically placed among the existing entries.
-- [ ] **Step 4** `Dispose()` tears the branch down before the pipeline.
+- [x] **Step 1** `std::unique_ptr<EncodedStreamHandler> encoded_stream_handler_`, `Setup` called at the end of `BuildPipeline`. *Deviation:* `record_handler_->Setup` is not called there — it is lazy, on the first `StartVideoRecording` — so the two sit in different places. A `Setup` failure is **not** fatal: the camera still works and still records mjpeg, and the codec is acked `ok:false`.
+- [x] **Step 2** `StartEncodedStream(FlMethodCall*)` / `StopEncodedStream(FlMethodCall*)`, responding like `StartVideoRecording` does (not-running error included). `Start` also rejects a missing/unparseable `codec` and a codec this machine has no encoder for.
+- [x] **Step 3** Both added to the dispatch in `camera_desktop_plugin.cc` via `find_camera`, next to the image-stream pair.
+- [x] **Step 4** `Dispose()` resets the handler **after** the pipeline has been set to NULL and unreffed. *Deviation from "before":* the branch's appsink callback carries `this`, so tearing the handler down first would leave a window in which a streaming thread calls into freed memory. Setting the pipeline to NULL is what guarantees that thread has exited.
 
 ## Task 5: Dart side of the plugin
 
