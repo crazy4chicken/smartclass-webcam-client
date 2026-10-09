@@ -4590,7 +4590,7 @@ Future<void> checkCoordinator() async {
     eq(
       'and the mode is unchanged',
       h.coordinator.activeMode.toString(),
-      'CameraMode(1280x720 @ 5fps)',
+      'CameraMode(1920x1080 @ 5fps)',
     );
   }
 
@@ -4639,7 +4639,7 @@ Future<void> checkCoordinator() async {
     eq(
       'and the mode is untouched',
       h.coordinator.activeMode.toString(),
-      'CameraMode(1280x720 @ 5fps)',
+      'CameraMode(1920x1080 @ 5fps)',
     );
     eq(
       'the other camera keeps its own mode',
@@ -4655,7 +4655,7 @@ Future<void> checkCoordinator() async {
     eq(
       'with the geometry',
       h.coordinator.reportStatus()['resolution'],
-      '1280x720',
+      '1920x1080',
     );
   }
 

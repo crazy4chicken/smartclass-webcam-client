@@ -66,7 +66,10 @@ List<CameraMode> _seedModes({
   final count = capabilities.isEmpty ? 1 : capabilities.length;
   return <CameraMode>[
     for (var i = 0; i < count; i++)
-      CameraMode(resolution: _seedResolutionFor(capabilities, i, config), fps: settings.fps),
+      CameraMode(
+        resolution: _seedResolutionFor(capabilities, i, config),
+        fps: settings.fps,
+      ),
   ];
 }
 
