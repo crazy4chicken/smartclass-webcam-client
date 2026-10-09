@@ -131,6 +131,7 @@ class _FakeCameraService implements CameraService {
     this.bytes,
     this.failTimes = 0,
     this.delay,
+    this.switchError,
     List<CameraDescriptor>? cameras,
   }) : cameras =
            cameras ??
@@ -148,6 +149,11 @@ class _FakeCameraService implements CameraService {
   /// needs more than one.
   @override
   final List<CameraDescriptor> cameras;
+
+  /// When set, [switchCamera] fails the way a busy sensor does: the device
+  /// asked for a camera it cannot open, and the caller has to say so rather
+  /// than carry on pointing at the old one.
+  Object? switchError;
 
   int captureCalls = 0;
   int reconfigureCalls = 0;
@@ -167,7 +173,11 @@ class _FakeCameraService implements CameraService {
   }
 
   @override
-  Future<void> switchCamera(int index) async => _cameraIndex = index;
+  Future<void> switchCamera(int index) async {
+    final error = switchError;
+    if (error != null) throw error;
+    _cameraIndex = index;
+  }
 
   @override
   Future<Uint8List?> captureFrame(int quality) async {
@@ -4510,27 +4520,40 @@ Future<void> checkCoordinator() async {
     AgentCoordinator coordinator,
     _FakeGateway gateway,
     _FakeCameraService camera,
+    List<_FakeFramePump> pumps,
   })
   buildWithMode({
     int cameraCount = 1,
+    Object? switchError,
     List<CaptureCodec> announcedCodecs = const <CaptureCodec>[
       CaptureCodec.mjpeg,
     ],
     _FakeGatewayFactory? factory,
   }) {
     final gateway = _FakeGateway();
-    final camera = _FakeCameraService(bytes: Uint8List.fromList(<int>[1]));
+    final camera = _FakeCameraService(
+      bytes: Uint8List.fromList(<int>[1]),
+      switchError: switchError,
+    );
     // An explicit closure either way: `factory` and a closure share no
     // supertype, so the conditional expression would widen to `Object`.
     final BackendGatewayFactory gatewayFactory = factory == null
         ? (_) => gateway
         : (ConnectionSettings c) => factory(c);
+    // One entry per recording actually begun, in order. Empty means the
+    // coordinator never got as far as building a pump — which is exactly what
+    // a refused `start_recording` has to leave behind.
+    final pumps = <_FakeFramePump>[];
     final coordinator = AgentCoordinator(
       gatewayFactory: gatewayFactory,
       cameraProvider: CameraProvider(
         backends: <CameraBackend>[_FakeBackend('stub', probeResult: _okProbe)],
       ),
-      pumpFactory: () => _FakeFramePump(),
+      pumpFactory: () {
+        final pump = _FakeFramePump();
+        pumps.add(pump);
+        return pump;
+      },
       connection: testConnection,
       initialCamera: camera,
       capabilities: <CameraCapabilities>[
@@ -4538,7 +4561,12 @@ Future<void> checkCoordinator() async {
       ],
       announcedCodecs: announcedCodecs,
     );
-    return (coordinator: coordinator, gateway: gateway, camera: camera);
+    return (
+      coordinator: coordinator,
+      gateway: gateway,
+      camera: camera,
+      pumps: pumps,
+    );
   }
 
   {
@@ -4776,6 +4804,53 @@ Future<void> checkCoordinator() async {
       wrong.gateway.acks.single.ok,
       false,
     );
+  }
+
+  {
+    // `start_recording` names a camera. Recording whatever happens to be open
+    // instead would file every frame under the wrong id, and snapshot *that*
+    // camera's announced mode into the stream's `metadata.resolution`.
+    final h = buildWithMode(cameraCount: 2);
+    eq('camera 0 is the open one', h.coordinator.cameraEnum, 0);
+
+    await h.coordinator.handleCommand(
+      const StartRecordingCommand(id: 'a', cameraEnum: 1, streamId: streamId),
+    );
+    eq('the named camera is opened', h.camera.cameraIndex, 1);
+    eq('and becomes the device\'s camera', h.coordinator.cameraEnum, 1);
+    eq('the recording is acked', h.gateway.acks.single.ok, true);
+    eq('one pump was built', h.pumps.length, 1);
+    eq('on the named camera', h.pumps.single.lastCameraEnum, 1);
+    eq(
+      'and it is recording',
+      h.coordinator.captureState,
+      CaptureState.recording,
+    );
+  }
+
+  {
+    // A named camera the device cannot open is refused, not recorded: the
+    // server's stream row is already `active`, so acking `ok` would produce a
+    // recording filed under a camera the device never moved to.
+    final h = buildWithMode(
+      cameraCount: 2,
+      switchError: StateError('camera busy'),
+    );
+    await h.coordinator.handleCommand(
+      const StartRecordingCommand(id: 'a', cameraEnum: 1, streamId: streamId),
+    );
+    eq('an unopenable camera is refused', h.gateway.acks.single.ok, false);
+    // Not `error!`: an assertion that crashes the harness on the way to
+    // failing reports one failure instead of all of them.
+    check(
+      'and the error says why',
+      (h.gateway.acks.single.error ?? '').contains('camera busy'),
+    );
+    eq('the device stayed on camera 0', h.camera.cameraIndex, 0);
+    eq('no pump was built', h.pumps.length, 0);
+    eq('nothing is recording', h.coordinator.captureState, CaptureState.idle);
+    eq('and no stream is claimed', h.coordinator.activeStreamId, null);
+    eq('so no frame can be pushed', h.gateway.frameMeta.length, 0);
   }
 
   {

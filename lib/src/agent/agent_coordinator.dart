@@ -654,6 +654,28 @@ class AgentCoordinator {
       return;
     }
 
+    // The command names a camera, and recording whatever happens to be open
+    // instead would file every frame under the wrong id — and snapshot *that*
+    // camera's announced mode into the stream's `metadata.resolution`. Moving
+    // onto the named camera first is the only way the two agree.
+    //
+    // At its own mode, not one the command asked for: `start_recording` carries
+    // no geometry, so the mode the registration already published for it is the
+    // only one that is both deliverable and announced.
+    if (command.cameraEnum != _cameraEnum) {
+      final reason = await _activateCamera(
+        command.cameraEnum,
+        _modeFor(command.cameraEnum),
+      );
+      if (reason != null) {
+        // Refused rather than recorded: the server's stream row is already
+        // `active`, so acking `ok` would produce a recording it files under a
+        // camera the device never switched to.
+        await _ack(command, ok: false, error: reason);
+        return;
+      }
+    }
+
     final pump = _pumpFactory();
     _pump = pump;
 
@@ -762,35 +784,59 @@ class AgentCoordinator {
       fps: command.fps ?? previous.fps,
     );
 
+    final reason = await _activateCamera(cameraEnum, requested);
+    if (reason != null) {
+      await _ack(command, ok: false, error: reason);
+      return;
+    }
+    await _ack(command, ok: true);
+
+    // `requested.differsFrom(previous)` is the switch's own condition, kept
+    // here rather than moved into [_activateCamera]: re-registering is what a
+    // *command* owes the server, not something every activation implies. This
+    // is why `previous` is read before the activation and not after it.
+    if (requested.differsFrom(previous)) {
+      // `switch_camera` stores no server state — the protocol doc says so
+      // outright — so the server's `metadata.resolution` / `metadata.fps` are
+      // whatever the registration said. Without re-registering, the next
+      // recording would be recorded as the old mode.
+      await _reregister();
+    }
+  }
+
+  /// Makes [cameraEnum] the active camera at [requested], or says why not.
+  /// Returns null on success.
+  ///
+  /// Shared by `switch_camera` and `start_recording`: a recording that names
+  /// another camera has to move the device onto it for exactly the reason a
+  /// switch does — the pipeline is built at one geometry, and the server files
+  /// frames under the id the command named. Split out rather than left inside
+  /// `_switchCamera` because the ack is the caller's business: a switch acks a
+  /// command, `start_recording` refuses one, and neither shares the other's
+  /// wording.
+  ///
+  /// Both callers have already checked that a camera is open.
+  Future<String?> _activateCamera(int cameraEnum, CameraMode requested) async {
+    final camera = _camera!;
+
     // Validate against what this camera was **announced** as accepting. The
     // operator picks from the published lists, so a value outside them is a
     // mismatch, and applying it would mean capturing at a geometry the server
     // has no record of while its stream row stays `active`.
     final declared = declaredFor(cameraEnum);
     if (!declared.resolutions.contains(requested.resolution)) {
-      await _ack(
-        command,
-        ok: false,
-        error:
-            'camera $cameraEnum does not support ${requested.resolution.label}; '
-            'declared ${declared.resolutions.map((r) => r.label).join('/')}',
-      );
-      return;
+      return 'camera $cameraEnum does not support ${requested.resolution.label}; '
+          'declared ${declared.resolutions.map((r) => r.label).join('/')}';
     }
     if (!declared.framerates.contains(requested.fps)) {
-      await _ack(
-        command,
-        ok: false,
-        error:
-            'camera $cameraEnum does not support ${requested.fps}fps; '
-            'declared ${declared.framerates.join('/')}',
-      );
-      return;
+      return 'camera $cameraEnum does not support ${requested.fps}fps; '
+          'declared ${declared.framerates.join('/')}';
     }
 
     // Build the config first and only adopt it on success: a `reconfigure` that
     // rolls back must not leave the coordinator believing in a geometry the
     // camera is not actually at.
+    final previous = _modeFor(cameraEnum);
     final resolutionChanged = requested.resolution != previous.resolution;
     final nextConfig = resolutionChanged
         ? _config.copyWith(
@@ -805,23 +851,14 @@ class AgentCoordinator {
         await camera.reconfigure(nextConfig);
       }
     } catch (error) {
-      await _ack(command, ok: false, error: '$error');
-      return;
+      return '$error';
     }
 
     _config = nextConfig;
     _settings = _settings.copyWith(fps: requested.fps);
     _cameraEnum = cameraEnum;
     _setMode(cameraEnum, requested);
-    await _ack(command, ok: true);
-
-    if (requested.differsFrom(previous)) {
-      // `switch_camera` stores no server state — the protocol doc says so
-      // outright — so the server's `metadata.resolution` / `metadata.fps` are
-      // whatever the registration said. Without re-registering, the next
-      // recording would be recorded as the old mode.
-      await _reregister();
-    }
+    return null;
   }
 
   /// Reconnects so the server re-registers with the current modes.
