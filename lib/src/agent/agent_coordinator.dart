@@ -833,11 +833,17 @@ class AgentCoordinator {
           'declared ${declared.framerates.join('/')}';
     }
 
+    // Compare against the geometry the pipeline is actually built at, not the
+    // target camera's own mode: for a switch that carries no `resolution`,
+    // `requested` is *derived from* that mode, so comparing the two always
+    // reads "unchanged" and `reconfigure` is never called. The new camera then
+    // keeps running at the old camera's geometry while the registration
+    // announces its own ceiling — invisible while every camera shared one.
+    //
     // Build the config first and only adopt it on success: a `reconfigure` that
     // rolls back must not leave the coordinator believing in a geometry the
     // camera is not actually at.
-    final previous = _modeFor(cameraEnum);
-    final resolutionChanged = requested.resolution != previous.resolution;
+    final resolutionChanged = requested.resolution != _config.resolution;
     final nextConfig = resolutionChanged
         ? _config.copyWith(
             width: requested.resolution.width,

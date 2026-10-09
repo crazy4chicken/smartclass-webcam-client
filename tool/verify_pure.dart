@@ -4516,6 +4516,36 @@ Future<void> checkCoordinator() async {
     framerates: <int>[60, 30, 15],
   );
 
+  /// A second camera with a **lower** ceiling: the case a single shared
+  /// default used to hide, and the reason a bare `switch_camera` has to look
+  /// at the pipeline rather than at the camera it is moving to.
+  final measured720 = CameraCapabilities.of(
+    resolutions: <CameraResolution>[
+      const CameraResolution(width: 1280, height: 720),
+      const CameraResolution(width: 640, height: 480),
+    ],
+    framerates: <int>[60, 30, 15],
+  );
+
+  /// What the pipeline is opened at: camera 0's measured ceiling.
+  ///
+  /// `CaptureConfig` is the only record of the geometry the pipeline is really
+  /// built at, and bootstrap derives it from camera 0's ceiling (`main.dart`'s
+  /// `openConfig`). A fixture that left it at the 1280x720 build default while
+  /// its modes claimed 1920x1080 would model a device that cannot exist, and
+  /// would make every bare switch look like a geometry change.
+  CaptureConfig openConfigFor(List<CameraCapabilities> capabilities) {
+    final ceiling = capabilities.isEmpty
+        ? null
+        : capabilities.first.highestResolution;
+    return ceiling == null
+        ? CaptureConfig.defaults()
+        : CaptureConfig.defaults().copyWith(
+            width: ceiling.width,
+            height: ceiling.height,
+          );
+  }
+
   ({
     AgentCoordinator coordinator,
     _FakeGateway gateway,
@@ -4525,11 +4555,17 @@ Future<void> checkCoordinator() async {
   buildWithMode({
     int cameraCount = 1,
     Object? switchError,
+    List<CameraCapabilities>? capabilities,
     List<CaptureCodec> announcedCodecs = const <CaptureCodec>[
       CaptureCodec.mjpeg,
     ],
     _FakeGatewayFactory? factory,
   }) {
+    // Every camera gets `measured` unless the caller says otherwise, so the
+    // existing identical-ceiling checks are untouched.
+    final effective =
+        capabilities ??
+        <CameraCapabilities>[for (var i = 0; i < cameraCount; i++) measured];
     final gateway = _FakeGateway();
     final camera = _FakeCameraService(
       bytes: Uint8List.fromList(<int>[1]),
@@ -4556,9 +4592,8 @@ Future<void> checkCoordinator() async {
       },
       connection: testConnection,
       initialCamera: camera,
-      capabilities: <CameraCapabilities>[
-        for (var i = 0; i < cameraCount; i++) measured,
-      ],
+      config: openConfigFor(effective),
+      capabilities: effective,
       announcedCodecs: announcedCodecs,
     );
     return (
@@ -4652,7 +4687,8 @@ Future<void> checkCoordinator() async {
   }
 
   {
-    // No parameters: the camera changes, the mode does not.
+    // No parameters, two cameras at the same ceiling: the camera changes, the
+    // geometry genuinely does not, so there is nothing to rebuild.
     final h = buildWithMode(cameraCount: 2);
     await h.coordinator.handleCommand(
       const SwitchCameraCommand(id: 'e', cameraEnum: 1),
@@ -4684,6 +4720,44 @@ Future<void> checkCoordinator() async {
       'with the geometry',
       h.coordinator.reportStatus()['resolution'],
       '1920x1080',
+    );
+  }
+
+  {
+    // Same command, different ceilings. `requested` has no `resolution` of its
+    // own — it is derived from the *target* camera's mode — so comparing it
+    // back to that mode always read "unchanged" and `reconfigure` was never
+    // called. Camera 1 then kept running at camera 0's 1920x1080 while the
+    // registration announced 1280x720 for it.
+    final h = buildWithMode(
+      capabilities: <CameraCapabilities>[measured, measured720],
+    );
+    eq(
+      'each camera is seeded at its own ceiling',
+      h.coordinator.cameraModes[1].resolution.label,
+      '1280x720',
+    );
+    eq(
+      'and camera 0 at its',
+      h.coordinator.cameraModes[0].resolution.label,
+      '1920x1080',
+    );
+
+    await h.coordinator.handleCommand(
+      const SwitchCameraCommand(id: 'e', cameraEnum: 1),
+    );
+    eq('a bare switch is accepted', h.gateway.acks.single.ok, true);
+    eq(
+      'the camera is rebuilt at the new ceiling',
+      h.camera.lastConfig?.width,
+      1280,
+    );
+    eq('and at its height', h.camera.lastConfig?.height, 720);
+    eq('it was rebuilt exactly once', h.camera.reconfigureCalls, 1);
+    eq(
+      'and the active mode is the geometry the pipeline is at',
+      h.coordinator.activeMode.resolution,
+      const CameraResolution(width: 1280, height: 720),
     );
   }
 
