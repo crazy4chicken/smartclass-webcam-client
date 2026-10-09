@@ -6,6 +6,7 @@ import 'package:mocktail/mocktail.dart';
 import 'package:webcam_client/src/agent/agent_coordinator.dart';
 import 'package:webcam_client/src/agent/agent_status.dart';
 import 'package:webcam_client/src/backend/backend_gateway.dart';
+import 'package:webcam_client/src/config/app_config.dart';
 import 'package:webcam_client/src/backend/protocol/device_command.dart';
 import 'package:webcam_client/src/backend/protocol/device_message.dart';
 import 'package:webcam_client/src/capture/camera_backend.dart';
@@ -115,6 +116,7 @@ void main() {
   /// A coordinator holding an already-open camera, the way bootstrap builds it.
   AgentCoordinator build({
     CameraService? service,
+    CaptureConfig? config,
     List<CameraCapabilities> capabilities = const <CameraCapabilities>[],
     List<CaptureCodec> announcedCodecs = const <CaptureCodec>[
       CaptureCodec.mjpeg,
@@ -126,6 +128,7 @@ void main() {
     connection: testConnection,
     initialCamera: service ?? camera,
     initialBackendId: 'stub',
+    config: config,
     capabilities: capabilities,
     announcedCodecs: announcedCodecs,
   );
@@ -619,8 +622,9 @@ void main() {
   });
 
   group('camera mode', () {
-    // What a 1080p webcam really reports. The device runs at the built-in
-    // default, 1280x720 @ 5fps, which is *not* one of the probed rates.
+    // What a 1080p webcam really reports. Every camera seeds at its own
+    // measured ceiling — 1920x1080 here — at the built-in 5fps, which is *not*
+    // one of the probed rates.
     final measured = CameraCapabilities.of(
       resolutions: const [
         CameraResolution(width: 1920, height: 1080),
@@ -696,7 +700,9 @@ void main() {
         verifyNever(() => camera.reconfigure(any()));
         expect(
           coordinator.activeMode.resolution,
-          const CameraResolution(width: 1280, height: 720),
+          // Still the seeded ceiling: a refusal must not move the camera off
+          // what it was already at.
+          const CameraResolution(width: 1920, height: 1080),
         );
       },
     );
@@ -734,7 +740,20 @@ void main() {
     test(
       'switch_camera with no parameters only changes the active camera',
       () async {
-        final coordinator = build(capabilities: capabilitiesFor(2));
+        // Held at the seeded ceiling, the way bootstrap opens it: the pipeline
+        // and the announced mode then agree, so switching to a camera with the
+        // same ceiling has nothing to rebuild. Left at the built-in default the
+        // two disagree from the outset and the switch *must* rebuild — which is
+        // the bug this coordinator fixes, and it is covered by the
+        // different-ceiling case in `tool/verify_pure.dart`.
+        final coordinator = build(
+          config: const CaptureConfig(
+            width: 1920,
+            height: 1080,
+            quality: AppConfig.defaultQuality,
+          ),
+          capabilities: capabilitiesFor(2),
+        );
 
         await coordinator.handleCommand(
           const SwitchCameraCommand(id: 'e', cameraEnum: 1),
@@ -745,7 +764,7 @@ void main() {
         verifyNever(() => camera.reconfigure(any()));
         expect(
           coordinator.activeMode.resolution,
-          const CameraResolution(width: 1280, height: 720),
+          const CameraResolution(width: 1920, height: 1080),
         );
         expect(coordinator.activeMode.fps, 5);
       },
