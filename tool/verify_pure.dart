@@ -217,11 +217,17 @@ class _FakeBackend implements CameraBackend {
   final BackendProbe? probeResult;
   final Object? openError;
 
+  /// The geometry the coordinator last asked this backend to open at, so a
+  /// test can pin that a re-open followed a freshly adopted ceiling rather
+  /// than the stale config the pipeline started at.
+  CaptureConfig? lastOpenConfig;
+
   @override
   Future<BackendProbe> probe() async => probeResult!;
 
   @override
   Future<CameraService> open(CaptureConfig config) async {
+    lastOpenConfig = config;
     final error = openError;
     if (error != null) throw error;
     return _FakeCameraService(bytes: Uint8List.fromList([1]));
@@ -3237,9 +3243,9 @@ Future<void> checkGatewayCameraList() async {
     await coordinator.start();
     await settle();
     eq(
-      'the first registration announces 1280x720',
+      'the first registration announces the measured ceiling',
       registration.lastCameras!.single.resolution,
-      '1280x720',
+      '1920x1080',
     );
 
     await coordinator.handleCommand(
@@ -4489,8 +4495,8 @@ Future<void> checkCoordinator() async {
 
   // --- camera mode: switch_camera parameters and the requested codec --------
 
-  // What a 1080p webcam really reports. The device runs at the built-in default
-  // 1280x720 @ 5fps, which is *not* one of the probed rates.
+  // What a 1080p webcam really reports. The device seeds at the measured
+  // ceiling — 1920x1080 @ 5fps, a rate that is *not* one of the probed ones.
   final measured = CameraCapabilities.of(
     resolutions: <CameraResolution>[
       const CameraResolution(width: 1920, height: 1080),

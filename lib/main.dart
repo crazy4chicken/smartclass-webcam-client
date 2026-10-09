@@ -183,10 +183,25 @@ Future<Widget> _startKiosk({
 }) async {
   debugPrint('[camera] inventory: $inventory');
 
+  // Open at camera 0's measured ceiling. `CaptureConfig` is the only source
+  // of truth for what the pipeline is built at, and camera 0's announced mode
+  // must agree with it or the registration would describe a geometry the
+  // device never opened. A probe that found nothing keeps the build default —
+  // the same pair the probe folded into every declared list.
+  final camera0Ceiling = inventory.capabilities.isEmpty
+      ? null
+      : inventory.capabilities.first.highestResolution;
+  final openConfig = camera0Ceiling == null
+      ? captureConfig
+      : captureConfig.copyWith(
+          width: camera0Ceiling.width,
+          height: camera0Ceiling.height,
+        );
+
   final cameraProvider = CameraProvider(
     backends: buildBackendChain(cameraOrder: inventory.order),
   );
-  final openResult = await cameraProvider.open(captureConfig);
+  final openResult = await cameraProvider.open(openConfig);
   final camera = openResult.service;
   if (camera == null) {
     debugPrint('[camera] no backend available: ${openResult.failure}');
@@ -250,7 +265,7 @@ Future<Widget> _startKiosk({
       channelFactory: (uri) =>
           WebSocketBackendChannel(WebSocketChannel.connect(uri)),
       cameras: () => buildAnnouncements(
-        cameras: _declarations(currentInventory, coordinator, captureConfig),
+        cameras: _declarations(currentInventory, coordinator, openConfig),
         codecs: wireCodecsFor(available),
       ),
       statusReport: () => coordinator.reportStatus(),
@@ -272,6 +287,7 @@ Future<Widget> _startKiosk({
     connection: connection,
     initialCamera: camera,
     initialBackendId: openResult.backendId,
+    config: openConfig,
     settings: settings,
     capabilities: inventory.capabilities,
     announcedCodecs: announcedCodecs,

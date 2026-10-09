@@ -205,7 +205,7 @@ List<int> canonicalCameraOrder(List<RankedCamera> cameras);
 
 Sort by `(group, -maxPixels, index)`. The trailing `index` keeps the result stable for ties, which is what lets an all-`front` Windows box or an all-`external` Linux box collapse to plain resolution order without a special case.
 
-Add a comment recording *why* the groups exist and that two of the four platforms cannot fill them: `camera_desktop` hardcodes `lensDirection` to `0` on Windows and `2` on Linux, so on those targets every camera lands in one group and the order is resolution alone.
+Add a comment recording *why* the groups exist and that two of the four platforms cannot fill them: `` hardcodes `lensDirection` to `0` on Windows and `2` on Linux, so on those targets every camera lands in one group and the order is resolution alone.
 
 - [ ] **Step 4: Implement `lib/src/capture/plugin_camera_ranker.dart`**
 
@@ -638,6 +638,6 @@ Pass a closure that runs `ensureInventory` with a **forced** re-probe (ignore th
 
 ## Deferred (separate plans)
 
-- **Native encoder pipeline.** `camera_desktop`'s image stream exists to deliver raw BGRA into Dart, so keeping raw frames out of Dart means owning the capture pipeline natively: fork/vend the plugin and tap the same GStreamer / Media Foundation pipeline in-process. Encoding happens there; only compressed bytes cross into Dart.
+- **Native encoder pipeline.** ``'s image stream exists to deliver raw BGRA into Dart, so keeping raw frames out of Dart means owning the capture pipeline natively: fork/vend the plugin and tap the same GStreamer / Media Foundation pipeline in-process. Encoding happens there; only compressed bytes cross into Dart.
 - **H.264 / H.265.** ffmpeg in the native layer (GPL build for x264/x265, or `libopenh264` for H.264 only), with hardware encoders as a second backend behind the same `NativeEncoder` interface. Until this lands, `supported_codec` stays `["mjpeg"]` and a request for any other codec is acked `ok:false`.
 - **No-disk frame path.** Follows from the encoder work; `TakePictureFrameSource` stays in place until then.

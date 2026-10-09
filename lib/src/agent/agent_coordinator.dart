@@ -40,11 +40,19 @@ typedef BackendGatewayFactory = BackendGateway Function(
 
 /// The starting mode for every announced camera.
 ///
-/// All of them start at the same place because the device captures from exactly
-/// one camera at one geometry: [CaptureConfig] is the only source of truth for
-/// "what the pipeline is built at", and every camera is driven by it. A camera
-/// that has never been switched to is therefore at the default, whether or not
-/// it has ever been opened.
+/// Each camera starts at its **own measured ceiling** — the highest resolution
+/// the probe saw it produce — because `resolution` is what the server
+/// snapshots into `metadata`, and "the widest picture this camera gives" is
+/// the honest default. The device still captures from exactly one camera at
+/// one geometry ([CaptureConfig], built at camera 0's ceiling by bootstrap);
+/// a camera that has never been switched to is nevertheless announced at the
+/// mode it *would* run at, and the backend clamps to it via the preset ladder
+/// when it is opened.
+///
+/// A camera the probe could not measure — an empty entry, or an index past
+/// the list — falls back to [CaptureConfig]'s geometry, the same pair the
+/// probe folded into its declared list, so the announced pair is always one
+/// the registration can carry.
 ///
 /// The count comes from the capabilities list, because that is what the
 /// announcements are built from and the two must agree on how many cameras
@@ -58,8 +66,27 @@ List<CameraMode> _seedModes({
   final count = capabilities.isEmpty ? 1 : capabilities.length;
   return <CameraMode>[
     for (var i = 0; i < count; i++)
-      CameraMode(resolution: config.resolution, fps: settings.fps),
+      CameraMode(resolution: _seedResolutionFor(capabilities, i, config), fps: settings.fps),
   ];
+}
+
+/// The ceiling camera [cameraEnum] was measured at, or [config]'s geometry.
+///
+/// The declared lists are cached with the probe-time fallback mode already
+/// folded in, so `highestResolution` can exceed what a sub-default camera
+/// really produces (a 480p webcam whose declared max reads 1280x720). That is
+/// pre-existing behaviour and harmless: `presetForHeight` clamps to the real
+/// ceiling when the camera opens, exactly as it did when every mode was the
+/// fixed default.
+CameraResolution _seedResolutionFor(
+  List<CameraCapabilities> capabilities,
+  int cameraEnum,
+  CaptureConfig config,
+) {
+  if (cameraEnum < 0 || cameraEnum >= capabilities.length) {
+    return config.resolution;
+  }
+  return capabilities[cameraEnum].highestResolution ?? config.resolution;
 }
 
 /// Owns the camera, the command router and the frame push.
@@ -491,6 +518,20 @@ class AgentCoordinator {
       config: _config,
       settings: _settings,
     );
+    // The modes above already claim the fresh ceilings, and `reconfigure`
+    // below re-opens camera 0 through `_openCamera(_config)` — so the config
+    // has to move with them, or the pipeline would come back up at the old
+    // geometry while the registration announces the new one. Quality is kept:
+    // only the geometry is re-derived.
+    final camera0Ceiling = capabilities.isEmpty
+        ? null
+        : capabilities.first.highestResolution;
+    if (camera0Ceiling != null) {
+      _config = _config.copyWith(
+        width: camera0Ceiling.width,
+        height: camera0Ceiling.height,
+      );
+    }
     _camera = null;
     _cameraEnum = 0;
 
