@@ -3,10 +3,20 @@
 A copy of pub.dev [`camera_android_camerax`](https://pub.dev/packages/camera_android_camerax)
 0.7.5+1, taken from the pub cache and committed here. Upstream licence
 (**BSD-3-Clause**, `Copyright 2013 The Flutter Authors`) is in `LICENSE`;
-nothing in this directory changes that. The copy was pinned by the sha256
-recorded in `pubspec.lock` — `47645ffd20c597cb0edab4de20f3c89447b7eca90425ee13683b746275b18e2b`
-— not by a version string alone. It is built against CameraX **1.6.2**
-(`android/build.gradle.kts:79`) with `minSdk 23` (`android/build.gradle.kts:46`).
+nothing in this directory changes that.
+
+Which upstream tarball this came from is recorded by the hash pub printed for
+that version before the override was added:
+
+    sha256: 47645ffd20c597cb0edab4de20f3c89447b7eca90425ee13683b746275b18e2b
+
+`pubspec.lock` no longer carries it — a `path` source replaces the hosted
+description, hash and all (see "How it is wired in" below), so the line above is
+the only surviving record of the exact bytes. It is worth keeping: `0.7.5+1`
+alone would not distinguish a re-published tarball.
+
+It is built against CameraX **1.6.2** (`android/build.gradle.kts:79`) with
+`minSdk 23` (`android/build.gradle.kts:46`).
 
 ## Why it is here
 

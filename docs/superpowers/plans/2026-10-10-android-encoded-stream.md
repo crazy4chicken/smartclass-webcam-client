@@ -92,20 +92,37 @@ rm -rf packages/camera_android_camerax/example \
 - [ ] 为什么 fork：编码必须在持有相机的进程内；`VideoCapture<Recorder>` 只有文件出口，没有 AU 出口
 - [ ] **改动范围：只新增文件。** 上游文件唯一一处改动是 `CameraAndroidCameraxPlugin.java` 里的两行注册（Task 4），rebase 时手工重放
 - [ ] 地面规则沿用 `camera_desktop/VENDORED.md` 的四条（只改采集/编码路径；帧不落盘、原始帧不进 Dart；声明必须是实测的；没有编码器就直说）
-- [x] **Step 3: `pubspec.yaml` 加 root path 依赖**
+- [x] **Step 3: `pubspec.yaml` 把 fork 挂上去 —— 必须用 `dependency_overrides`**
+
+> **⚠️ 2026-10-10 更正：原计划的写法（放 `dependencies:`）是错的，会让 `flutter pub get` 直接失败。**
+> `camera` 0.12.1 声明的是 `camera_android_camerax: ^0.7.4`（**hosted**），而 pub **不允许 root 的
+> `dependencies` 用 `path:` 去替换一个"已发布在 pub.dev 的传递依赖"**：
+>
+> ```
+> Because camera 0.12.1 depends on camera_android_camerax ^0.7.4 ...,
+> camera ^0.12.1 requires camera_android_camerax from hosted.
+> ```
+>
+> `camera_desktop` 能放在 `dependencies:` 里，只是**因为没有任何包依赖它**，所以没有源冲突。
+> 指向本地 fork 的传递依赖，唯一正确的机制是 `dependency_overrides`：
 
 ```yaml
-  # Root dependency, not merely transitive: a path dependency here is what makes
-  # `camera` resolve its Android implementation to this fork. Only
-  # `camera_android_camerax` is forked — see packages/camera_android_camerax/VENDORED.md.
+dependency_overrides:
   camera_android_camerax:
     path: packages/camera_android_camerax
 ```
 
-- [ ] **Step 4: 用户在自己的 PowerShell 里跑 `flutter pub get`**（助手不要跑）
-- [ ] **Step 5: 验证解析到了本地实现**
+- [x] **Step 4: 用户在自己的 PowerShell 里跑 `flutter pub get`**（助手不要跑）
+  > **2026-10-10 通过。** 第一次失败（`dependencies` 放 path 源不被 pub 接受），
+  > 改用 `dependency_overrides` 后成功。
+- [x] **Step 5: 验证解析到了本地实现，且插件仍被注册**
+  > **2026-10-10 通过。** `pubspec.lock` → `dependency: "direct overridden"` /
+  > `source: path` / `version: 0.7.5+1`；`.flutter-plugins-dependencies` 的 `android`
+  > 数组里有 `camera_android_camerax`，path 指向本仓 `packages/` ——
+  > **override 只改了源，插件仍在构建里**。
 
-Run: `grep -A4 "camera_android_camerax:" pubspec.lock`  
+Run: `grep -A4 "camera_android_camerax:" pubspec.lock`
+  
 Expected: `source: path` 且 `description: path: "packages/camera_android_camerax"`（不再是 `source: hosted`）。
 
 - [ ] **Step 6: 用户编 debug APK，按 `docs/android-setup.md` §11 驱动真机**
@@ -113,7 +130,8 @@ Expected: `source: path` 且 `description: path: "packages/camera_android_camera
 三条基线都不能坏：预览出画面、拍照成功、注册成功（`adb logcat -d | grep 'flutter :'` 里能看到 `[capture] plan:` 那行）。
 
 - [x] **Step 7: Commit**
-  > **2026-10-10 已提交 `deec697`**（`pubspec.lock` 与 `docs/implementation-status.md` 未随本次提交：  >   
+  > **2026-10-10 已提交 `deec697`**（`pubspec.lock` 与 `docs/implementation-status.md` 未随本次提交：
+  >   
   > 前者要等用户的 `flutter pub get` 才产生变化，后者的 #7 行等构建证据）。
 
 ```bash
@@ -240,7 +258,8 @@ abstract interface class EncodedStreamTransport {
 
 - [x] **Step 7: 跑门禁并做变异验证**
 
-Run: `dart run tool/verify_pure.dart` → `failed: 0`。  
+Run: `dart run tool/verify_pure.dart` → `failed: 0`。
+  
 然后逐个改坏实现、确认**指名**的用例变红并记下条数：`sourceSeq` 改成每个包都推进 / 去掉代次过滤 / `open` 失败后留下订阅 / `encoders()` 的异常透出 / `close()` 顺手 cancel 订阅。
 
 - [x] **Step 8: Commit**
@@ -386,7 +405,8 @@ git commit -m "feat(android): serve h264/h265 through the native encoder, keepin
 
 - [ ] **Step 3: 用户跑一次冷启动 + 一次热启动**
 
-冷启动：logcat 里出现 `[evidence] measured: ...`，且 `[capture] plan:` 的声明帧率**不是 5**。  
+冷启动：logcat 里出现 `[evidence] measured: ...`，且 `[capture] plan:` 的声明帧率**不是 5**。
+  
 热启动：出现 `[evidence] cached: ...`，且**没有再测**（这是缓存键正确、启动变快的证据）。
 
 **模式级判据（Review Focus 5）**：如果 HEVC 实测只到 30，那么计划里必须出现 `1080p @ 30` + 公告 `h265`；此时运营侧点名 `1080p60 h265` 必须收到 `ack ok:false`，而**不是**被偷换成 30fps 或另一个 codec 跑起来。这一条要在真机上发一次命令确认，不能只看代码。
