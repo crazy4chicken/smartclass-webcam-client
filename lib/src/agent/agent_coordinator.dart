@@ -113,16 +113,14 @@ VideoEncoderFactory mjpegEncoderFactory({
 /// exist. At least one entry always exists: a device whose probe found nothing
 /// still has a camera 0, and `switch_camera(camera=0)` must not be out of range.
 ///
-/// [samples] is the device's encoding evidence. With none, [unmeasuredFps] is
-/// announced — see [defaultFpsFor]: a rate is a measurement, and there is no
-/// honest number to infer. `settings.fps` is passed here today, which means a
-/// device with no evidence still declares the configured target; that is the
-/// known, recorded gap this design has not closed, not a decision that it is
-/// fine.
+/// [samples] is the device's encoding evidence. With none, [kFpsWithoutEvidence]
+/// is announced rather than the configured target — see [defaultFpsFor] and
+/// [kFpsWithoutEvidence]: a rate is a measurement, and a device with no
+/// measurement must not declare one it has not demonstrated. The gap closes
+/// itself as soon as an [EncodeBudgetProbe] supplies real samples.
 List<CameraMode> _seedModes({
   required List<CameraCapabilities> capabilities,
   required CaptureConfig config,
-  required StreamSettings settings,
   required List<EncodeSample> samples,
 }) {
   final count = capabilities.isEmpty ? 1 : capabilities.length;
@@ -134,7 +132,7 @@ List<CameraMode> _seedModes({
             : CameraCapabilities.empty,
         samples: samples,
         fallbackResolution: config.resolution,
-        unmeasuredFps: settings.fps,
+        unmeasuredFps: kFpsWithoutEvidence,
       ),
   ];
 }
@@ -185,7 +183,6 @@ class AgentCoordinator {
        _modes = _seedModes(
          capabilities: capabilities,
          config: config ?? CaptureConfig.defaults(),
-         settings: settings ?? StreamSettings.defaults(),
          samples: encodeSamples,
        ),
        _log = log {
@@ -611,7 +608,6 @@ class AgentCoordinator {
     _modes = _seedModes(
       capabilities: capabilities,
       config: _config,
-      settings: _settings,
       samples: _encodeSamples,
     );
     // The modes above already claim the fresh defaults, and `reconfigure`
@@ -824,7 +820,15 @@ class AgentCoordinator {
       await encoder.start(
         width: mode.resolution.width,
         height: mode.resolution.height,
-        fps: mode.fps,
+        // The **request**, not the declaration. `mode.fps` is what the server
+        // is told and what it estimates segment durations from; this is the
+        // ceiling the pipeline is asked to run at. The two are allowed to
+        // differ, and in exactly one direction: the request may exceed what is
+        // delivered, and the declaration may not. Asking for the declared rate
+        // instead would throttle the pump to a number that is only a
+        // placeholder until a measurement replaces it, and lose frames the
+        // device could have produced.
+        fps: _settings.fps,
         quality: _settings.quality,
       );
     } catch (_) {

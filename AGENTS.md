@@ -4,6 +4,16 @@ Kiosk-style cross-platform webcam edge client (Flutter, 5 platforms) for the
 `smartclass-webcam-server` device protocol. The device is subordinate: it pushes
 nothing until the server commands it. Authoritative docs: `README.md`,
 `docs/implementation-status.md`, and the server repo's `docs/protocol/`.
+
+**Starting work on this repo? Read `docs/agents/handover.md` first.** It lists
+what is *not* done, which of those an agent can actually do versus which need the
+user's own terminal or real hardware, and the traps that are expensive to
+rediscover. Current gate: `dart run tool/verify_pure.dart`, `failed: 0`.
+
+Decision conflicts resolve to `docs/adr/` (start with
+`0001-dual-mode-capture-decisions.md`); the older plans under
+`docs/superpowers/plans/` are superseded where they disagree.
+
 Project prose is mostly Chinese; code comments are English.
 
 Verification constraints: `dart run tool/verify_pure.dart` is the runnable

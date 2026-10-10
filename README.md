@@ -141,7 +141,7 @@ dart run tool/verify_pure.dart    # 纯 Dart 自检，不需要 Flutter 引擎
 ```
 
 断言数**以实跑输出为准**（文档不写静态计数，那会立刻过期）；最近一次为
-`passed: 940, failed: 0`。专项检查（Annex B、编码吞吐、默认模式）都由主入口调用，
+`passed: 1071, failed: 0`。专项检查（Annex B、编码吞吐、默认模式、持续帧率）都由主入口调用，
 不是只写未运行的文件。
 
 端到端联调（真机 × 真服务端）见 `docs/superpowers/plans/2026-10-04-android-server-e2e-test.md`，
@@ -193,6 +193,7 @@ AgentCoordinator ── 命令驱动的状态机：每条命令都 ack，没收�
   capture/camera_capabilities ── CameraCapabilities / CameraMode / declaredCapabilities
   capture/default_mode ── defaultModeFor：1080p 封顶 + 同形状 + 帧率只降不升（唯一入口）
   capture/encode_budget ── EncodeSample / 可持续速率 / 按模式 codec / EncodeEvidence 缓存
+  capture/sustained_rate ── SustainedRateMeter（预热不计、只数新帧）+ EncodeBudgetProbe 接缝
   capture/annexb ── AnnexBSplitter：多 slice 合并为同一 access unit
   capture/camera_order ── canonicalCameraOrder（rear → external → front，组内按像素降序）
   capture/capability_probe ── CapabilityProbe 接口 + kProbeFramerates
@@ -271,9 +272,18 @@ Linux 的 GStreamer 分支已写完但**尚未编译**，现暂停。
 - 分辨率取**实测**值里 ≤1080p 且**与摄像头自身形状相同**的最大者（4K 摄像头默认 1080p，
   4K 仍写进声明；720p 摄像头默认 720p）。形状用交叉相乘判断，**不按像素总数猜几何**。
 - 帧率取阶梯里 ≤ 实测上限且 ≤ 60 的最高档，**只向下取整**。
-- **无实测证据时不推断**：由调用方显式传入 `unmeasuredFps`。目前传的是
-  `StreamSettings.fps`（= 60），即"声明 60 但可能只交付 5–10"的缺口仍然存在，
-  这是**已知未修复状态**，不是验收豁免。
+- **声明帧率 ≠ 请求帧率**，这是「声明 60 但只交付 5–10」的修复：
+  - **请求帧率**（`AppConfig.defaultFps` = 60）是管线被要求跑到的上限，泵按它取帧，
+    **不因为声明值低就节流**；
+  - **声明帧率**（`CameraMode.fps`）写进注册、被服务端用于估段时长，
+    **不得高于已证实的交付量**。
+  - 有实测证据时声明实测值；**没有时声明下限 `kFpsWithoutEvidence`（5），不再声明 60**。
+- **为什么探针给不出这个数**：`_acceptsFramerate` 只测「用 `fps: 60` 打开相机、
+  `initialize()` 不抛」，即插件**接受**了这个数字，不是**产出**了它。五个平台的插件栈
+  都没有报告真实帧率范围的 API，真正的上限由采集路径（每帧一次 `takePicture()`）决定。
+- 真实的持续帧率由 `SustainedRateMeter`（`lib/src/capture/sustained_rate.dart`）
+  从交付的帧流里数出来：**预热期不计、只数新帧、窗口固定**，只向下取整。
+  平台接缝是 `EncodeBudgetProbe` —— **尚未有平台实现**，所以现在声明的是占位下限。
 
 现行决策入口是 **`docs/adr/0001-dual-mode-capture-decisions.md`**；旧计划里与之冲突的
 假设已被取代，不要照抄。

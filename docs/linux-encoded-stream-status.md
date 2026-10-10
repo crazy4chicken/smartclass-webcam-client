@@ -75,6 +75,14 @@ Linux 的 `Camera::SendError` 也在用同一个函数。没有新开 EventChann
 这是**对 GStreamer 的假设，不是对字节的事实**，正好由 `EncodedPacket.pictures` 那条交叉
 校验兜住：Dart 切出来的单元数对不上就整包丢弃并计数，而不是把解不出来的东西发出去。
 
+> ⚠️ **2026-10-10：契约已扩，实现 `EncodedStreamChannel` 前先看现行定义**
+> （`lib/src/capture/native_video_encoder.dart`）。`EncodedPacket` 多了
+> `sourceSeq` / `sourcePts` / `sessionGeneration` / `isEos`，`open()` 多了
+> `required int sessionGeneration`。两条实现义务：
+> ① **`sourceSeq` 必须是采集侧的源序号**，不能自己重新编号 —— 重新编号永远不重复，
+> 帧率测量就永远偏乐观（这正是 `videorate` 陷阱要防的）；
+> ② 每个包原样回传 `open()` 给的那个代次，否则换 run 之后仍在途的回调会被当成当前流的包。
+
 ---
 
 ## 三、与计划的偏离（3 处，都写回计划文档了）

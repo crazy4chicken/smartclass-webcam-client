@@ -48,6 +48,7 @@ import 'package:webcam_client/src/capture/native_video_encoder.dart';
 import 'package:webcam_client/src/capture/resolution_selector.dart';
 import 'package:webcam_client/src/capture/serial_lock.dart';
 import 'package:webcam_client/src/capture/stream_settings.dart';
+import 'package:webcam_client/src/capture/sustained_rate.dart';
 import 'package:webcam_client/src/capture/encode_budget.dart';
 import 'package:webcam_client/src/capture/video_encoder.dart';
 import 'package:webcam_client/src/config/app_config.dart';
@@ -61,6 +62,7 @@ import 'package:webcam_client/src/config/connection_settings.dart';
 // from `main` below — a suite that is never called is a suite that can rot.
 import 'verify_annexb.dart';
 import 'verify_default_mode.dart';
+import 'verify_sustained_rate.dart';
 import 'verify_encode_budget.dart';
 
 // --- harness ----------------------------------------------------------------
@@ -406,9 +408,12 @@ Uint8List _cat(List<Uint8List> parts) =>
     Uint8List.fromList(<int>[for (final part in parts) ...part]);
 
 /// A channel whose packets the test drives by hand.
+///
+/// Mints a fresh stream per [open], the way a plugin mints a new capture
+/// session: a packet from the run before must not be deliverable through the
+/// one that replaced it.
 class _FakeEncodedChannel implements EncodedStreamChannel {
-  final StreamController<EncodedPacket> _controller =
-      StreamController<EncodedPacket>();
+  StreamController<EncodedPacket>? _current;
 
   int openCalls = 0;
   int closeCalls = 0;
@@ -417,9 +422,15 @@ class _FakeEncodedChannel implements EncodedStreamChannel {
   int? lastHeight;
   int? lastFps;
   int? lastQuality;
+  int? lastSessionGeneration;
+
+  /// When set, [open] fails the way a plugin with no encoder does.
+  Object? openError;
 
   /// What the plugin pushes while flushing — that is, from inside [close].
   Future<void> Function()? onClose;
+
+  int _nextSourceSeq = 0;
 
   @override
   Future<Stream<EncodedPacket>> open({
@@ -428,6 +439,7 @@ class _FakeEncodedChannel implements EncodedStreamChannel {
     required int height,
     required int fps,
     required int quality,
+    required int sessionGeneration,
   }) async {
     openCalls++;
     lastCameraEnum = cameraEnum;
@@ -435,17 +447,55 @@ class _FakeEncodedChannel implements EncodedStreamChannel {
     lastHeight = height;
     lastFps = fps;
     lastQuality = quality;
-    return _controller.stream;
+    lastSessionGeneration = sessionGeneration;
+    final error = openError;
+    if (error != null) throw error;
+
+    _nextSourceSeq = 0;
+    final controller = StreamController<EncodedPacket>();
+    _current = controller;
+    return controller.stream;
   }
 
   @override
   Future<void> close() async {
     closeCalls++;
+    final controller = _current;
+    if (controller == null) return;
     await onClose?.call();
-    await _controller.close();
+    _current = null;
+    await controller.close();
   }
 
-  void emit(EncodedPacket packet) => _controller.add(packet);
+  /// One packet from a healthy producer: the generation [open] was given, and
+  /// a source sequence that advances by one per picture unless [sourceSeq]
+  /// overrides it — which is how a test models a producer that repeats one.
+  void emit(
+    Uint8List bytes, {
+    int pictures = 1,
+    int? sourceSeq,
+    Duration? sourcePts,
+    bool isEos = false,
+    int? sessionGeneration,
+  }) {
+    final controller = _current;
+    if (controller == null || controller.isClosed) return;
+    final seq = sourceSeq ?? _nextSourceSeq;
+    _nextSourceSeq = seq + pictures;
+    controller.add(
+      EncodedPacket(
+        bytes: bytes,
+        pictures: pictures,
+        sourceSeq: seq,
+        sourcePts: sourcePts,
+        sessionGeneration: sessionGeneration ?? lastSessionGeneration ?? 0,
+        isEos: isEos,
+      ),
+    );
+  }
+
+  /// Fails the stream the way a dead pipeline does.
+  void emitError(Object error) => _current?.addError(error);
 }
 
 /// A gateway that records everything the device hands it.
@@ -3728,6 +3778,8 @@ void checkNativeVideoEncoder() {
     final received = <EncodedFrame>[];
     encoder.frames.listen(received.add);
 
+    eq('nothing is claimed before start', encoder.isRunning, false);
+
     encoder.start(width: 1920, height: 1080, fps: 60, quality: 80);
     async.flushMicrotasks();
     eq('the channel was opened once', channel.openCalls, 1);
@@ -3739,14 +3791,18 @@ void checkNativeVideoEncoder() {
     );
     eq('and the declared rate', channel.lastFps, 60);
     eq('a channel that was never opened is not closed', channel.closeCalls, 0);
+    eq('the run is claimed', encoder.isRunning, true);
+    // The generation is minted here and echoed by the producer. Without it a
+    // packet from the run before is indistinguishable from a current one.
+    eq('the run is named', channel.lastSessionGeneration, 1);
 
     // Parameter sets travel on their own and hold no picture.
-    channel.emit(EncodedPacket(bytes: _cat([sps, pps]), pictures: 0));
+    channel.emit(_cat([sps, pps]), pictures: 0);
     async.flushMicrotasks();
     eq('parameter sets alone are not a frame', received.length, 0);
 
     // The picture that follows them claims them, two packets later.
-    channel.emit(EncodedPacket(bytes: idr, pictures: 1));
+    channel.emit(idr, sourcePts: const Duration(milliseconds: 40));
     async.flushMicrotasks();
     eq('one frame per access unit', received.length, 1);
     eqBytes(
@@ -3757,8 +3813,20 @@ void checkNativeVideoEncoder() {
     eq('an IDR is a key frame', received.single.isKeyFrame, true);
     eq('seq starts at zero', received.single.seq, 0);
     eq('the clock stamps the frame', received.single.ts, DateTime.utc(2026));
+    // The capture's own numbering travels with the frame rather than being
+    // replaced by `seq`: only the source can show that a picture repeated.
+    eq(
+      'the source sequence travels with the frame',
+      received.single.sourceSeq,
+      0,
+    );
+    eq(
+      'and so does the source timestamp, when the producer reports one',
+      received.single.sourcePts,
+      const Duration(milliseconds: 40),
+    );
 
-    channel.emit(EncodedPacket(bytes: slice, pictures: 1));
+    channel.emit(slice);
     async.flushMicrotasks();
     eq('a second access unit is a second frame', received.length, 2);
     eq(
@@ -3767,16 +3835,35 @@ void checkNativeVideoEncoder() {
       false,
     );
     eq('seq advances', received.last.seq, 1);
+    eq('and so does the source sequence', received.last.sourceSeq, 1);
+    eq('with no timestamp claimed for it', received.last.sourcePts, null);
     eqBytes('and carries only its own bytes', received.last.bytes, slice);
+
+    // A flush can hand over several pictures at once. They were consecutive in
+    // the capture, so they take consecutive source numbers — numbering them
+    // all the same would make a meter read every tail as a run of repeats.
+    channel.emit(_cat([idr, slice]), pictures: 2);
+    async.flushMicrotasks();
+    eq('a multi-picture packet is one frame per picture', received.length, 4);
+    eq(
+      'numbered on from where the packet starts',
+      '${received[2].sourceSeq},${received[3].sourceSeq}',
+      '2,3',
+    );
+    eq(
+      'each with its own wire index',
+      '${received[2].seq},${received[3].seq}',
+      '2,3',
+    );
 
     // The count is the only cross-check Annex B allows. A packet holding two
     // pictures while claiming one is not a stream anybody can decode.
-    channel.emit(EncodedPacket(bytes: _cat([idr, slice]), pictures: 1));
+    channel.emit(_cat([idr, slice]));
     async.flushMicrotasks();
     eq(
       'a packet whose units disagree with its count is dropped whole',
       received.length,
-      2,
+      4,
     );
     eq('the dropped packet is counted', encoder.droppedPackets, 1);
     eq('and so are the units it was dropped for', encoder.droppedUnits, 2);
@@ -3784,22 +3871,145 @@ void checkNativeVideoEncoder() {
     // The plugin flushes when told to stop, and that tail is the end of the
     // recording — cancelling first would throw it away.
     final trailing = _h264Nal(1, [0x89]);
+    eq('no end of stream was declared yet', encoder.sawEos, false);
     channel.onClose = () async {
-      channel.emit(EncodedPacket(bytes: trailing, pictures: 1));
+      channel.emit(trailing, isEos: true);
     };
     encoder.stop();
     async.flushMicrotasks();
     eq(
       'the tail the plugin flushes still reaches the wire',
       received.length,
-      3,
+      5,
     );
     eqBytes('as its own frame', received.last.bytes, trailing);
     eq('stop closed the channel', channel.closeCalls, 1);
+    eq('the run is no longer claimed', encoder.isRunning, false);
+    eq('and the producer declared the end', encoder.sawEos, true);
 
     encoder.stop();
     async.flushMicrotasks();
     eq('stop is idempotent', channel.closeCalls, 1);
+  });
+
+  // A packet from the previous run must not surface in the new one. The plugin
+  // is a process-wide singleton, so its capture callback can still be in
+  // flight when Dart has already started the next recording — and filing those
+  // bytes under the new stream's id would put the last recording's tail into
+  // this one.
+  fakeAsync((async) {
+    final idr = _h264Nal(5, [0x84]);
+    final channel = _FakeEncodedChannel();
+    final encoder = NativeVideoEncoder(
+      codec: CaptureCodec.h264,
+      cameraEnum: 0,
+      streamId: streamId,
+      channel: channel,
+    );
+    final received = <EncodedFrame>[];
+    encoder.frames.listen(received.add);
+
+    encoder.start(width: 640, height: 480, fps: 15, quality: 60);
+    async.flushMicrotasks();
+    final firstRun = channel.lastSessionGeneration!;
+
+    // Issued back to back with no wait between them, which is the case the
+    // lock exists for: unserialised, the old run's teardown lands *after* the
+    // new run has claimed its channel and clears the claim underneath it.
+    encoder.stop();
+    encoder.start(width: 640, height: 480, fps: 15, quality: 60);
+    async.flushMicrotasks();
+    async.flushMicrotasks();
+    eq(
+      'a restart gets a generation of its own',
+      channel.lastSessionGeneration == firstRun,
+      false,
+    );
+
+    channel.emit(idr, sessionGeneration: firstRun);
+    async.flushMicrotasks();
+    eq('a packet from the previous run is not delivered', received.length, 0);
+    eq('and it is counted rather than swallowed', encoder.stalePackets, 1);
+
+    channel.emit(idr);
+    async.flushMicrotasks();
+    eq('a packet from this run is delivered', received.length, 1);
+    eq('and is not counted as stale', encoder.stalePackets, 1);
+  });
+
+  // An error on the channel is a dead pipeline, not a crash: the coordinator
+  // stops the stream itself, and an unhandled error here would surface as an
+  // unrelated failure somewhere else entirely.
+  fakeAsync((async) {
+    final channel = _FakeEncodedChannel();
+    final encoder = NativeVideoEncoder(
+      codec: CaptureCodec.h264,
+      cameraEnum: 0,
+      streamId: streamId,
+      channel: channel,
+    );
+    encoder.frames.listen((_) {});
+    encoder.start(width: 640, height: 480, fps: 15, quality: 60);
+    async.flushMicrotasks();
+
+    channel.emitError(StateError('pipeline died'));
+    async.flushMicrotasks();
+    eq('a channel error is counted, not thrown', encoder.latePackets, 1);
+  });
+
+  // A channel that never opened must leave nothing claimed, or a later stop
+  // believes there is a live pipeline to flush and a subscription to cancel.
+  fakeAsync((async) {
+    final channel = _FakeEncodedChannel()..openError = StateError('no encoder');
+    final encoder = NativeVideoEncoder(
+      codec: CaptureCodec.h264,
+      cameraEnum: 0,
+      streamId: streamId,
+      channel: channel,
+    );
+    encoder.frames.listen((_) {});
+
+    Object? failure;
+    encoder
+        .start(width: 640, height: 480, fps: 15, quality: 60)
+        .catchError((Object e) => failure = e);
+    async.flushMicrotasks();
+    eq('an open that fails surfaces the failure', failure is StateError, true);
+    eq('and leaves nothing claimed', encoder.isRunning, false);
+
+    encoder.stop();
+    async.flushMicrotasks();
+    eq(
+      'so a stop does not close a channel that never opened',
+      channel.closeCalls,
+      0,
+    );
+  });
+
+  // start and stop both rebuild the channel, and the plugin call underneath
+  // cannot overlap with itself. Unserialised, the second start opens on top of
+  // the first and the encoder is left subscribed to a stream nobody feeds.
+  fakeAsync((async) {
+    final channel = _FakeEncodedChannel();
+    final encoder = NativeVideoEncoder(
+      codec: CaptureCodec.h264,
+      cameraEnum: 0,
+      streamId: streamId,
+      channel: channel,
+    );
+    encoder.frames.listen((_) {});
+
+    encoder.start(width: 640, height: 480, fps: 15, quality: 60);
+    encoder.start(width: 1280, height: 720, fps: 30, quality: 70);
+    async.flushMicrotasks();
+    async.flushMicrotasks();
+    eq('both starts opened a channel', channel.openCalls, 2);
+    eq(
+      'and the first was closed before the second opened',
+      channel.closeCalls,
+      1,
+    );
+    eq('leaving the last one in charge', channel.lastWidth, 1280);
   });
 
   // Bytes nothing can be made of. Kept on their own stream: a start code whose
@@ -3819,18 +4029,14 @@ void checkNativeVideoEncoder() {
     async.flushMicrotasks();
 
     // Nothing to cut is not an error — it is simply not a frame.
-    channel.emit(
-      EncodedPacket(bytes: Uint8List.fromList([0x00, 0x00, 0x01]), pictures: 0),
-    );
+    channel.emit(Uint8List.fromList([0x00, 0x00, 0x01]), pictures: 0);
     async.flushMicrotasks();
     eq(
       'a start code with nothing behind it is not a frame',
       received.length,
       0,
     );
-    channel.emit(
-      EncodedPacket(bytes: Uint8List.fromList([0xAB, 0xCD, 0xEF]), pictures: 0),
-    );
+    channel.emit(Uint8List.fromList([0xAB, 0xCD, 0xEF]), pictures: 0);
     async.flushMicrotasks();
     eq('bytes with no start code are not a frame', received.length, 0);
   });
@@ -3857,11 +4063,11 @@ void checkNativeVideoEncoder() {
     encoder.start(width: 1280, height: 720, fps: 30, quality: 70);
     async.flushMicrotasks();
 
-    channel.emit(EncodedPacket(bytes: _cat([vps, sps, pps]), pictures: 0));
+    channel.emit(_cat([vps, sps, pps]), pictures: 0);
     async.flushMicrotasks();
     eq('an HEVC parameter-set run is not a frame', received.length, 0);
 
-    channel.emit(EncodedPacket(bytes: idr, pictures: 1));
+    channel.emit(idr);
     async.flushMicrotasks();
     eq('an HEVC IDR is one frame', received.length, 1);
     eq('and a key frame', received.single.isKeyFrame, true);
@@ -3870,6 +4076,67 @@ void checkNativeVideoEncoder() {
       received.single.bytes,
       _cat([vps, sps, pps, idr]),
     );
+  });
+}
+
+/// The producer wiring the sustained-rate rules were missing.
+///
+/// `SustainedRateMeter`'s duplicate rule was tested from the day it was
+/// written, but nothing in the app fed the meter, so the case it exists for —
+/// a producer that pads its output by repeating the last picture — could
+/// neither happen nor be seen. This drives a **real** [NativeVideoEncoder]
+/// from a channel that repeats a source sequence, through
+/// [measureDeliveredRate], and pins that the repeat is not counted as
+/// delivery.
+///
+/// The meter's rules themselves live in `verify_sustained_rate.dart`; what is
+/// checked here is the seam, which is why it sits next to the encoder.
+void checkDeliveredRateFromEncoder() {
+  section('the measured rate is what the encoder delivered');
+  fakeAsync((async) {
+    final idr = _h264Nal(5, [0x84]);
+    final slice = _h264Nal(1, [0x87]);
+
+    final channel = _FakeEncodedChannel();
+    final encoder = NativeVideoEncoder(
+      codec: CaptureCodec.h264,
+      cameraEnum: 0,
+      streamId: streamId,
+      channel: channel,
+    );
+
+    // A clock the test owns: the meter's window is wall-clock, and a repeated
+    // picture arrives at a new moment even though its sequence does not move.
+    var now = DateTime.utc(2026);
+    final meter = SustainedRateMeter(
+      warmup: Duration.zero,
+      window: const Duration(seconds: 2),
+    );
+    measureDeliveredRate(encoder: encoder, meter: meter, clock: () => now);
+
+    encoder.start(width: 1280, height: 720, fps: 30, quality: 70);
+    async.flushMicrotasks();
+
+    // 40 ticks 50 ms apart. Every other tick repeats the previous picture,
+    // which is what `videorate` does when it pads a pipeline up to a rate
+    // nothing is capturing: the wire index still advances for all 40, so a
+    // meter counting frames would report 20 fps.
+    var sourceSeq = 0;
+    for (var i = 0; i < 41; i++) {
+      channel.emit(
+        i.isEven ? idr : slice,
+        sourceSeq: i.isEven ? sourceSeq++ : sourceSeq - 1,
+      );
+      // Delivered at the moment the clock reads, so the window is the test's.
+      async.flushMicrotasks();
+      now = now.add(const Duration(milliseconds: 50));
+    }
+
+    final result = meter.measurement;
+    check('the window closed', result != null);
+    eq('half the frames were repeats, so the rate halves', result?.fps, 10);
+    eq('the repeats are counted as repeats', result?.duplicateFrames, 20);
+    eq('and only the new pictures count', result?.newFrames, 20);
   });
 }
 
@@ -4938,20 +5205,54 @@ Future<void> checkCoordinator() async {
     );
   }
 
-  // The declared default rate, locked end to end: it is what `StreamSettings`
-  // seeds every camera at, what the registration body announces, and what the
-  // server divides by to estimate segment durations. A drift back to a low
-  // number is invisible locally — nothing throws — and only shows up as a
-  // server recording segments shorter than it thinks.
-  eq('the device declares the required default rate', AppConfig.defaultFps, 60);
+  // The declared rate and the requested rate are two different numbers, and
+  // the distinction is the whole fix for "declares 60, delivers 5-10".
+  //
+  // `AppConfig.defaultFps` is what the pipeline is *asked* for — a request
+  // ceiling, which is allowed to exceed what comes out. The declared rate is
+  // what the server is told and what it estimates segment durations from, so
+  // it must be a rate the device was seen to deliver. With no measurement that
+  // is the floor, not the target.
+  eq('the pipeline is asked for the target rate', AppConfig.defaultFps, 60);
   eq(
-    'a freshly built coordinator seeds every camera at it',
+    'but an unmeasured device declares the floor, not the target',
     buildWithMode(cameraCount: 2).coordinator.activeMode.fps,
-    60,
+    kFpsWithoutEvidence,
   );
   check(
-    'and a camera probed at [60, 30, 15] declares 60',
-    buildWithMode().coordinator.declaredFor(0).framerates.contains(60),
+    'and the declared rate is one the registration can carry',
+    buildWithMode().coordinator
+        .declaredFor(0)
+        .framerates
+        .contains(kFpsWithoutEvidence),
+  );
+  // The gap closes by itself once there is evidence: the same device, told what
+  // it measurably held, declares that instead of the placeholder.
+  eq(
+    'with evidence the declaration becomes the measured rate',
+    buildWithMode(
+      encodeSamples: <EncodeSample>[
+        const EncodeSample(
+          codec: CaptureCodec.mjpeg,
+          resolution: CameraResolution(width: 1920, height: 1080),
+          measuredFps: 60,
+        ),
+      ],
+    ).coordinator.activeMode.fps,
+    60,
+  );
+  eq(
+    'and evidence below the target is declared as measured, not raised to it',
+    buildWithMode(
+      encodeSamples: <EncodeSample>[
+        const EncodeSample(
+          codec: CaptureCodec.mjpeg,
+          resolution: CameraResolution(width: 1920, height: 1080),
+          measuredFps: 8,
+        ),
+      ],
+    ).coordinator.activeMode.fps,
+    5,
   );
 
   {
@@ -5059,7 +5360,7 @@ Future<void> checkCoordinator() async {
     eq(
       'and the mode is unchanged',
       h.coordinator.activeMode.toString(),
-      'CameraMode(1920x1080 @ 60fps)',
+      'CameraMode(1920x1080 @ ${kFpsWithoutEvidence}fps)',
     );
   }
 
@@ -5109,17 +5410,17 @@ Future<void> checkCoordinator() async {
     eq(
       'and the mode is untouched',
       h.coordinator.activeMode.toString(),
-      'CameraMode(1920x1080 @ 60fps)',
+      'CameraMode(1920x1080 @ ${kFpsWithoutEvidence}fps)',
     );
     eq(
       'the other camera keeps its own mode',
       h.coordinator.cameraModes[0].fps,
-      60,
+      kFpsWithoutEvidence,
     );
     eq(
       'which is recorded per announced enum',
       h.coordinator.cameraModes[1].fps,
-      60,
+      kFpsWithoutEvidence,
     );
     eq('and reported', h.coordinator.reportStatus()['active_camera'], 1);
     eq(
@@ -5479,7 +5780,9 @@ Future<void> checkCoordinator() async {
         id: 'e',
         cameraEnum: 0,
         resolution: CameraResolution(width: 1280, height: 720),
-        fps: 60,
+        // The device's own published rate, which is the floor until something
+        // measures what it delivers.
+        fps: kFpsWithoutEvidence,
       ),
     );
     eq(
@@ -5625,9 +5928,11 @@ Future<void> main() async {
   await checkCoordinatorCapabilityReport();
   checkMjpegEncoder();
   checkNativeVideoEncoder();
+  checkDeliveredRateFromEncoder();
   runAnnexBChecks();
   await runEncodeBudgetChecks();
   runDefaultModeChecks();
+  runSustainedRateChecks();
   await checkCameraProvider();
   await checkFrameStore();
   await checkMockGateway();

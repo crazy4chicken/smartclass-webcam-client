@@ -355,6 +355,22 @@ void checkHevcNonIdr() {
     codec: CaptureCodec.h265,
   );
   eq('SEI+IDR: one unit', withSei.length, 1);
+
+  // Suffix SEI (type 40) is treated exactly like prefix SEI: it carries no
+  // picture, so it is held and rides in front of whatever picture comes next.
+  // Deliberate and documented — the server stores bare frames, so a stray SEI
+  // in front of a picture is harmless, whereas dropping the bytes is not.
+  final List<int> suffixSei = nal(<int>[0x50, 0x01], <int>[0x0D, 0x0E]);
+  final AnnexBSplitter suffix = AnnexBSplitter(codec: CaptureCodec.h265);
+  eq('a suffix SEI claims nothing', suffix.add(u8(suffixSei)).length, 0);
+  final List<AccessUnit> afterSuffix = suffix.add(u8(hIdr));
+  eq('and rides in front of the next picture', afterSuffix.length, 1);
+  if (afterSuffix.length == 1) {
+    eqBytes('into one unit, ahead of it', afterSuffix[0].bytes, <int>[
+      ...suffixSei,
+      ...hIdr,
+    ]);
+  }
 }
 
 void checkTrailingFragmentDropped() {
@@ -576,6 +592,169 @@ void checkUnclaimedRunIsNeverEmitted() {
   );
 }
 
+void checkPendingIsBounded() {
+  section('the pending run is bounded');
+
+  // A producer that emits out-of-band NALs and never a picture. Nothing here
+  // can ever become a unit — a picture is emitted, never held — so without a
+  // cap the splitter would hold all of it for as long as the process lives,
+  // and this runs on kiosks expected to stay up for weeks.
+  final AnnexBSplitter sets = AnnexBSplitter(codec: CaptureCodec.h264);
+  final Uint8List hugeSei = u8(<int>[
+    ...nal(h264Sei),
+    ...List<int>.filled(kMaxPendingBytes ~/ 2 + 1024, 0x0B),
+  ]);
+  eq('one huge SEI claims nothing', sets.add(hugeSei).length, 0);
+  check('and is held while it still fits', sets.pendingBytes > 0);
+  eq('a second one claims nothing either', sets.add(hugeSei).length, 0);
+  check(
+    'but the run is not held without bound',
+    sets.pendingBytes <= kMaxPendingBytes,
+  );
+  eq('the cap was reached and reported', sets.pendingOverflows, 1);
+  check('and the discarded bytes are counted', sets.droppedPendingBytes > 0);
+
+  // The other way in: a producer that emits no start code at all. Every chunk
+  // piles onto the last, because there is no boundary to re-sync on.
+  final AnnexBSplitter codeless = AnnexBSplitter(codec: CaptureCodec.h264);
+  final Uint8List chunk = u8(List<int>.filled(1 << 16, 0xAB));
+  for (var i = 0; i < 20; i++) {
+    eq(
+      'chunk $i of a start-code-less stream claims nothing',
+      codeless.add(chunk).length,
+      0,
+    );
+  }
+  check('and that is bounded too', codeless.pendingBytes <= kMaxPendingBytes);
+  check('with the overflow reported', codeless.pendingOverflows > 0);
+
+  // Re-sync: the splitter still works afterwards. What comes out is the
+  // picture alone — what was discarded is gone, and none of it was a picture.
+  final List<AccessUnit> after = sets.add(u8(idr));
+  eq('a picture after an overflow still closes a unit', after.length, 1);
+  if (after.length == 1) {
+    check('and it is a key frame', after[0].isKeyFrame);
+    eqBytes('with nothing stale in front of it', after[0].bytes, idr);
+  }
+
+  // A well-formed stream must never trip the cap. This is a bound on a
+  // failure, not a limit on ordinary work.
+  final AnnexBSplitter healthy = AnnexBSplitter(codec: CaptureCodec.h264);
+  eq('SPS+PPS claim nothing', healthy.add(u8(<int>[...sps, ...pps])).length, 0);
+  eq('the IDR closes one unit', healthy.add(u8(idr)).length, 1);
+  eq('no overflow on a well-formed stream', healthy.pendingOverflows, 0);
+  eq('and nothing was discarded', healthy.droppedPendingBytes, 0);
+  eq('leaving nothing pending', healthy.pendingBytes, 0);
+}
+
+void checkTruncatedAndIllegalHeaders() {
+  section('truncated and illegal NAL headers');
+
+  // A VCL NAL that is nothing but its header: there is no slice header to read
+  // the first-slice flag from. Claiming it opens a picture is the safe answer —
+  // it becomes a unit a decoder may still start from, rather than bytes folded
+  // into a picture they do not belong to.
+  final List<AccessUnit> bareVcl = splitAnnexB(
+    u8(nal(h264Slice)),
+    codec: CaptureCodec.h264,
+  );
+  eq('a header-only H.264 slice is one unit', bareVcl.length, 1);
+  if (bareVcl.length == 1) check('and not a key frame', !bareVcl[0].isKeyFrame);
+
+  // Same for HEVC, whose header is two bytes: with only the first one present
+  // there is still nothing to read.
+  final List<AccessUnit> halfHevc = splitAnnexB(
+    u8(nal(<int>[0x02])),
+    codec: CaptureCodec.h265,
+  );
+  eq('a one-byte HEVC NAL is one unit', halfHevc.length, 1);
+
+  // The branch only matters once a picture is open: a NAL with no slice header
+  // has nothing saying "I continue the picture in front of me", so it starts a
+  // new one. Folding it in would put bytes into a picture they do not belong
+  // to — and a picture is what a decoder consumes at once.
+  final List<AccessUnit> afterPicture = splitAnnexB(
+    u8(<int>[...idr, ...nal(h264Slice), ...slice]),
+    codec: CaptureCodec.h264,
+  );
+  eq(
+    'a header-only slice between two pictures is its own',
+    afterPicture.length,
+    3,
+  );
+  if (afterPicture.length == 3) {
+    eqBytes(
+      'the picture before it is closed first',
+      afterPicture[0].bytes,
+      idr,
+    );
+    eqBytes(
+      'the header-only NAL stands alone',
+      afterPicture[1].bytes,
+      nal(h264Slice),
+    );
+    eqBytes(
+      'and the slice after it is untouched',
+      afterPicture[2].bytes,
+      slice,
+    );
+  }
+
+  // A slice that says "I continue a picture" while nothing is open. A stream
+  // can only produce that by starting mid-picture, so opening one is the
+  // conservative read; the alternative drops the bytes entirely.
+  final List<AccessUnit> orphan = splitAnnexB(
+    u8(nal(h264Slice, <int>[0x11, 0x22])),
+    codec: CaptureCodec.h264,
+  );
+  eq('a continuation with no picture open opens one', orphan.length, 1);
+
+  // NAL types that are neither VCL nor a known out-of-band type. They carry no
+  // picture, so they are held until something claims them — and what claims
+  // them is the next picture, not a unit of their own.
+  for (final List<int> header in <List<int>>[
+    <int>[0x00], // H.264 type 0, unspecified
+    <int>[0x0C], // H.264 type 12, filler data
+    <int>[0x1F], // H.264 type 31, unspecified
+  ]) {
+    final int type = header[0] & 0x1F;
+    final List<int> unknown = nal(header, <int>[0x77]);
+    final AnnexBSplitter splitter = AnnexBSplitter(codec: CaptureCodec.h264);
+    eq('type $type alone claims nothing', splitter.add(u8(unknown)).length, 0);
+    final List<AccessUnit> claimed = splitter.add(u8(idr));
+    eq('type $type rides in front of the next picture', claimed.length, 1);
+    if (claimed.length == 1) {
+      eqBytes('type $type is not lost', claimed[0].bytes, <int>[
+        ...unknown,
+        ...idr,
+      ]);
+    }
+  }
+
+  // A start code with another start code right behind it: the first NAL is
+  // empty. Its code is held and rides in front of the next picture rather than
+  // being discarded — the conservative read of bytes that may belong to a NAL
+  // still arriving.
+  final List<int> bareCode = <int>[0x00, 0x00, 0x00, 0x01];
+  final List<AccessUnit> adjacent = splitAnnexB(
+    u8(<int>[...bareCode, ...idr]),
+    codec: CaptureCodec.h264,
+  );
+  eq('two adjacent start codes: one unit', adjacent.length, 1);
+  if (adjacent.length == 1) {
+    eqBytes('the empty code rides in front', adjacent[0].bytes, <int>[
+      ...bareCode,
+      ...idr,
+    ]);
+  }
+
+  // Nothing but a start code, ever. Held, and dropped with the splitter rather
+  // than emitted as a unit of its own.
+  final AnnexBSplitter onlyCode = AnnexBSplitter(codec: CaptureCodec.h264);
+  eq('a bare start code claims nothing', onlyCode.add(u8(bareCode)).length, 0);
+  eq('and is held, not emitted', onlyCode.pendingBytes, bareCode.length);
+}
+
 void runAnnexBChecks() {
   checkFourByteStartCodes();
   checkThreeByteStartCodes();
@@ -593,4 +772,6 @@ void runAnnexBChecks() {
   checkParameterSetsSurviveAChunk();
   checkChunkBoundaryInsideNal();
   checkUnclaimedRunIsNeverEmitted();
+  checkPendingIsBounded();
+  checkTruncatedAndIllegalHeaders();
 }

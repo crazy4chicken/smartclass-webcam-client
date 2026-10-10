@@ -12,9 +12,22 @@ class EncodedFrame {
     required this.ts,
     required this.bytes,
     required this.isKeyFrame,
+    required this.sourceSeq,
+    this.sourcePts,
   });
 
+  /// This frame's index within its stream, which is what the server stores.
+  ///
+  /// Monotonic per stream and never repeated — unlike [sourceSeq], which is
+  /// the capture's own numbering. The server files frames by this, so a
+  /// duplicate would make two frames indistinguishable.
   final int seq;
+
+  /// When the frame was handed over, as the encoder's clock read.
+  ///
+  /// Wall clock, deliberately **not** [sourcePts]: a repeated picture arrives
+  /// at a new moment even though its content is unchanged, and the `ts` the
+  /// server stores has to advance for every frame it is given.
   final DateTime ts;
 
   /// One encoded access unit. For `mjpeg`, one JPEG picture.
@@ -28,8 +41,23 @@ class EncodedFrame {
   /// mid-stream has nothing else to sync on.
   final bool isKeyFrame;
 
+  /// The capture-side sequence number this frame came from.
+  ///
+  /// What `SustainedRateMeter` counts, and the only field that can show a
+  /// producer padding its output with a repeated picture: a repeat carries a
+  /// sequence that did not advance while [seq] still moves. Fed by
+  /// `measureDeliveredRate`.
+  final int sourceSeq;
+
+  /// The capture-side presentation timestamp, when the producer reported one.
+  ///
+  /// Null is normal — see `EncodedPacket.sourcePts`. Carried for the
+  /// measurement path; nothing in this layer consumes it.
+  final Duration? sourcePts;
+
   @override
-  String toString() => 'EncodedFrame(#$seq, ${bytes.length}B, key=$isKeyFrame)';
+  String toString() =>
+      'EncodedFrame(#$seq, src#$sourceSeq, ${bytes.length}B, key=$isKeyFrame)';
 }
 
 /// Turns camera frames into encoded frames of one [codec].
@@ -123,6 +151,12 @@ class MjpegEncoder implements VideoEncoder {
         // A JPEG carries everything needed to decode it, so every frame is a
         // key frame and a consumer can start anywhere.
         isKeyFrame: true,
+        // The pump's counter advances per *attempt*, and every picture it
+        // delivers came from a fresh `takePicture()` — so it never repeats,
+        // and a rate meter reads this path as full delivery. That is the
+        // honest answer here: unlike an encoded stream, nothing on the
+        // still-picture path can pad its output with the last picture again.
+        sourceSeq: frame.seq,
       ),
     );
   }

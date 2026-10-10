@@ -15,6 +15,7 @@
 ## Global Constraints
 
 - 默认目标 **1920×1080 @ 60fps**；更高分辨率可保留在能力声明中，但不默认使用。低于目标的设备选其可交付的最高合适尺寸；非 16:9 的选择规则由 #26 明确，禁止仅凭像素总数猜几何。
+- **「请求帧率」与「声明帧率」是两个数**（2026-10-10 确认）：请求 = 60，是管线被要求跑到的上限，泵按它取帧、**不因为声明值低就节流**；声明写进注册并被服务端用于估段时长，**不得高于已证实的交付量**。无实测证据时声明下限（`kFpsWithoutEvidence = 5`），**不声明 60**。
 - **先降帧率，保分辨率**；不支持当前请求应 `ack ok:false`，不能偷偷换成另一 codec 或另一模式再报成功。
 - **硬件 H.265 在当前模式可持续时优先，否则 H.264**。某 codec 在 30fps 可用不表示它在当前 60fps 可用。
 - 视频采集和编码在 native 内完成，原始帧不跨入 Dart，视频路径不落临时文件。照片是否也要求完全无磁盘，由 #26 消除旧文档歧义。
@@ -86,16 +87,36 @@
 ### #9 统一编码通道契约并修复启停生命周期
 **依赖：** #1、#26。**文件：** `native_video_encoder.dart`、`video_encoder.dart`、纯门禁、对应测试。
 - [ ] 合同覆盖 codec、绝对 WxH/fps/bitrate、cameraEnum/插件 cameraId、源 seq/PTS、AU/分片边界、session 代次和成功/失败/EOS。
-- [ ] 保证生产前接收端就绪；open 失败释放资源；start/stop 串行、停止等待尾包/drain/stream done、有界超时、旧包不进入新流。
-- [ ] fake channel 验证首包、异步尾包、错误、重复 stop、restart 及并发；错误可见，不能只计数吞掉。验收：close 完成与取消订阅次序有唯一明确语义。
+  > **2026-10-10 部分完成。** 已有：codec、绝对 WxH、fps、`cameraEnum`（物理下标由
+  > `CameraPluginBackend` 内部映射，按规范序号规则不出插件）、**源 seq / 源 PTS**、
+  > AU 边界（`pictures` + `AnnexBSplitter`）、**session 代次**、失败（`open` 抛异常）、**EOS**。
+  > **缺**：**bitrate** —— 协议里没有码率字段，`quality` 是唯一的画质旋钮，所以契约里没有它
+  > （不是遗漏，是协议没有对应物）；`bitrate` 若要进契约，前提是服务端先加字段。
+- [x] 保证生产前接收端就绪；open 失败释放资源；start/stop 串行、停止等待尾包/drain/stream done、有界超时、旧包不进入新流。
+  > **2026-10-10 完成（有界超时除外）。** `start`/`stop` 走 `SerialLock` 串行；`open` 抛异常时
+  > 回滚 `_running`/`_splitter`（否则留下「已认领但没人喂」的状态）；每 run 递增 `_generation`，
+  > `_onPacket` 丢弃代次不符的包（`stalePackets`）。**缺：`close()` 挂住时没有超时兜底。**
+- [x] fake channel 验证首包、异步尾包、错误、重复 stop、restart 及并发；错误可见，不能只计数吞掉。验收：close 完成与取消订阅次序有唯一明确语义。
+  > **2026-10-10 完成。** fake channel 覆盖首包、`close()` 期间冲刷的尾包、流上错误（计入
+  > `latePackets` 而非抛出）、重复 `stop`、restart（代次递增 + 旧包被拒）、并发 `start`×2
+  > （`closeCalls == 1` 证明串行）、`open` 失败回滚。
+  > **次序语义已定死并写进代码注释**：`close()` 先于 `cancel()`，`close()` 被 await、
+  > `cancel()` 不被 await —— close 解析即代表尾包已交付，cancel 只是善后（单订阅流的 cancel
+  > 要到下一轮事件循环才完成，等它会让下一次 `start` 依赖一个已经不可能再交付的流的拆除）。
+  > 变异验证：拆掉串行锁 / 把 cancel 挪到 close 之前 / 去掉代次校验，分别挂 1、10、4 条。
 
 ### #10 修复 AU 切分与关键帧参数集保证
 **依赖：** #1。**文件：** `annexb.dart`、NativeVideoEncoder、专项检查与真实编码样本。
-- [ ] 核查多 slice、首 slice 标志、前/后缀 SEI、三/四字节起始码、残缺/非法头、碎片边界及 pending 内存上限。
-  > **2026-10-10 部分完成。** 多 slice 合并 + 首 slice 标志（H.264 `first_mb_in_slice==0` /
-  > HEVC `first_slice_segment_in_pic_flag`，均取 slice 头首字节最高位）已实现；
-  > 前/后缀 SEI、三/四字节起始码、碎片边界、空/无码输入均有用例。**缺：pending 字节量的上限**
-  > （`AnnexBSplitter` 目前无界持有）与残缺 slice 头的系统用例。变异验证：退回「一个 VCL = 一幅图」，7 条变红。
+- [x] 核查多 slice、首 slice 标志、前/后缀 SEI、三/四字节起始码、残缺/非法头、碎片边界及 pending 内存上限。
+  > **2026-10-10 完成。** 多 slice 合并 + 首 slice 标志（H.264 `first_mb_in_slice==0` /
+  > HEVC `first_slice_segment_in_pic_flag`，均取 slice 头首字节最高位）；三/四字节起始码、
+  > 碎片边界、空/无码输入、前/后缀 SEI（后缀按前缀处理，有意、已文档化）、
+  > **残缺与非法 slice 头**（只有 NAL 头没有 slice 头、单字节 HEVC NAL、未知类型 0/12/31、
+  > 相邻两个起始码、孤立的 continuation 切片）、**pending 上限**（`kMaxPendingBytes` = 1 MiB，
+  > 超限即丢弃并计数 `pendingOverflows` / `droppedPendingBytes`，随后按下一个起始码重新同步）。
+  > 变异验证：退回「一个 VCL = 一幅图」7 条；关掉上限 6 条；无条件丢弃 19 条；
+  > 截断而非丢弃 1 条；不计数 2 条；把缺 slice 头当 continuation 1 条；把 HEVC 后缀 SEI 当图像数据 10 条。
+  > **仍缺：真实编码样本的解码证明**（需要原生编码器产出样本，B 类）。
 - [ ] 统一「原生明确 AU」与「Dart 拼分片」的边界职责；不能以无 B 帧推导单 slice，也不能以 pictures 数相等推导可解码。
   > 边界已写死并文档化：**chunk 必须含完整 picture**（边界即收口），`NativeVideoEncoder` 的
   > units==pictures 交叉校验因此保持成立；「无 B 帧 → 单 slice」的推导已从注释里删掉。
@@ -106,6 +127,13 @@
 ### #11 实现吞吐测量、缓存与模式 codec 选择
 **依赖：** #9、#10、#26。**文件：** `encode_budget.dart`、能力/缓存模型、插件测量接缝、门禁。
 - [ ] 记录按相机/几何/codec 的实际源新帧、AU、交付计数、PTS、掉帧和硬件身份；预热/多窗口测量，审查当前取最快样本是否能代表持续能力。
+  > **2026-10-10 部分完成。** `SustainedRateMeter`（`lib/src/capture/sustained_rate.dart`）
+  > 从交付帧流里数持续帧率：**预热期不计、只数新帧**（`videorate` 重复帧不算交付）、
+  > **窗口固定**、只向下取整；`close()` 让卡死的管线也能收口（零是测量结果，不是"没测"）。
+  > `EncodeBudgetProbe` 接缝 + `evidenceFromMeasurements` 已就位，产出直接进 `EncodeEvidence`。
+  > **缺**：每平台的 `EncodeBudgetProbe` 实现（跑真实管线取窗口），以及多窗口/预热时长
+  > 的实测标定；PTS/掉帧/硬件身份的采集也还没有。**源 PTS 现在有承载字段**
+  > （`EncodedPacket.sourcePts` → `EncodedFrame.sourcePts`），但没有任何平台填它 —— 见 #9。
 - [x] 缓存带版本、摄像头指纹和编码器身份；命中省探测，重检/版本变化失效，损坏自愈，独立于凭据设置。
   > **2026-10-10 完成（模型与存储）。** `EncodeEvidence`（版本 + 摄像头指纹 + 编码器身份 + 样本），
   > 损坏一律 `invalid` → 未命中（自愈）；「实测为零」是**有效**结果、可与损坏区分并可缓存。
@@ -120,10 +148,12 @@
 ### #4 默认模式算法：1080p 封顶与同分辨率降帧率
 **依赖：** #1、#11。**文件：** 默认模式领域选择器、agent_coordinator、main、harness/test。
 - [x] 同源算法服务初始打开、seedModes、adoptInventory：4K 默认 1080p，低档用真实最高合适尺寸；声明仍保留更高已测能力。
-- [ ] 同分辨率选可持续最高档≤60；无证据回退与实测失败严格区分，不把失败当作空样本强推60。
-  > **算法已实现并有断言**（`defaultFpsFor` 的 `unmeasuredFps` 是必填参数，「实测为零/负也算无证据」有专门用例）。
-  > **未闭合的是接线**：调用方仍传 `StreamSettings.fps`（=60），即无证据时仍声明 60 —— 这是 #26 的开放决策，
-  > 见 `docs/adr/0001-dual-mode-capture-decisions.md` 第四节。改这一行就能翻转，但会改变每台设备的声明。
+- [x] 同分辨率选可持续最高档≤60；无证据回退与实测失败严格区分，不把失败当作空样本强推60。
+  > **2026-10-10 完成（2026-10-10 用户确认口径）。** `defaultFpsFor` 的 `unmeasuredFps` 是必填参数；
+  > 调用方传 `kFpsWithoutEvidence = 5`（阶梯最低档），**不再传 60** —— 「声明 60 交付 5–10」
+  > 的缺口由此关闭。**声明帧率与请求帧率拆开**：请求仍是 60（泵按它取帧，不节流），
+  > 声明不得高于已证实的交付量。「实测为零」与「无证据」都答下限，因为下限就是回退值。
+  > 见 `docs/adr/0001-dual-mode-capture-decisions.md` §4.1。
 - [x] 回归 4K/720p/非16:9/30fps/空证据及缓存重检；管线实际几何=当前模式=公告。验收：不再只改 coordinator 留 main 打开4K。
   > **2026-10-10 完成。** `default_mode.dart` 是唯一选择器；`main.dart` 的 `openConfig` 与
   > `adoptInventory` 的重开几何都走它。变异验证：把选择器改回「取实测上限」，8 条断言变红
@@ -146,6 +176,11 @@
 - [ ] 原生视频录制中 take_photo 仍发 JPEG，使用当前几何，不停 encoder、不触发 reconfigure。
 - [ ] 照片并发/失败准确 ack，不能污染 video 状态；still 锁放资源层，平台组合可行性另由原生验收证明。
 - [ ] 纯测试与原生真机测试分别留证。验收：不能用 mock 通过代替三 use-case 同时运行。
+  > **2026-10-10 用户确认了「无磁盘」的口径**：目的是**利用内存的速度，实现高帧率、高画质、
+  > 以及不本地存储**，所以这是**性能要求**，不只是隐私要求。**照片路径目前不满足**：
+  > `TakePictureFrameSource` 走 `takePicture()` → 临时**文件** → `readAndDelete`，每帧落盘再删。
+  > 要真正无磁盘，照片必须改走 `ImageStreamFrameSource`（`frame_source.dart` 里仍是
+  > `UnimplementedError` 占位）。见 `docs/adr/0001-dual-mode-capture-decisions.md` §4.2。
 
 ### #23 增加实测状态与可诊断失败信息
 **依赖：** #5、#11。**文件：** agent_status、协调器、状态 UI、native 统计/错误桥接。

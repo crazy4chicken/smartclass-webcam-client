@@ -21,6 +21,27 @@ const CameraResolution kTargetResolution = CameraResolution(
 /// The frame rate a device aims for: 60, and only when it was measured.
 const int kTargetFramerate = 60;
 
+/// What a device declares when it has **no measurement** of what it delivers.
+///
+/// The lowest rung on [kCommonFramerates], and deliberately not
+/// [kTargetFramerate]. The server snapshots `fps` into the stream's `metadata`
+/// and estimates segment durations from it, so a declared rate that is not the
+/// delivered rate makes every segment's length wrong; the honest value is one
+/// the device is known to hold.
+///
+/// **Why the floor and not the target.** Until an [EncodeBudgetProbe] reports
+/// what the pipeline really sustains, the only defensible number is the one
+/// that is certainly reachable. Declaring 60 while the still-picture path
+/// delivers 5-10 makes the declaration wrong by an order of magnitude in a
+/// direction nobody can see from the device; declaring the floor is wrong by a
+/// much smaller factor in the safe direction, and the measurement replaces it
+/// with the real number as soon as one exists.
+///
+/// This is a **placeholder, not a policy** — the goal is for it to stop being
+/// used. It is a named constant rather than a literal so the one place that has
+/// to change is obvious.
+const int kFpsWithoutEvidence = 5;
+
 /// True when [resolution] fits inside [limit] **in both dimensions**.
 ///
 /// Compared per axis rather than by pixel count, because a pixel count says
@@ -104,17 +125,17 @@ CameraResolution defaultResolutionFor({
 /// is required rather than defaulted on purpose. There is no honest number to
 /// infer here: a rate is a measurement, and inventing one is exactly the bug
 /// this function exists to prevent — a device that declares 60 on the strength
-/// of nothing overstates every segment it records. Callers must pass a value
-/// they can justify, and the two situations that reach this branch are not the
-/// same:
+/// of nothing mis-states every segment it records. Callers pass
+/// [kFpsWithoutEvidence], and the two situations that reach this branch are
+/// deliberately answered the same way:
 ///
-/// * **never measured** — no encoder has been probed yet, so the fallback is a
-///   placeholder until evidence exists;
-/// * **measured and held nothing** — a real result, and treating it as "no
-///   evidence, so assume the target" would turn a failed probe into a claim.
+/// * **never measured** — no probe has run yet;
+/// * **measured and held nothing** — a real result whose only honest reading is
+///   that no rate above the floor is supported.
 ///
-/// Both are answered with [unmeasuredFps]. What they must never be answered
-/// with is a rate the device has no evidence for.
+/// They coincide because the fallback *is* the floor. What neither may ever be
+/// answered with is the target rate: "we have no evidence" is not evidence for
+/// 60.
 int defaultFpsFor({
   required CameraResolution resolution,
   required List<EncodeSample> samples,

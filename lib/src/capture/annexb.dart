@@ -91,6 +91,21 @@ class AccessUnit {
 List<AccessUnit> splitAnnexB(Uint8List bytes, {required CaptureCodec codec}) =>
     AnnexBSplitter(codec: codec).add(bytes);
 
+/// How much a splitter will hold before it gives up on it.
+///
+/// Pending bytes are, by construction, **not a picture**: a picture is always
+/// emitted, never held. What is held is a run of parameter sets/SEI/AUD waiting
+/// for the picture that claims it, or the head of a NAL a chunk boundary cut —
+/// both of which are small. A parameter-set run is a few kilobytes even for
+/// 8K H.265.
+///
+/// So this is not a tuning knob, it is a bound on a failure. A producer that
+/// never emits a start code, or that emits out-of-band NALs and no picture,
+/// would otherwise grow this buffer for as long as the process lives — and
+/// this runs on kiosks that are expected to stay up for weeks. One mebibyte is
+/// far past anything legitimate and small enough that the leak cannot matter.
+const int kMaxPendingBytes = 1 << 20;
+
 /// Accumulates an Annex B byte *stream* across chunk boundaries.
 ///
 /// [splitAnnexB] is this class fed once and thrown away. Use that when the
@@ -137,7 +152,46 @@ class AnnexBSplitter {
   ///
   /// Copied out of every chunk it is built from, so the caller may reuse the
   /// buffer it passed to [add].
+  ///
+  /// Bounded by [kMaxPendingBytes]; see [_hold].
   Uint8List _pending = Uint8List(0);
+
+  /// How many times the pending run grew past [kMaxPendingBytes] and was
+  /// discarded, and how many bytes that threw away.
+  ///
+  /// Diagnostic, not an error path: the bytes could never have become a unit
+  /// (see [_hold]), so nothing decodable is lost. But a stream that trips this
+  /// is not a stream this splitter understands, and the counter is the only
+  /// place that shows.
+  int _pendingOverflows = 0;
+  int _droppedPendingBytes = 0;
+
+  /// Bytes currently held for the next chunk.
+  int get pendingBytes => _pending.length;
+
+  /// Times the pending run was discarded for growing past the cap.
+  int get pendingOverflows => _pendingOverflows;
+
+  /// Bytes discarded that way.
+  int get droppedPendingBytes => _droppedPendingBytes;
+
+  /// Holds [bytes] for the next chunk, unless they have grown past the cap.
+  ///
+  /// Dropping is safe by construction. Nothing in here is a picture — a
+  /// picture is emitted the moment its slices are complete — so these bytes
+  /// are either a run of out-of-band NALs no picture ever claimed, or the head
+  /// of a NAL that a chunk boundary cut and no later chunk finished. Neither
+  /// can ever become a unit, and the splitter re-syncs on the next start code
+  /// it sees, which is the next chunk's first one.
+  void _hold(Uint8List bytes) {
+    if (bytes.length > kMaxPendingBytes) {
+      _pendingOverflows++;
+      _droppedPendingBytes += bytes.length;
+      _pending = Uint8List(0);
+      return;
+    }
+    _pending = bytes;
+  }
 
   /// Feeds the next chunk and returns every access unit completed by it.
   ///
@@ -178,7 +232,7 @@ class AnnexBSplitter {
     // came in an earlier chunk, or bytes ahead of the first one. Held either
     // way — the next chunk says which, and neither is a unit on its own.
     if (starts.isEmpty) {
-      _pending = buffer.sublist(0);
+      _hold(buffer.sublist(0));
       return const <AccessUnit>[];
     }
 
@@ -259,7 +313,7 @@ class AnnexBSplitter {
       // Still pending: parameter sets whose picture has not arrived, or the
       // head of a NAL this chunk ended inside. Carried into the next one; if
       // the stream ends first, it is dropped with the splitter.
-      _pending = buffer.sublist(pendingStart);
+      _hold(buffer.sublist(pendingStart));
     }
     return units;
   }

@@ -261,16 +261,19 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 
 **现行决策入口是 `docs/adr/0001-dual-mode-capture-decisions.md`**，本节只记进度。
 
-2026-10-10 完成的项（全部有 `dart run tool/verify_pure.dart` 断言 + 变异验证，
-`passed: 945, failed: 0`）：
+2026-10-10 第一批完成的项（全部有 `dart run tool/verify_pure.dart` 断言 + 变异验证；
+当时 `passed: 945`。**断言数以实跑输出为准**，第二批见下方 #9 两行）：
 
 | 任务 | 状态 | 内容 |
 | --- | --- | --- |
 | #1 门禁接线 | ✅ 全部 | `runAnnexBChecks` / `runEncodeBudgetChecks` 由主入口调用，不再是只写未运行；新增 `verify_default_mode.dart` 同样接入 |
 | #4 默认模式 | ✅ 2/3 | `default_mode.dart` 唯一选择器；main 的 `openConfig`、协调器 `seedModes`、`adoptInventory` 三处同源。4K→1080p、形状保持（交叉相乘）、帧率只降不升。**未闭合：无证据时的 fps 仍是 60（#26 开放决策）** |
 | #5 协调器编码工厂 | ✅ 协调器侧 | `VideoEncoderFactory` 替代裸泵路径；`codecsForMode()` 按模式过滤（证据∩公告）；工厂拒绝 → `ack ok:false`；`isIntraOnly` 不再作可用性判据；点名 codec 不偷换 |
-| #10 AU 切分 | ⚠️ 部分 | 多 slice 合并为一个 AU（H.264/HEVC 首 slice 标志）；chunk 边界收口语义文档化。**缺：pending 上限、真实样本解码证明** |
-| #11 吞吐证据 | ⚠️ 模型层 | `EncodeSample` 证据模型 + `EncodeEvidence` 缓存（版本/指纹/编码器身份，损坏自愈）+ `canServeMode`/`sustainableCodecsAt` 按模式校验 + `SharedPrefsEncodeEvidenceStore`。**缺：插件侧测量管线（没有任何平台真正写入它）** |
+| #10 AU 切分 | ⚠️ 部分 | 多 slice 合并为一个 AU（H.264/HEVC 首 slice 标志）；chunk 边界收口语义文档化；**pending 字节量有上限**（`kMaxPendingBytes` = 1 MiB，超限丢弃并计数 `pendingOverflows`/`droppedPendingBytes`，随后按下一个起始码重新同步）；残缺/非法 slice 头系统用例（无 slice 头、单字节 HEVC NAL、未知类型、相邻起始码、孤立 continuation、后缀 SEI）。**缺：真实样本解码证明（B 类）** |
+| #11 吞吐证据 | ⚠️ 模型层 | `EncodeSample` 证据模型 + `EncodeEvidence` 缓存（版本/指纹/编码器身份，损坏自愈）+ `canServeMode`/`sustainableCodecsAt` 按模式校验 + `SustainedRateMeter`（预热不计、只数新帧、窗口固定）+ `EncodeBudgetProbe` 接缝 + `SharedPrefsEncodeEvidenceStore`。**缺：插件侧测量管线（没有任何平台实现 `EncodeBudgetProbe`）** |
+| #4.1 声明帧率 | ✅ 已修复 | 声明帧率与请求帧率拆开：请求 60（泵不节流），声明在有证据时取实测、**无证据时取下限 5**（不再声明 60）。探针给不出这个数——它只测「接受」不测「持续」，已写进 ADR |
+| #9 编码通道契约 | ⚠️ 2/3 | `EncodedPacket` 增加 `sourceSeq`/`sourcePts`/`sessionGeneration`/`isEos`；`EncodedStreamChannel.open()` 增加 `sessionGeneration`；`EncodedFrame` 增加 `sourceSeq`/`sourcePts`。`start`/`stop` 走 `SerialLock`，`open` 失败回滚，旧 run 的包按代次丢弃（`stalePackets`）。**缺：bitrate（协议无此字段）、`close()` 超时兜底** |
+| #9/A2 生产者接线 | ✅ 已完成 | `measureDeliveredRate()`（`sustained_rate.dart`）把编码器交付流喂给 `SustainedRateMeter`，喂 `sourceSeq` 而非 `seq`。门禁用**真实 `NativeVideoEncoder`** + 重复源序号证明「重复不算交付」。**注意：生产侧暂无调用者** —— 它是各平台 `EncodeBudgetProbe` 的公共身体，而那些实现都还没有 |
 
 **变异验证记录**（改坏实现 → 确认断言变红）：
 
@@ -281,6 +284,21 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | Annex B 退回「一个 VCL = 一幅图」 | 7 条 |
 | 协调器退回「可用性不按模式」 | 4 条 |
 | 默认模式退回「取实测上限」 | 8 条（含 main/adoptInventory 打开 4K） |
+| 持续帧率把重复帧当交付 | 7 条（`videorate` 凑数的陷阱） |
+| 编码器不按代次丢弃旧 run 的包 | 4 条 |
+| 一个包里的多张图共用同一个源序号 | 1 条 |
+| `open` 失败后不回滚 `_running` | 1 条 |
+| 不记录生产者声明的 EOS | 1 条 |
+| 每个 run 不递增 session 代次 | 6 条 |
+| `start`/`stop` 去掉串行锁 | 1 / 3 条 |
+| 把 `cancel()` 挪到 `close()` 之前 | 10 条（尾包被丢，正是该次序要防的） |
+| meter 喂 `seq` 而不是 `sourceSeq` | 3 条（重复帧被当成交付） |
+| Annex B：关掉 pending 上限 | 6 条（缓冲无界增长） |
+| Annex B：无条件丢弃 pending | 19 条（参数集不再随图像走） |
+| Annex B：截断 pending 而非丢弃 | 1 条（残渣混进下一个单元） |
+| Annex B：不计数溢出 | 2 条 |
+| Annex B：把缺 slice 头当 continuation | 1 条（两个单元并成一个） |
+| Annex B：把 HEVC 后缀 SEI 当图像数据 | 10 条 |
 
 **明确没做的**：#7/#12–#13（Android vendor + 原生编码）、#16–#22（Windows/macOS/Linux 原生）、
 #23（实测状态 UI）、#24/#25（发布收口）。这些需要用户跑构建/真机，助手侧无法验收。
@@ -306,7 +324,7 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 
 | 层 | 状态 | 说明 |
 | --- | --- | --- |
-| `dart run tool/verify_pure.dart` | ✅ **以实跑输出为准**（HEAD `c84120a` 之上新增 Annex B 专项、编码吞吐专项、默认模式专项；最近一次 `passed: 940, failed: 0`） | 本机**唯一能执行**的验证层。覆盖协议、注册、两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪、地址校验、能力算术、规范顺序、能力缓存、启动编排、构造顺序回归、能力报告、Annex B 切分、可持续帧率模型、**原生编码器 Dart 侧契约** |
+| `dart run tool/verify_pure.dart` | ✅ **以实跑输出为准**（HEAD `c84120a` 之上新增 Annex B 专项、编码吞吐专项、默认模式专项、持续帧率专项，以及编码通道契约/生产者接线、Annex B pending 上限与残缺 slice 头；最近一次 `passed: 1071, failed: 0`） | 本机**唯一能执行**的验证层。覆盖协议、注册、两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪、地址校验、能力算术、规范顺序、能力缓存、启动编排、构造顺序回归、能力报告、Annex B 切分（含 pending 上限与残缺/非法头）、可持续帧率模型、**原生编码器 Dart 侧契约与启停生命周期** |
 | `dart format` 闸门 | ✅ 干净 | `dart format --output=none --set-exit-if-changed lib test tool` |
 | 全量类型检查 | ⚠️ **换了一条路** | `dart analyze` / `flutter analyze` 因同一个管道问题失败（`CreateFile failed 231`）。替代：**Python 驱动 `frontend_server_aot.dart.snapshot` 单次编译**（`%TEMP%\wb_check.py`），只覆盖 Dart，不覆盖任何 C++ |
 | `flutter test` | ✅ **用户跑的，全绿** | 助手跑不了（同上）。`+355 -2` 的两个失败（`a28d144` 前）已修并在 `a28d144` 之后重跑通过 |
