@@ -69,10 +69,17 @@ Android 的相机由 CameraX 1.6.2 持有（`android/build.gradle.kts:79`：
 | Dart 侧今天就 `VideoCapture + Preview + ImageCapture + ImageAnalysis` **一次绑定** | `lib/src/android_camera_camerax.dart:961-972`（`final useCases = <UseCase>[videoCapture!];` 逐个 `add(preview!)` / `add(imageCapture!)` / `add(imageAnalysis!)`，随后 `unbindAll()` + 单次 `bindToLifecycle(cameraSelector!, useCases)`）；注释 `:960` 明写 "Unbind all use cases and rebind" —— 这正是"整体替换"语义 |
 | `VideoCapture` 由**哪个** `VideoOutput` 支撑，只取决于构造入参 | `lib/src/android_camera_camerax.dart:421-425`（`recorder = Recorder(…)`；`videoCapture = VideoCapture.withOutput(videoOutput: recorder!, …)`）—— 把 `recorder!` 换成自定义 `VideoOutput` 是同一个构造 |
 
-**关键点（本条的 crux）：** CameraX 的 `bindToLifecycle` 是**整体替换**语义，不是增量追加。
-所以接缝的要求是：**新的自定义 `VideoCapture` 必须与 `Preview` / `ImageCapture` 出现在
-同一次 `bindToLifecycle` 调用里**，不能单独再绑一次（那会把旧的绑定顶掉）。
-插件现有代码（`android_camera_camerax.dart:961-972`）已经是这个模式，Task 4 照抄即可。
+**关键点（本条的 crux）—— ⚠️ 2026-10-10 更正，见 §九.3：** 本节原先断言
+「CameraX 的 `bindToLifecycle` 是**整体替换**语义，所以必须与 `Preview` / `ImageCapture`
+出现在同一次调用里」。**那句话是错的**，插件自身的代码就与之矛盾：
+`_bindUseCaseToLifecycle` 一次只绑**一个** use case（`android_camera_camerax.dart:1292-1305`），
+而 `startVideoCapturing` 在 preview 已绑的情况下**只绑 `videoCapture`**（`:1158`）——
+若真是替换语义，一开录预览就会被顶掉。CameraX 对同一个 `LifecycleOwner` 是**增量追加**。
+
+这条更正改变了 Task 4 的做法：我们的自定义 `VideoCapture` **可以单独再绑一次**，
+不必去拿 `Preview` / `ImageCapture` 的引用。**以 §九 为准。**
+（`:961-972` 那个 `unbindAll()` + 单次 `bindToLifecycle([...])` 是**切相机**时的重建路径，
+不是唯一的绑定方式。）
 
 **源码不能证明的部分：** 源码只能证明"类型系统允许、插件今天就是这么绑的"。
 它**不能**证明 CameraX 在**真机运行时**愿意接受一个**第三方实现的 `VideoOutput`**
@@ -80,8 +87,9 @@ Android 的相机由 CameraX 1.6.2 持有（`android/build.gradle.kts:79`：
 对 `VideoOutput` 实现的支持面与设备能力。**这是本 ADR 最需要在 Task 4 证伪的一点**
 （Review Focus 3：录像中拍照不能打断视频）。
 
-**若不成立会怎样：** 若真机拒绝三者同绑，路线 A 的"与 Preview/ImageCapture 并存"这一半破产，
-按第五节退到路线 C。
+**若不成立会怎样：** 若真机拒绝三者并存（即 §九.3 的增量绑定在运行时也不成立），
+路线 A 的"与 Preview/ImageCapture 并存"这一半破产，按第五节退到路线 C。
+**运行时仍需 Task 4 用真机证明**：源码只能证明插件依赖增量绑定，不能证明 CameraX 1.6.2 的运行时行为。
 
 ### 事实 3：`c2.mtk.hevc.encoder` / `c2.mtk.avc.encoder` 接受 **surface 输入** —— **源码无法判定（仅有旁证）**
 
@@ -222,3 +230,118 @@ Android 的相机由 CameraX 1.6.2 持有（`android/build.gradle.kts:79`：
 
 **不会证伪本 ADR 的：** HEVC 实测只到 30fps。那是**速率**结论（属 Task 6 / ADR 0001 §4.1.1），
 与"接缝能不能建"无关——接缝照样成立，只是声明值随之降到 30（计划 Task 6 Step 3 的模式级判据）。
+
+---
+
+## 九、补遗（2026-10-10）：自定义 `VideoOutput` 如何进入绑定 —— 机制选择
+
+> 本节回应 Task 4 之前悬着的一个问题：**我们 Java 里实现的 `VideoOutput` 如何到达 Dart 侧的
+> `VideoCapture.withOutput` 调用**，且要尽量守住 fork 的「只新增文件 + 两行注册」纪律。
+> 结论同时**更正 §三.2 事实 2 里「CameraX `bindToLifecycle` 是整体替换」的说法** —— 那句话是错的，
+> 而它正是先前把路线设计成「必须同一次调用绑定」的原因。
+
+### 9.1 结论：选**机制 4（native 自持绑定）**
+
+native 在 `open` 里自己造 `VideoCapture` 并自己 `bindToLifecycle`。**Dart 不需要拿到 `VideoOutput`，
+也不需要调用 `VideoCapture.withOutput`** —— 因此机制 1/2/3 所解决的问题（如何把 native 的
+`VideoOutput` 交给 Dart）在本路线里根本不存在。这条路线之所以成立，关键证据是**CameraX 对同一个
+`LifecycleOwner` 的绑定是增量追加、不是整体替换**（见 9.3）。机制 3 仍然可行，记录为 9.4 的备选。
+
+### 9.2 四个机制的调查结果
+
+| 机制 | 可行性 | 关键证据 | 代价 |
+| --- | --- | --- | --- |
+| 1. 新增 Pigeon 类并重跑生成 | 可行但最大 | `pigeon` 确是 dev-dep（`pubspec.yaml:38`），生成配置在 `pigeons/camerax_library.dart:9-19` | 触碰 2 个上游生成文件 + 上游 `ProxyApiRegistrar.java`；需用户跑 `flutter pub get` 才能生成 |
+| 2. 手写生成产物 | **否决** | 生成文件由 pigeon 版本决定字节 | 与 `pigeons/` 源不一致，下次生成即被覆盖，rebase 认不出 |
+| 3. 复用既有 `VideoOutput` 类，native 注册、Dart 包装 | 可行，但**单独不够** | `PigeonApiVideoOutput.pigeon_newInstance` 是公开方法（`CameraXLibrary.g.kt:3612`） | 零生成改动；但要用它就得让 Dart 参与绑定，而绑定住在上游 Dart 文件里 |
+| 4. native 自持绑定 | **选定** | 插件自身依赖增量绑定（`android_camera_camerax.dart:1292-1305, 1158`） | 只新增文件 + 两行注册；需自己算 `CameraSelector` |
+
+**机制 1 的展开（为什么否决）：** `pigeon` 是 `pubspec.yaml:38` 的 dev-dependency，配置
+`dartOut: lib/src/camerax_library.g.dart`、`kotlinOut: .../CameraXLibrary.g.kt`
+（`pigeons/camerax_library.dart:9-19`）。重跑需要在 `packages/camera_android_camerax/` 里先
+`flutter pub get`（**助手禁止**，会造假 symlink）再 `dart run pigeon --input pigeons/camerax_library.dart`。
+它会**整体重写**两个大生成文件，还要新增 `EncodedStreamOutputProxyApi.java` 并在上游
+`ProxyApiRegistrar.java:236-245`（既有 `getPigeonApiVideoCapture`/`getPigeonApiRecorder` 的样式）
+加一个 `getPigeonApi…` 覆盖 —— **那是第二个上游 Java 文件**。生成文件与 pigeon 版本强绑定，
+rebase 时几乎必冲突。代价最大，否决。
+
+**机制 2 的展开：** 手写 `camerax_library.g.dart` / `CameraXLibrary.g.kt` 的增补，会让它们与
+`pigeons/camerax_library.dart` 的源不一致；任何一次正规生成都会覆盖，rebase 也认不出来。
+风险远大于收益，否决。
+
+### 9.3 机制 4 的决定性证据：CameraX 是增量绑定
+
+§三.2 断言「`bindToLifecycle` 是整体替换，所以必须同一次调用」。**插件自己的代码与这句话矛盾**：
+
+| 证据 | 位置 |
+| --- | --- |
+| `_bindUseCaseToLifecycle` 对**单个** use case 调 `bindToLifecycle` | `android_camera_camerax.dart:1292-1305`（`:1302` `bindToLifecycle(cameraSelector!, <UseCase>[useCase])`） |
+| `startVideoCapturing` 在 preview/imageCapture 已绑的前提下**只绑 `videoCapture`**，并单独 `unbind` imageAnalysis | `:1145-1158`（`:1155` unbind imageAnalysis，`:1158` 绑 videoCapture） |
+| `resumePreview` / `pausePreview` 只绑/解绑 preview | `:984`（`_bindUseCaseToLifecycle(preview!, …)`）、`:937`（`_unbindUseCaseFromLifecycle(preview!)`） |
+| `_unbindUseCaseFromLifecycle` 用 `unbind([useCase])` 逐个解绑 | `:1392-1399` |
+| proxy 直通 CameraX，中间无「先 unbindAll」 | `ProcessCameraProviderProxyApi.java:62-76`（`bindToLifecycle(lifecycleOwner, selector, useCases)`） |
+
+若 `bindToLifecycle` 真是替换语义，`:1158` 一执行预览就会被顶掉——插件不可能如此，故 CameraX
+对同一 `LifecycleOwner` 是**追加**。于是 native 可以只绑我们的 `VideoCapture`，它会**追加**到既有的
+Preview/ImageCapture 上，**无需拿到它们的引用**。所需的生命周期所有者与 context 都在 registrar：
+`ProxyApiRegistrar.getLifecycleOwner()`（`ProxyApiRegistrar.java:108-117`）、`getContext()`（`:90-93`）；
+provider 用 `ProcessCameraProvider.getInstance(context)`（`ProcessCameraProviderProxyApi.java:39-54`）。
+`CameraSelector` 由 `open` 的 `cameraId` 经 `Camera2CameraInfo.getCameraId()` 在
+`getAvailableCameraInfos()` 里定位后构造（`pigeons/camerax_library.dart:272-281` 显示它支持
+`requireLensFacing` / `cameraInfoForFilter` / defaultBack/defaultFront）。
+
+### 9.4 机制 3（备选）：Dart 拿到 `VideoOutput` 的确切调用
+
+若 9.3 的增量假设被真机证伪（见 9.6.1），退机制 3。它**可行且零生成改动**，握手链路已现成：
+
+- **native 侧**：`CameraXLibrary.g.kt:3609-3643` 的 `PigeonApiVideoOutput` 是 **open class**，其
+  `pigeon_newInstance(pigeon_instanceArg: androidx.camera.video.VideoOutput, callback)`（`:3612`）
+  是**公开方法**，入参类型就是 CameraX 接口本身 —— 我们 `implements VideoOutput` 的类可直接传入。
+  它内部 `instanceManager.addHostCreatedInstance(...)`（`:3624`）后把 identifier 经
+  `dev.flutter.pigeon.camera_android_camerax.VideoOutput.pigeon_newInstance` 发给 Dart（`:3627-3629`）。
+  **唯一调用**：`proxyApiRegistrar.getPigeonApiVideoOutput().pigeon_newInstance(output, cb)`
+  （`getPigeonApiVideoOutput` 见 `CameraXLibrary.g.kt:530-531`）。
+- **Dart 侧**：处理器早已存在（`camerax_library.g.dart:3405-3447`，在 `:443` 注册），收到后
+  `addHostCreatedInstance(VideoOutput.pigeon_detached(...), id)`（`:3428-3435`）；Dart 用
+  `PigeonInstanceManager.instance.getInstanceWithWeakReference<VideoOutput>(id)`
+  （`:557-573`）取回句柄；再传给 `VideoCapture.withOutput` 时由
+  `_PigeonInternalProxyApiBaseCodec.writeValue`（`:689-696`）按 identifier 编码，Kotlin 侧再解码
+  回我们的 native 对象。
+
+**机制 3 单独不够用**：它只解决「Dart 拿到 `VideoOutput`」，不解决「谁把它绑上去」。要用它，
+Dart 必须自己调 `VideoCapture.withOutput` 并参与绑定；而插件今天的绑定住在
+`android_camera_camerax.dart:421-425`（构造）与 `:961-972`（绑定），那是**上游 Dart 文件**。
+**没有更便宜的办法**能让插件既有的绑定路径用上我们的 `VideoOutput`，除非改这个文件（约 2–4 行，
+把 `videoCapture` 的 `VideoOutput` 从 `recorder!` 换成我们的）——那会破坏「只新增文件」，须同步
+改 `VENDORED.md`。所以 9.1 优先选机制 4。
+
+### 9.5 触及的上游文件与 Pigeon 生成
+
+**纪律不破（只新增文件 + 两行注册）：**
+
+- 新增 `.../camerax/EncodedStreamVideoOutput.java`（本次已写）。
+- 新增 `.../camerax/EncodedStreamPlugin.java`（Task 4 写）。
+- 改 `CameraAndroidCameraxPlugin.java` 两行（`CameraAndroidCameraxPlugin.java:27-46`）：
+  `onAttachedToEngine` 里 `EncodedStreamPlugin.register(proxyApiRegistrar);`，
+  `onDetachedFromEngine` 里对应注销。注册需要的是 `ProxyApiRegistrar`（拿 `lifecycleOwner`/`context`），
+  不只是 `BinaryMessenger`；仍是**一行**。若只传 messenger，native 拿不到 `lifecycleOwner`，机制 4 退回机制 3。
+
+**Pigeon 不需要重跑。** 机制 4 与机制 3 都不新增 Pigeon 类，不触碰 `pigeons/`、
+`lib/src/camerax_library.g.dart`、`CameraXLibrary.g.kt`。**任何人都不需要跑 `flutter pub get` 或 pigeon**
+（同时满足「助手绝不跑 `flutter pub get`」）。只有机制 1 才需要，且由**用户**在其 shell 里跑。
+
+### 9.6 什么会证伪本选择
+
+1. **CameraX 1.6.2 对同一 `LifecycleOwner` 实为替换语义**（与 9.3 插件用法矛盾）→ 机制 4 会把
+   Preview/ImageCapture 顶掉（**静默坏预览**，正是最该防的失效）。Task 4 必须先验证：绑完我们的
+   use case 后，预览仍有画面、`ImageCapture` 仍能拍照。若证伪 → 退机制 3 + **最小上游 Dart 改动**
+   （`android_camera_camerax.dart` 约 2–4 行），并同步 `VENDORED.md` 的「只新增文件」条款。
+2. **`CameraSelector` 无法定位到已绑的同一相机** → `bindToLifecycle` 抛
+   「Multiple LifecycleCameras…」或绑到第二台相机 → 退机制 3。
+3. **插件后续 `unbindAll()`**（`android_camera_camerax.dart:404` 创建、`:519` dispose、`:971`
+   切相机）会静默丢掉我们的 use case。若这在**正常流程**（而非切相机/释放）里发生，机制 4 的
+   「native 自持」假设不成立 → 退机制 3。
+4. **机制 4 无法在 `open` 时拿到可用的 `lifecycleOwner`**（例如 `onAttachedToActivity` 尚未发生）
+   → 退机制 3。
+
+**不会证伪本选择的：** HEVC 实测只到 30fps。那是速率结论（§八末），与「VideoOutput 怎么进绑定」无关。
