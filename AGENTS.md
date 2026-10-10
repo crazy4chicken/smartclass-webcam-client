@@ -67,7 +67,8 @@
 - `lib/src/backend/` 协议与网关 —— 接口不得泄漏 `web_socket_channel` / `http` 类型。
 - `lib/src/capture/` 采集抽象与编码器契约（**插件部分单独成文件**）。
 - `lib/src/agent/` 协调器与状态机；`lib/src/app/` + `lib/src/ui/` 是 Flutter 层。
-- `packages/camera_desktop/` vendor 的桌面插件（**MIT**）。
+- `packages/camera_desktop/` vendor 的桌面插件（**MIT**）；`packages/camera_android_camerax/`
+  vendor 的 Android 插件（BSD-3-Clause）。fork 纪律见各自的 `VENDORED.md`。
 - `tool/` 门禁与检查脚本；`test/` Flutter 测试（助手跑不了）。
 - 桌面三端统一 `camera` + `camera_desktop`，**不要 `camera_windows`**（无 image
   stream、不支持 pause/resume、release 崩溃 #161288）。iOS/Android 系统禁止后台
@@ -81,6 +82,9 @@
 - 不引入新依赖（确需先问）。
 - 不绕过或删除现有断言。**新断言必须做过变异验证**（改坏实现、确认变红）；
   没变红过的断言等于没有断言。新增独立检查文件时，**接线与变异验证同一次做完**。
+- **尺寸/几何类断言必须带竖屏 fixture。** 手机默认竖屏，`fitsWithin` 这类逐轴比较在
+  竖屏下语义完全不同 —— 只测横屏等于没测「朝向」这个维度。2026-10-10 真机上因此把默认
+  几何开成了 240x320，而门禁 104 个横屏 fixture 全绿。
 - 不写"已完成"，除非有机器跑过的证据。
 
 ## 按需文档（点播层：只在任务涉及时读取，平时勿加载）
@@ -93,6 +97,9 @@
 - 上一轮 A8 复核（带行号）：`docs/agents/review-2026-10-10-dart-side.md`
 - 任务清单 26 项（**已勾选的是有证据的**）：
   `docs/superpowers/plans/2026-10-10-dual-mode-task-list.md`
+- **Android 60fps 编码流实施计划**（7 个任务，Task 1–3 已落地）：
+  `docs/superpowers/plans/2026-10-10-android-encoded-stream.md`
+- **Android 编码流的接缝与通道协议**（冲突时以它为准）：`docs/adr/0002-android-encoded-stream-seam.md`
 - 端到端工具：`tool/e2e/check_segment.py`、`s3_stub.py`
 - Issues 用 GitHub Issues（`crazy4chicken/smartclass-webcam-client`）+ `gh` CLI，
   见 `docs/agents/issue-tracker.md`；triage 标签见 `docs/agents/triage-labels.md`
@@ -113,3 +120,9 @@
   `FLUTTER_VERSION` 同步。
 - 每完成一个可验证单元提交一次，message 写清"做了什么 + 为什么"。
 - **会话结束（任务完成或中断）：最后一步必须覆盖式更新 `docs/agents/handover.md`。**
+- **外部编辑器会拿旧缓冲区回写文件，静默覆盖你的编辑**（本仓已发生两次，丢过一整段计划，
+  还让一条提交说明成了假话）。改完文档**回读磁盘**确认内容在，提交后
+  `git show HEAD:<file> | grep` 再核一次；**别用 `git add -A` 盲提**。
+- **`camera_android_camerax` 必须挂在 `dependency_overrides`，不能放 `dependencies`**：
+  `camera` 依赖的是 pub.dev 上的它，root 的 path 源替换不了已发布的传递依赖，pub 直接拒绝
+  解析（`camera ^0.12.1 requires camera_android_camerax from hosted`）。

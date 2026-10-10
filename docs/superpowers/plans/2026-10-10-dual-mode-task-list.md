@@ -252,11 +252,19 @@
   > 许可 = **BSD-3-Clause**（`Copyright 2013 The Flutter Authors`，以 `LICENSE` 原文为准）；
   > 版本按 `pubspec.lock` 的 sha256 钉住，不是按版本号字符串。**尚未改动任何采集/编码路径** ——
   > 那是 Task 4，且范围锁成"只加文件 + 上游两行注册"。
-- [ ] root 依赖确保 camera 真正使用本地实现；用户运行 pub get，不在助手 shell 造假链接。
-  > path 依赖已写进 `pubspec.yaml`，但**"真的解析到本地实现"要等用户跑 `flutter pub get` 后看
-  > `pubspec.lock` 里是不是 `source: path`**，所以这一条不勾。
-- [ ] 用户 APK 构建并在真机确认预览/照片基线不坏。验收：第二个 fork 有可重现的构建证据。
-  > **未做。** 需要用户编 APK + 真机（vivo V2405A 已接上）。
+- [x] root 依赖确保 camera 真正使用本地实现；用户运行 pub get，不在助手 shell 造假链接。
+  > **2026-10-10 通过。** 注意：**必须挂在 `dependency_overrides`**，放 `dependencies` 会被
+  > pub 直接拒绝（`camera` 依赖的是 pub.dev 上的它，root 的 path 源替换不了已发布的传递依赖）。
+  > `pubspec.lock` → `source: path`；`.flutter-plugins-dependencies` 的 `android` 数组里仍有它
+  > —— override 只改了源，插件没被挤出构建。
+- [x] 用户 APK 构建并在真机确认预览/照片基线不坏。验收：第二个 fork 有可重现的构建证据。
+  > **2026-10-10 通过（预览 / 注册）。** 用户重编 APK 并真机运行：状态条显示
+  > 「已连接 · 目标 60 fps · 声明 5 fps」，`[capture] plan: CapturePlan(1080x1920 @ 5fps, mjpeg, ...)`。
+  > **照片（`take_photo`）尚未单独验过**，端到端时补。
+  >
+  > **⚠️ 这一步顺带挖出一个已修的回归**：默认几何曾是 **240x320**（竖屏设备上
+  > `fitsWithin` 逐轴比较 + 形状硬过滤叠加所致），已由 `28de2b5` 修复，见
+  > `docs/implementation-status.md` 的 **#4.2** 行。
 
 **实施计划：** `docs/superpowers/plans/2026-10-10-android-encoded-stream.md`（7 个任务，
 本行是它的 Task 1）。通道协议见 `docs/adr/0002-android-encoded-stream-seam.md`。
