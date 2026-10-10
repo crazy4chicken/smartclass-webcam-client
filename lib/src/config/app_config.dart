@@ -61,22 +61,26 @@ class AppConfig {
 
   /// Declared capture rate, in whole frames per second.
   ///
-  /// The server rejects a fractional `fps` outright, and this value is what it
-  /// uses to estimate segment durations — so the honest value is a rate the
-  /// device can actually hold. Announcing more than is delivered makes the
-  /// server overstate how long a segment lasted.
+  /// **This is the *request* rate, not the *declared* rate.** They are two
+  /// separate numbers and must not be merged — see
+  /// `docs/adr/0001-dual-mode-capture-decisions.md` §4.1:
   ///
-  /// **60 is required, and today it is a claim rather than a measurement.** The
-  /// frame pump takes one still picture per frame (`takePicture()`), and its
+  /// * this constant is the ceiling the pipeline is **asked** to run at (the
+  ///   pump's tick interval), and it is allowed to exceed what is delivered;
+  /// * what the device **declares** is `CameraMode.fps` — announced to the
+  ///   server, snapshotted into `metadata.fps` and used to estimate segment
+  ///   durations. It may not exceed what was measured, and with no measurement
+  ///   it is `kFpsWithoutEvidence`.
+  ///
+  /// The frame pump takes one still picture per frame (`takePicture()`), and its
   /// single-flight lock drops every tick that lands while a capture is still in
-  /// flight — roughly 5-10 fps at 1080p. So the device declares 60 and delivers
-  /// far less, and the server will overstate segment durations until the gap is
-  /// closed. Closing it needs the native encoder pipeline, which is paused; see
-  /// `docs/linux-encoded-stream-status.md`.
+  /// flight — roughly 5-10 fps at 1080p. So the device is asked for 60 and
+  /// delivers far less. Closing that gap needs the native encoder pipeline,
+  /// which is paused; see `docs/linux-encoded-stream-status.md`.
   ///
-  /// This is a deliberate, recorded deviation from "a declared rate is a
-  /// measured rate" — not an oversight. Do not quietly re-apply that rule here
-  /// without also deciding what the default should be.
+  /// **Do not "fix" this down to the delivered rate.** Throttling the pump to a
+  /// placeholder would lose frames the device can produce; the number that has
+  /// to stay honest is the declaration, and that is decided in `defaultFpsFor`.
   static const int defaultFps = 60;
 
   /// Preview is on by default; turning it off must not stop capture.

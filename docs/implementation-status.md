@@ -327,7 +327,7 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | `dart run tool/verify_pure.dart` | ✅ **以实跑输出为准**（HEAD `c84120a` 之上新增 Annex B 专项、编码吞吐专项、默认模式专项、持续帧率专项，以及编码通道契约/生产者接线、Annex B pending 上限与残缺 slice 头；最近一次 `passed: 1071, failed: 0`） | 本机**唯一能执行**的验证层。覆盖协议、注册、两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪、地址校验、能力算术、规范顺序、能力缓存、启动编排、构造顺序回归、能力报告、Annex B 切分（含 pending 上限与残缺/非法头）、可持续帧率模型、**原生编码器 Dart 侧契约与启停生命周期** |
 | `dart format` 闸门 | ✅ 干净 | `dart format --output=none --set-exit-if-changed lib test tool` |
 | 全量类型检查 | ⚠️ **换了一条路** | `dart analyze` / `flutter analyze` 因同一个管道问题失败（`CreateFile failed 231`）。替代：**Python 驱动 `frontend_server_aot.dart.snapshot` 单次编译**（`%TEMP%\wb_check.py`），只覆盖 Dart，不覆盖任何 C++ |
-| `flutter test` | ✅ **用户跑的，全绿** | 助手跑不了（同上）。`+355 -2` 的两个失败（`a28d144` 前）已修并在 `a28d144` 之后重跑通过 |
+| `flutter test` | ⚠️ **用户跑的；3 条陈旧断言已修，待重跑** | 助手跑不了（同上）。2026-10-10 用户跑出 `+354 -3`：`test/agent/agent_coordinator_test.dart` 里三条断言还写着「声明 60」，而 #4.1 之后**无证据时声明的是 `kFpsWithoutEvidence`（5）** —— 门禁那侧改对了、`test/` 这侧漏扫（同一类漏扫的第二次，第一次见 `a28d144`）。已改成具名常量。**另：`AppConfig.defaultFps` 的注释声称「设备声明 60」，也是陈旧的 —— 它是请求帧率，声明值在 `CameraMode.fps`。** |
 | `flutter build` / `run` / Linux C++ 编译 | ❌ **本机完全跑不了** | 两条独立的限制：① 助手 shell 建不了子进程管道；② Linux 的 GStreamer / GTK / `flutter_linux` 头文件在本机不存在。这就是 Linux 端暂停的原因 |
 | 真机 · Android 端到端 | ⚠️ 部分 | 基础链路跑通过一整轮（见计划 4）。**但能力探测这一轮（T8/T9）没在真机上验过**，`61504e9` 的 kiosk 修复也待重出包确认 |
 | CI 四端出包 | ⚠️ 未确认 | `.github/workflows/release.yml` 已建，Android SDK 与 artifact 路径两个问题已修；远端已打 `v1.0.0`–`v1.0.3`，但运行结论本机看不到（GitHub API 限流、无 `gh`） |

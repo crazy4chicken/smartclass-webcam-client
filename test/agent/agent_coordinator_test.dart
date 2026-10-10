@@ -14,6 +14,7 @@ import 'package:webcam_client/src/capture/camera_capabilities.dart';
 import 'package:webcam_client/src/capture/camera_provider.dart';
 import 'package:webcam_client/src/capture/camera_resolution.dart';
 import 'package:webcam_client/src/capture/camera_service.dart';
+import 'package:webcam_client/src/capture/default_mode.dart';
 import 'package:webcam_client/src/capture/frame_pump.dart';
 import 'package:webcam_client/src/capture/stream_settings.dart';
 import 'package:webcam_client/src/config/connection_settings.dart';
@@ -623,8 +624,10 @@ void main() {
 
   group('camera mode', () {
     // What a 1080p webcam really reports. Every camera seeds at its own
-    // measured ceiling — 1920x1080 here — at the built-in 60fps, which is also
-    // the top rate the probe returned.
+    // measured ceiling — 1920x1080 here — but at `kFpsWithoutEvidence`, **not**
+    // at the top rate the probe returned: the probe reports what the camera
+    // *accepts*, and only an `EncodeBudgetProbe` measures what it *delivers*.
+    // See `defaultFpsFor` and the ADR's §4.1.
     final measured = CameraCapabilities.of(
       resolutions: const [
         CameraResolution(width: 1920, height: 1080),
@@ -766,7 +769,7 @@ void main() {
           coordinator.activeMode.resolution,
           const CameraResolution(width: 1920, height: 1080),
         );
-        expect(coordinator.activeMode.fps, 60);
+        expect(coordinator.activeMode.fps, kFpsWithoutEvidence);
       },
     );
 
@@ -786,7 +789,7 @@ void main() {
       verifyNever(() => camera.switchCamera(0));
       expect(coordinator.cameraEnum, 1);
       expect(coordinator.cameraModes[1].fps, 30);
-      expect(coordinator.cameraModes[0].fps, 60);
+      expect(coordinator.cameraModes[0].fps, kFpsWithoutEvidence);
       expect(coordinator.reportStatus()['active_camera'], 1);
     });
 
@@ -955,8 +958,11 @@ void main() {
       'an unmeasured camera still accepts a switch to the mode it is in',
       () async {
         // A probe that found nothing means the device published exactly its
-        // current pair. Switching to that same pair is a no-op and must not be
-        // refused — the operator can pick it from the list.
+        // current pair — and that pair sits at the floor, not at the target:
+        // with no measurement there is no ceiling to cap a ladder against, so
+        // the declared list holds only the mode the camera is in. Switching to
+        // it is a no-op and must not be refused; the operator can pick it from
+        // the list.
         final coordinator = build();
 
         await coordinator.handleCommand(
@@ -964,7 +970,7 @@ void main() {
             id: 'e',
             cameraEnum: 0,
             resolution: CameraResolution(width: 1280, height: 720),
-            fps: 60,
+            fps: kFpsWithoutEvidence,
           ),
         );
 

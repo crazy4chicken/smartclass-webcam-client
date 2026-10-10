@@ -16,10 +16,19 @@ Decision conflicts resolve to `docs/adr/` (start with
 
 Project prose is mostly Chinese; code comments are English.
 
-Verification constraints: `dart run tool/verify_pure.dart` is the runnable
-gate in an agent shell; `flutter test` needs the user's own terminal.
-Keep `lib/src/backend`, `lib/src/capture` (non-plugin), `lib/src/config`, and
+Verification constraints: `dart run tool/verify_pure.dart` is the runnable gate
+in an agent shell; `flutter test` needs the user's own terminal.
+`python tool/check_compile.py` type-checks `lib/` plus every file under `test/`
+and `tool/` with the real Flutter frontend server (~5 min). It catches a broken
+`test/` file, which the gate cannot — but it **compiles, it does not run**, so
+passing it is not the same as passing tests. Keep `lib/src/backend`,
+`lib/src/capture` (non-plugin), `lib/src/config`, and
 `lib/src/app/capability_bootstrap.dart` free of `package:flutter` imports.
+
+Expectations about a default or declared constant exist in **two** places —
+`tool/verify_pure.dart` and `test/` — and only the first runs here. Change one,
+sweep both. Assert against the named constant (`kFpsWithoutEvidence`), never a
+literal. This has bitten twice.
 
 ## Agent skills
 
@@ -33,4 +42,6 @@ The five canonical triage roles, label string equal to role name. See `docs/agen
 
 ### Domain docs
 
-Single-context: one `GLOSSARY.md` at the repo root plus `docs/adr/`. See `docs/agents/domain.md`.
+Single-context: `docs/adr/` holds the decisions. A root `GLOSSARY.md` is created
+lazily by the domain-modeling skill and **does not exist yet** — don't go looking
+for it. See `docs/agents/domain.md`.
