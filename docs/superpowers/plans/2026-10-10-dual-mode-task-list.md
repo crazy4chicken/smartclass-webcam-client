@@ -244,9 +244,22 @@
 
 ### #7 Vendor camera_android_camerax 并过构建闸
 **依赖：** 无。**文件：** `packages/camera_android_camerax/`、pubspec、lock、VENDORED。
-- [ ] 核对 0.7.5+1 来源/许可，保留版权，仅变更采集编码相关路径；Pigeon 源与生成物同步。
+> **2026-10-10 进行中 —— 代码侧已就位，等构建证据。** 已提交 `deec697`：
+> 从**本机 pub cache**（不联网）vendor 了 0.7.5+1，142 文件；`VENDORED.md` 写清来源与
+> **sha256 钉版**、BSD-3-Clause、CameraX 1.6.2 / minSdk 23、以及"只加文件、上游只改两行注册"的
+> fork 范围；`pubspec.yaml` 加了 root path 依赖。**源码无需从网络取** —— 本机 pub cache 里就有。
+- [x] 核对 0.7.5+1 来源/许可，保留版权，仅变更采集编码相关路径；Pigeon 源与生成物同步。
+  > 许可 = **BSD-3-Clause**（`Copyright 2013 The Flutter Authors`，以 `LICENSE` 原文为准）；
+  > 版本按 `pubspec.lock` 的 sha256 钉住，不是按版本号字符串。**尚未改动任何采集/编码路径** ——
+  > 那是 Task 4，且范围锁成"只加文件 + 上游两行注册"。
 - [ ] root 依赖确保 camera 真正使用本地实现；用户运行 pub get，不在助手 shell 造假链接。
+  > path 依赖已写进 `pubspec.yaml`，但**"真的解析到本地实现"要等用户跑 `flutter pub get` 后看
+  > `pubspec.lock` 里是不是 `source: path`**，所以这一条不勾。
 - [ ] 用户 APK 构建并在真机确认预览/照片基线不坏。验收：第二个 fork 有可重现的构建证据。
+  > **未做。** 需要用户编 APK + 真机（vivo V2405A 已接上）。
+
+**实施计划：** `docs/superpowers/plans/2026-10-10-android-encoded-stream.md`（7 个任务，
+本行是它的 Task 1）。通道协议见 `docs/adr/0002-android-encoded-stream-seam.md`。
 
 ### #12 设计并验证 Android 连续采集与编码方案
 **依赖：** #7、#9、#26。**文件：** vendor CameraX 原生接口/Pigeon、Android 子计划/最小原型。
