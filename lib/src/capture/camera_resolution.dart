@@ -15,6 +15,18 @@ class CameraResolution {
 
   double get aspectRatio => width / height;
 
+  /// The smaller dimension, regardless of orientation.
+  ///
+  /// A resolution is a **size**, not an orientation: a camera held in portrait
+  /// produces the same geometry transposed. Anything that compares two
+  /// resolutions — what fits inside what, whether two share a shape —
+  /// normalises to short-side/long-side first, so `1080x1920` and `1920x1080`
+  /// are not mistaken for different things.
+  int get shortSide => width <= height ? width : height;
+
+  /// The larger dimension, regardless of orientation.
+  int get longSide => width <= height ? height : width;
+
   String get label => '${width}x$height';
 
   @override
@@ -30,6 +42,16 @@ class CameraResolution {
   @override
   String toString() => 'CameraResolution($label)';
 }
+
+/// True when two resolutions describe the same shape, **whatever the
+/// orientation**.
+///
+/// `1080x1920` and `1920x1080` are one shape rotated, not two: a camera that
+/// produces one produces the other. Both are normalised to short-side/long-side
+/// and cross-multiplied — no floating point, no rounding, and 1280x720 and
+/// 1920x1080 come out equal exactly as they should.
+bool sameShape(CameraResolution a, CameraResolution b) =>
+    a.shortSide * b.longSide == b.shortSide * a.longSide;
 
 /// Still-frame capture geometry and quality.
 class CaptureConfig {

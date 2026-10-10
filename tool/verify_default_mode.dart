@@ -27,6 +27,42 @@ const _p480 = CameraResolution(width: 640, height: 480);
 /// sorts by pixel count and calls the winner a default.
 const _p1280x1024 = CameraResolution(width: 1280, height: 1024);
 
+/// The vivo V2405A's **measured** set, exactly as its probe reported it.
+///
+/// Every geometry is portrait: the plugin enumerates in display orientation,
+/// and the device was held portrait. The transposed landscape forms are still
+/// real, openable sizes — they are just not what was measured. This is the set
+/// the regression was measured on.
+const List<CameraResolution> _deviceMeasured = <CameraResolution>[
+  CameraResolution(width: 3072, height: 4096),
+  CameraResolution(width: 2160, height: 3840),
+  CameraResolution(width: 1080, height: 1920),
+  CameraResolution(width: 720, height: 1280),
+  CameraResolution(width: 480, height: 720),
+  CameraResolution(width: 240, height: 320),
+];
+
+/// The same device's **declared** list as the cache holds it: the measured set
+/// with the common ladder merged in. The ladder entries below the ceiling are
+/// the transposed landscape forms of shapes the camera measured, which is why
+/// they survive the shape rule.
+const List<CameraResolution> _deviceDeclared = <CameraResolution>[
+  CameraResolution(width: 3072, height: 4096),
+  CameraResolution(width: 2160, height: 3840),
+  CameraResolution(width: 3840, height: 2160),
+  CameraResolution(width: 2560, height: 1440),
+  CameraResolution(width: 1080, height: 1920),
+  CameraResolution(width: 1920, height: 1080),
+  CameraResolution(width: 720, height: 1280),
+  CameraResolution(width: 1280, height: 720),
+  CameraResolution(width: 1024, height: 768),
+  CameraResolution(width: 800, height: 600),
+  CameraResolution(width: 480, height: 720),
+  CameraResolution(width: 640, height: 480),
+  CameraResolution(width: 240, height: 320),
+  CameraResolution(width: 320, height: 240),
+];
+
 CameraResolution _r(int w, int h) => CameraResolution(width: w, height: h);
 
 CameraCapabilities _caps(List<CameraResolution> resolutions) =>
@@ -70,12 +106,13 @@ void runDefaultModeChecks() {
     );
   }
 
-  // --- shape beats pixel count ----------------------------------------------
-  section('the default keeps the camera\'s own shape');
+  // --- the default follows the camera's own geometry ------------------------
+  section('the default follows the camera\'s own geometry');
   {
-    // A 5:4 camera that also reports 16:9 modes: opening it at the largest
-    // mode that fits would give 1280x720, which is a different shape from the
-    // sensor. Nothing errors — the picture is just wrong.
+    // A 5:4 camera that also reports 16:9 modes. Its own 5:4 geometry is the
+    // largest mode that fits, so that is what it opens at — not a 16:9 mode of
+    // another shape. Nothing errors either way; the picture is just wrong when
+    // the shapes disagree.
     final measured = _caps(<CameraResolution>[_p1280x1024, _p720, _p480]);
     eq(
       'a 5:4 camera opens at its own shape',
@@ -83,7 +120,7 @@ void runDefaultModeChecks() {
       '1280x1024',
     );
     eq(
-      'not at the largest fitting mode of another shape',
+      'not at a fitting mode of another shape',
       defaultResolutionFor(measured: measured, fallback: _p720) == _p720,
       false,
     );
@@ -101,8 +138,8 @@ void runDefaultModeChecks() {
       '1280x1024',
     );
 
-    // A camera whose only measured mode is 16:9 gets 16:9 — the shape rule
-    // follows the measurement, it does not hardcode anything.
+    // A camera whose only measured mode is 16:9 gets 16:9 — the rule follows
+    // the measurement, it does not hardcode anything.
     eq(
       'a 16:9 camera keeps 16:9',
       defaultResolutionFor(
@@ -110,6 +147,88 @@ void runDefaultModeChecks() {
         fallback: _p720,
       ).label,
       '1920x1080',
+    );
+  }
+
+  // --- the measured device: portrait must not open at 240x320 ---------------
+  section('a portrait camera keeps a portrait default');
+  {
+    // vivo V2405A, held portrait. Before this rule `fitsWithin` compared the
+    // target axis-wise against a landscape box, so every sane portrait geometry
+    // (1080x1920, 720x1280, …) was judged too large and discarded; the shape
+    // filter then kept only the 3:4 survivors, and the only one left was the
+    // smallest — 240x320 at 0.077 MP.
+    final measuredOnly = _caps(_deviceMeasured);
+    eq(
+      'the measured portrait set opens at 1080x1920',
+      defaultResolutionFor(measured: measuredOnly, fallback: _p720).label,
+      '1080x1920',
+    );
+    check(
+      'and never at the 240x320 regression',
+      defaultResolutionFor(measured: measuredOnly, fallback: _p720) !=
+          _r(240, 320),
+    );
+
+    // The declared list from the cache — measured plus the ladder — must give
+    // the same answer, since that is what production actually feeds the
+    // selector.
+    final declared = _caps(_deviceDeclared);
+    eq(
+      'the cached declared set opens at 1080x1920 too',
+      defaultResolutionFor(measured: declared, fallback: _p720).label,
+      '1080x1920',
+    );
+    check(
+      'and never at 240x320 either',
+      defaultResolutionFor(measured: declared, fallback: _p720) != _r(240, 320),
+    );
+
+    // The transposed landscape geometry the HAL also advertises is a real size,
+    // just the same one held the other way up — and it fits the target.
+    check(
+      'the landscape transposition is still a size that fits',
+      fitsWithin(_p1080, kTargetResolution) &&
+          fitsWithin(_r(1080, 1920), kTargetResolution),
+    );
+  }
+
+  // --- the ladder only fills gaps the camera can actually produce -----------
+  section('the ladder does not invent a shape the camera never produced');
+  {
+    // A 5:4 sensor. The common ladder is 16:9 and 4:3 only, so none of it
+    // describes a geometry this camera produced. Advertising it would put a
+    // shape in the operator's menu — and, now that the selector trusts the
+    // list, in the default — that the camera opens to a stretched picture.
+    final measured = _caps(<CameraResolution>[_r(1280, 1024)]);
+    final declared = measured.withCommonBaseline();
+
+    eq(
+      'a 5:4 sensor keeps exactly its own geometry',
+      declared.resolutions.map((r) => r.label).join(','),
+      '1280x1024',
+    );
+    check(
+      'no 16:9 rung is invented',
+      !declared.resolutions.any((r) => sameAspectRatio(r, _p1080)),
+    );
+    check(
+      'no 4:3 rung is invented',
+      !declared.resolutions.any((r) => sameAspectRatio(r, _p480)),
+    );
+    eq(
+      'and its default is its own geometry',
+      defaultResolutionFor(measured: declared, fallback: _p720).label,
+      '1280x1024',
+    );
+
+    // A camera that really did produce both shapes keeps the ladder for both:
+    // the rule follows the measurement, it does not ban the ladder.
+    final both = _caps(<CameraResolution>[_p1080, _p480]).withCommonBaseline();
+    check(
+      'a camera that produced 16:9 and 4:3 still gets both ladders',
+      both.resolutions.any((r) => sameAspectRatio(r, _p1080)) &&
+          both.resolutions.any((r) => sameAspectRatio(r, _r(1024, 768))),
     );
   }
 
@@ -145,7 +264,7 @@ void runDefaultModeChecks() {
     );
   }
 
-  // --- fitsWithin is per axis, not by area ---------------------------------
+  // --- fitsWithin is per axis, not by area, and orientation-blind -----------
   {
     check(
       'same area, too wide: does not fit',
@@ -161,11 +280,36 @@ void runDefaultModeChecks() {
       'wider in one only: does not fit',
       !fitsWithin(_r(1920, 1440), _p1080),
     );
+
+    // A target is a *size*, not an orientation: the same geometry transposed
+    // fits exactly as well, and a larger portrait one still does not.
+    check(
+      'a portrait target is the same size transposed',
+      fitsWithin(_r(1080, 1920), _p1080),
+    );
+    check(
+      'exactly the target, transposed: fits',
+      fitsWithin(_r(1080, 1920), _r(1080, 1920)),
+    );
+    check(
+      'too large in both axes: does not fit, whichever way up',
+      !fitsWithin(_r(2160, 3840), _p1080),
+    );
+
     check('same shape, smaller: same shape', sameAspectRatio(_p720, _p1080));
     check('different shape: not the same', !sameAspectRatio(_p480, _p1080));
     check(
       'cross-multiplication is exact, not rounded',
       sameAspectRatio(_r(1280, 1024), _r(640, 512)),
+    );
+    // 1080x1920 and 1920x1080 are one shape rotated, not two.
+    check(
+      'the transposed pair is one shape',
+      sameAspectRatio(_r(1080, 1920), _p1080),
+    );
+    check(
+      'a genuinely different shape is still not the same',
+      !sameAspectRatio(_r(1080, 1920), _r(1280, 1024)),
     );
   }
 

@@ -98,11 +98,20 @@ class CameraCapabilities {
     );
   }
 
-  /// Union with the common ladder, dropping anything above what was measured.
+  /// Union with the common ladder, capped at what was measured **and at the
+  /// shapes the camera was measured producing**.
   ///
   /// Empty resolutions in, the same out: with nothing measured there is no
   /// ceiling to cap against, and inventing one would mean guessing what the
   /// hardware can do — which is the mistake this whole class exists to avoid.
+  ///
+  /// A ladder rung is merged only when the camera measurably produced that
+  /// shape. The ladder's job is to fill gaps in the operator's menu for
+  /// geometries the camera *can* produce; a rung of a shape it never produced
+  /// is a mode that opens to a stretched or refused picture — and, once the
+  /// declared list is what `defaultResolutionFor` trusts, a shape the device
+  /// could be opened at. A 5:4 sensor therefore keeps 5:4 and is not advertised
+  /// 16:9 or 4:3.
   CameraCapabilities withCommonBaseline() {
     final ceiling = highestResolution;
     if (ceiling == null) return this;
@@ -111,7 +120,9 @@ class CameraCapabilities {
       resolutions: <CameraResolution>[
         ...resolutions,
         for (final common in kCommonResolutions)
-          if (common.pixelCount <= ceiling.pixelCount) common,
+          if (common.pixelCount <= ceiling.pixelCount &&
+              resolutions.any((measured) => sameShape(measured, common)))
+            common,
       ],
       framerates: <int>[...framerates, ...kCommonFramerates],
     );

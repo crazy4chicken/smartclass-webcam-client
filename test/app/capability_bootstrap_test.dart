@@ -22,9 +22,13 @@ const List<CameraDescriptor> _physical = [
 const Map<int, int> _ceilings = {0: 1280 * 720, 1: 640 * 480, 2: 1920 * 1080};
 
 /// What the probe reports, by **physical** index.
+///
+/// Camera 2 measures both 16:9 (1920x1080, 1280x720) and 4:3 (640x480) so the
+/// common ladder has a shape to fill for it: `withCommonBaseline` now only
+/// merges a rung whose shape the camera was seen producing.
 final Map<int, CameraCapabilities> _measured = {
   2: CameraCapabilities.of(
-    resolutions: const [_fhd, _hd],
+    resolutions: const [_fhd, _hd, _vga],
     framerates: const [60, 30],
   ),
   1: CameraCapabilities.of(resolutions: const [_vga], framerates: const [30]),

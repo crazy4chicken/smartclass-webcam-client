@@ -2526,6 +2526,39 @@ void checkCameraCapabilities() {
     current.resolutions.toSet().length == current.resolutions.length,
   );
 
+  // The declared list is *built* by `withCommonBaseline`, so a change to that
+  // rule invalidates every stored list. A payload without the current version
+  // tag is a miss — never a crash, because this is a kiosk boot path.
+  check(
+    'a cached payload without the version tag is a miss',
+    CachedCapabilities.fromJson(<String, Object?>{
+      'order': <String>['Rear'],
+      'cameras': <Object?>[
+        <String, Object?>{
+          'resolutions': <String>['1280x720'],
+          'framerates': <int>[30],
+        },
+      ],
+    }).isEmpty,
+  );
+  final cacheEntry = CachedCapabilities(
+    order: const <String>['Rear'],
+    byEnum: <CameraCapabilities>[
+      CameraCapabilities.of(
+        resolutions: const <CameraResolution>[hd],
+        framerates: const <int>[30],
+      ),
+    ],
+  );
+  check(
+    'a cached payload carries the version tag',
+    cacheEntry.toJson()['version'] == kCapabilitiesCacheVersion,
+  );
+  check(
+    'a cached payload with the current version round-trips',
+    !CachedCapabilities.fromJson(cacheEntry.toJson()).isEmpty,
+  );
+
   final roundTripped = CameraCapabilities.fromJson(measured.toJson());
   eq(
     'capabilities survive a JSON round trip',

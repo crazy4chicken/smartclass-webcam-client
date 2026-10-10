@@ -1,3 +1,9 @@
+// **Not the live selector.** Nothing in `lib/` calls `selectClosestResolution`;
+// the selector that decides what a camera opens at is `defaultResolutionFor` in
+// `default_mode.dart`, which is orientation-insensitive and prefers the
+// camera's own geometry. This one still compares per axis against the target as
+// written, so reaching for it from production would reintroduce the
+// portrait-geometry bug it predates. It is kept only for its own tests.
 import 'camera_resolution.dart';
 
 /// Picks the closest camera format that does **not** exceed [target].

@@ -42,34 +42,41 @@ const int kTargetFramerate = 60;
 /// to change is obvious.
 const int kFpsWithoutEvidence = 5;
 
-/// True when [resolution] fits inside [limit] **in both dimensions**.
+/// True when [resolution] fits inside [limit], **whatever the orientation**.
 ///
-/// Compared per axis rather than by pixel count, because a pixel count says
-/// nothing about geometry: 2560x1080 and 1920x1440 have the same area and
-/// completely different shapes, and only one of them fits inside 1920x1080.
-/// Guessing geometry from a total is how a device ends up asking a camera for
-/// a shape it does not produce.
+/// A resolution is a *size*, not an orientation: `1080x1920` is `1920x1080`
+/// held the other way up, and it fits inside `1920x1080` exactly as the
+/// landscape form does. The comparison is per axis — the short sides against
+/// each other and the long sides against each other — rather than by pixel
+/// count, because a pixel count says nothing about geometry: 2560x1080 and
+/// 1920x1440 have the same area and completely different shapes, and neither
+/// fits inside 1920x1080. Comparing a portrait geometry against a landscape box
+/// axis-wise is how a portrait camera gets judged too large for its own target
+/// and opened at a postage stamp.
 bool fitsWithin(CameraResolution resolution, CameraResolution limit) =>
-    resolution.width <= limit.width && resolution.height <= limit.height;
+    resolution.shortSide <= limit.shortSide &&
+    resolution.longSide <= limit.longSide;
 
-/// True when two resolutions have the same shape.
+/// True when two resolutions have the same shape, **whatever the orientation**.
 ///
-/// Cross-multiplied rather than divided: no floating point, no rounding, and
-/// 1280x720 and 1920x1080 come out equal exactly as they should.
-bool sameAspectRatio(CameraResolution a, CameraResolution b) =>
-    a.width * b.height == b.width * a.height;
+/// A thin alias for [sameShape]: `1080x1920` and `1920x1080` are one shape
+/// rotated, and the default-mode rules and their fixtures use this name.
+bool sameAspectRatio(CameraResolution a, CameraResolution b) => sameShape(a, b);
 
 /// The resolution to open [measured] at, capped at [target].
 ///
-/// Picks the largest measured resolution that fits inside [target] **and has
-/// the camera's own shape**. The shape test matters because the ladder in
-/// [kCommonResolutions] is mostly 16:9 and 4:3, and a camera whose native
-/// geometry is neither — a 5:4 sensor, a 21:9 conferencing bar — would
-/// otherwise be opened at a shape it does not produce, which surfaces as a
-/// stretched picture rather than as an error. "Largest by pixel count" is only
-/// used *within* one shape, where it is a real ordering.
+/// Picks the **largest measured resolution that fits inside [target]**. The
+/// camera's own shape is a **tie-break**, not a filter. Every candidate here is
+/// a geometry the camera measurably produced — the declared list is built by
+/// [CameraCapabilities.withCommonBaseline], which only fills in ladder rungs of
+/// a shape the camera was seen producing — so discarding one for its shape can
+/// only ever throw away a legitimate geometry. That is exactly the failure that
+/// opened a portrait device at 240x320: every sane portrait geometry was judged
+/// "the wrong shape" and dropped.
 ///
-/// The camera's shape is taken from [CameraCapabilities.highestResolution],
+/// When two candidates share a pixel count — the transposed pair, whose areas
+/// are equal — the one whose orientation matches the camera's own is preferred.
+/// The camera's orientation is taken from [CameraCapabilities.highestResolution],
 /// the geometry it was actually measured producing. That is evidence, not an
 /// assumption about what cameras usually are.
 ///
@@ -86,7 +93,7 @@ CameraResolution defaultResolutionFor({
 }) {
   if (measured.resolutions.isEmpty) return fallback;
 
-  // Descending by pixel count, so the first member of any subset below is the
+  // Descending by pixel count, so the head of the fitting subset below is the
   // largest member of that subset.
   final measured_ = <CameraResolution>{...measured.resolutions}.toList()
     ..sort((a, b) => b.pixelCount.compareTo(a.pixelCount));
@@ -105,13 +112,16 @@ CameraResolution defaultResolutionFor({
     return measured_.reduce((a, b) => a.pixelCount <= b.pixelCount ? a : b);
   }
 
+  final largest = fitting.first;
   final native = measured.highestResolution!;
-  final sameShape = <CameraResolution>[
-    for (final candidate in fitting)
-      if (sameAspectRatio(candidate, native)) candidate,
-  ];
-  final pool = sameShape.isEmpty ? fitting : sameShape;
-  return pool.first;
+  final nativeIsPortrait = native.height > native.width;
+  for (final candidate in fitting) {
+    if (candidate.pixelCount != largest.pixelCount) continue;
+    if ((candidate.height > candidate.width) == nativeIsPortrait) {
+      return candidate;
+    }
+  }
+  return largest;
 }
 
 /// The frame rate to announce at [resolution].

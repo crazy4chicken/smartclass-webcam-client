@@ -29,6 +29,19 @@ String cameraFingerprint(List<String> cameraNames) {
   return buffer.toString();
 }
 
+/// The capability cache payload version, bumped whenever a stored declared
+/// list changes meaning.
+///
+/// The declared list is **built**, not measured: `withCommonBaseline` folds the
+/// common ladder into it under a rule that can change. A cache written by the
+/// old rule must not be trusted by the new code — otherwise a device keeps its
+/// old declared list (and possibly its old, wrong default) until someone
+/// presses "re-detect". Bumping this turns every payload of the previous
+/// generation into a miss in one place. Same precedent as
+/// `kEncodeEvidenceVersion` in `encode_budget.dart`: a named constant, bumped
+/// when the meaning of the stored value changes.
+const int kCapabilitiesCacheVersion = 1;
+
 /// One camera set's cached measurement.
 ///
 /// **The order is part of the payload, and that is the point.** The device
@@ -37,7 +50,16 @@ String cameraFingerprint(List<String> cameraNames) {
 /// only the capabilities would still leave the order to be worked out, and
 /// working it out means opening every camera once.
 class CachedCapabilities {
-  const CachedCapabilities({required this.order, required this.byEnum});
+  const CachedCapabilities({
+    this.version = kCapabilitiesCacheVersion,
+    required this.order,
+    required this.byEnum,
+  });
+
+  /// The rule that built the declared lists in [byEnum]. A payload whose
+  /// version is not [kCapabilitiesCacheVersion] is a miss — see
+  /// [kCapabilitiesCacheVersion].
+  final int version;
 
   /// Camera names in canonical order — the position *is* `camera_enum`.
   final List<String> order;
@@ -55,6 +77,7 @@ class CachedCapabilities {
   bool get isEmpty => order.isEmpty || order.length != byEnum.length;
 
   Map<String, Object?> toJson() => <String, Object?>{
+    'version': version,
     'order': order,
     'cameras': <Object?>[for (final camera in byEnum) camera.toJson()],
   };
@@ -65,8 +88,16 @@ class CachedCapabilities {
   /// overwrites it. The order and the per-camera list must agree in length —
   /// a payload where they disagree describes a camera set that does not exist,
   /// and acting on it would map capabilities onto the wrong enums.
+  ///
+  /// A payload without the current [version] tag is a miss, never a crash.
+  /// This is a kiosk boot path: an older cache is not corrupt, it is simply
+  /// built by a rule that no longer exists, and re-probing is the only honest
+  /// answer.
   static CachedCapabilities fromJson(Object? raw) {
     if (raw is! Map) return empty;
+
+    final version = raw['version'];
+    if (version is! int || version != kCapabilitiesCacheVersion) return empty;
 
     final rawOrder = raw['order'];
     if (rawOrder is! List) return empty;

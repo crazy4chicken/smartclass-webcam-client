@@ -122,15 +122,30 @@ void main() {
     });
 
     test('output is still deduped and sorted', () {
-      // 1280x720 and 640x480 are measured *and* on the common ladder.
+      // The camera measured both 16:9 (1920x1080, 1280x720) and 4:3 (640x480),
+      // so the ladder fills in rungs of both shapes. 1280x720 and 640x480 are
+      // measured *and* on the common ladder.
       final caps = CameraCapabilities.of(
-        resolutions: const [_fhd, _hd],
+        resolutions: const [_fhd, _hd, _vga],
         framerates: const [30, 5],
       ).withCommonBaseline();
 
       expect(caps.resolutions, const [_fhd, _hd, _xga, _svga, _vga, _qvga]);
       expect(caps.resolutions.toSet(), hasLength(caps.resolutions.length));
       expect(caps.framerates, const [60, 50, 30, 25, 24, 20, 15, 10, 5]);
+    });
+
+    test('only fills in rungs of a shape the camera measured', () {
+      // A 5:4 sensor. The common ladder is 16:9 and 4:3 only, so none of it
+      // describes a geometry this camera produced. Advertising it would offer a
+      // mode that opens to a stretched or refused picture.
+      const sxga = CameraResolution(width: 1280, height: 1024);
+      final caps = CameraCapabilities.of(
+        resolutions: const [sxga],
+        framerates: const [30],
+      ).withCommonBaseline();
+
+      expect(caps.resolutions, const [sxga]);
     });
   });
 

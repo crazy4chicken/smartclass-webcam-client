@@ -109,6 +109,33 @@ void main() {
         );
       }
     });
+
+    test('a payload without the current version tag is a miss', () {
+      // The declared list is *built* by `withCommonBaseline`, so a change to
+      // that rule invalidates every stored list. A payload from before the tag
+      // existed — or one written by an older rule — must re-probe rather than
+      // keep a declared list (and possibly a default) built by a rule that no
+      // longer exists.
+      final payload = <String, Object?>{
+        'order': <String>['Rear'],
+        'cameras': <Object?>[
+          <String, Object?>{
+            'resolutions': <String>['1280x720'],
+            'framerates': <int>[30],
+          },
+        ],
+      };
+      expect(CachedCapabilities.fromJson(payload).isEmpty, isTrue);
+
+      final stale = <String, Object?>{...payload, 'version': -1};
+      expect(CachedCapabilities.fromJson(stale).isEmpty, isTrue);
+
+      final current = <String, Object?>{
+        ...payload,
+        'version': kCapabilitiesCacheVersion,
+      };
+      expect(CachedCapabilities.fromJson(current).isEmpty, isFalse);
+    });
   });
 
   group('SharedPrefsCapabilitiesStore', () {
@@ -259,11 +286,34 @@ void main() {
       expect(decoded['fingerprint'], 'fp');
 
       final payload = decoded['capabilities']! as Map;
+      expect(payload['version'], kCapabilitiesCacheVersion);
       expect(payload['order'], ['Rear', 'Front']);
       expect((payload['cameras']! as List), hasLength(2));
       expect(((payload['cameras']! as List).first as Map)['resolutions'], [
         '1280x720',
       ]);
+    });
+
+    test('a stored payload without the version tag is a miss', () async {
+      // The stored declared list was built by a rule that no longer exists.
+      // Re-probing is the only honest answer, and a kiosk boot path must never
+      // crash on it.
+      SharedPreferences.setMockInitialValues({
+        SharedPrefsCapabilitiesStore.key: jsonEncode(<String, Object?>{
+          'fingerprint': 'fp',
+          'capabilities': <String, Object?>{
+            'order': <String>['Rear'],
+            'cameras': <Object?>[
+              <String, Object?>{
+                'resolutions': <String>['1280x720'],
+                'framerates': <int>[30],
+              },
+            ],
+          },
+        }),
+      });
+
+      expect(await SharedPrefsCapabilitiesStore().load('fp'), isNull);
     });
   });
 }
