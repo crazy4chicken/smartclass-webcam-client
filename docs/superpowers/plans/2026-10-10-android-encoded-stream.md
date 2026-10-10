@@ -92,22 +92,38 @@ rm -rf packages/camera_android_camerax/example \
 - **改动范围：只新增文件。** 上游文件唯一一处改动是 `CameraAndroidCameraxPlugin.java` 里的两行注册（Task 4），rebase 时手工重放
 - 地面规则沿用 `camera_desktop/VENDORED.md` 的四条（只改采集/编码路径；帧不落盘、原始帧不进 Dart；声明必须是实测的；没有编码器就直说）
 
-- [x] **Step 3: `pubspec.yaml` 加 root path 依赖**
+- [x] **Step 3: `pubspec.yaml` 把 fork 挂上去 —— 必须用 `dependency_overrides`**
+
+> **⚠️ 2026-10-10 更正：原计划的写法（放 `dependencies:`）是错的，会让 `flutter pub get` 直接失败。**
+> `camera` 0.12.1 声明的是 `camera_android_camerax: ^0.7.4`（**hosted**），而 pub **不允许 root 的
+> `dependencies` 用 `path:` 去替换一个"已发布在 pub.dev 的传递依赖"**：
+>
+> ```
+> Because camera 0.12.1 depends on camera_android_camerax ^0.7.4 ...,
+> camera ^0.12.1 requires camera_android_camerax from hosted.
+> ```
+>
+> `camera_desktop` 能放在 `dependencies:` 里，只是**因为没有任何包依赖它**，所以没有源冲突。
+> 指向本地 fork 的传递依赖，唯一正确的机制是 `dependency_overrides`：
 
 ```yaml
-  # Root dependency, not merely transitive: a path dependency here is what makes
-  # `camera` resolve its Android implementation to this fork. Only
-  # `camera_android_camerax` is forked — see packages/camera_android_camerax/VENDORED.md.
+dependency_overrides:
   camera_android_camerax:
     path: packages/camera_android_camerax
 ```
 
 - [ ] **Step 4: 用户在自己的 PowerShell 里跑 `flutter pub get`**（助手不要跑）
 
-- [ ] **Step 5: 验证解析到了本地实现**
+- [ ] **Step 5: 验证解析到了本地实现，且插件仍被注册**
 
 Run: `grep -A4 "camera_android_camerax:" pubspec.lock`
 Expected: `source: path` 且 `description: path: "packages/camera_android_camerax"`（不再是 `source: hosted`）。
+
+再确认**插件仍然被注册**（`dependency_overrides` 只改源，不该把插件从构建里挤掉）：
+
+Run: `grep -c "camera_android_camerax" .flutter-plugins-dependencies`
+Expected: ≥ 1（这个文件由 `flutter pub get` 生成；若为 0，说明 override 让 Flutter 工具漏掉了插件，
+Android 侧会静默不注册 —— 那时要改回 `dependencies` 并另找办法）。
 
 - [ ] **Step 6: 用户编 debug APK，按 `docs/android-setup.md` §11 驱动真机**
 

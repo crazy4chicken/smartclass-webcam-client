@@ -44,6 +44,26 @@ stays rebasable. The single exception is a two-line registration change in
 (`onAttachedToEngine` / `onDetachedFromEngine`), added by a later task. On any
 rebase that touch has to be re-applied by hand — it will not survive a copy.
 
+## How it is wired in
+
+Through **`dependency_overrides`**, not `dependencies`:
+
+```yaml
+dependency_overrides:
+  camera_android_camerax:
+    path: packages/camera_android_camerax
+```
+
+That is not a stylistic choice. `camera` 0.12.1 declares
+`camera_android_camerax: ^0.7.4` **from pub.dev**, and pub will not let a root
+`dependencies` entry with a `path:` source replace a *published* transitive
+dependency — the whole resolution fails with
+`camera ^0.12.1 requires camera_android_camerax from hosted`. Redirecting a
+transitive dependency at a local fork is what `dependency_overrides` is for.
+
+`camera_desktop` can sit in `dependencies` only because nothing else depends on
+it, so there is no source to conflict with.
+
 ## Upgrading
 
 Diff this directory against the new upstream version before copying anything.

@@ -27,7 +27,8 @@
 ## 下一步任务
 
 1. **用户跑 `flutter pub get`**（`pubspec.yaml` 变了）→ 确认 `pubspec.lock` 里
-   `camera_android_camerax` 是 `source: path`。
+   `camera_android_camerax` 是 `source: path`，**并且** `.flutter-plugins-dependencies` 里
+   还能搜到它（override 只该改源，不该让插件从构建里消失）。
 2. **用户编 debug APK 并驱动真机**（`docs/android-setup.md` §11），确认三条基线不坏：
    预览出画面、拍照成功、注册成功。**这是 Task 1 的验收，没它就还没完成。**
 3. 然后 **Task 4**：native `EncodedStreamVideoOutput` + `EncodedStreamPlugin` + Flutter 薄壳。

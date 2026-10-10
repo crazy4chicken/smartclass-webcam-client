@@ -45,11 +45,8 @@ dependencies:
   # rebasable.
   camera_desktop:
     path: packages/camera_desktop
-  # Root dependency, not merely transitive: a path dependency here is what makes
-  # `camera` resolve its Android implementation to this fork. Only
-  # `camera_android_camerax` is forked — see packages/camera_android_camerax/VENDORED.md.
-  camera_android_camerax:
-    path: packages/camera_android_camerax
+  # `camera_android_camerax` is **not** here, and that is deliberate — see the
+  # `dependency_overrides` section below.
   # No permission_handler: camera_android_camerax and camera_avfoundation each
   # request camera access during initialize(), and permission_handler_windows
   # does not compile against current MSVC (it forces /await and C++/WinRT
@@ -61,6 +58,27 @@ dependencies:
   # alongside the WebSocket.
   http: ^1.6.0
   shared_preferences: ^2.5.5
+
+# The Android half of the camera plugin is forked at
+# `packages/camera_android_camerax` (see its VENDORED.md), and it has to be
+# redirected here rather than listed in `dependencies`.
+#
+# A `dependencies` entry with a `path:` source cannot replace a *published*
+# transitive dependency. `camera` 0.12.1 depends on
+# `camera_android_camerax: ^0.7.4` from pub.dev, so putting the path entry in
+# `dependencies` makes pub refuse the whole resolution:
+#
+#   Because camera 0.12.1 depends on camera_android_camerax ^0.7.4 ...,
+#   camera ^0.12.1 requires camera_android_camerax from hosted.
+#
+# `dependency_overrides` is the mechanism for exactly this, and it is not a
+# temporary hack in this project: pointing a transitive dependency at a local
+# fork is the only way to build against a vendored plugin. `camera_desktop`
+# above can sit in `dependencies` because nothing else depends on it, so there
+# is no source to conflict with.
+dependency_overrides:
+  camera_android_camerax:
+    path: packages/camera_android_camerax
 
 dev_dependencies:
   flutter_test:
