@@ -6,6 +6,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'src/agent/agent_coordinator.dart';
 import 'src/app/capability_bootstrap.dart';
+import 'src/app/capture_bootstrap.dart';
 import 'src/app/lifecycle_controller.dart';
 import 'src/backend/backend_gateway.dart';
 import 'src/backend/device_credentials.dart';
@@ -20,16 +21,18 @@ import 'src/capture/camera_plugin_backend.dart';
 import 'src/capture/camera_provider.dart';
 import 'src/capture/camera_resolution.dart';
 import 'src/capture/codec_probe.dart';
-import 'src/capture/default_mode.dart';
+import 'src/capture/encode_budget.dart';
 import 'src/capture/frame_pump.dart';
 import 'src/capture/plugin_camera_ranker.dart';
 import 'src/capture/plugin_capability_probe.dart';
 import 'src/capture/stream_settings.dart';
+import 'src/capture/video_encoder.dart';
 import 'src/config/app_config.dart';
 import 'src/config/capabilities_store.dart';
 import 'src/config/connection_settings.dart';
 import 'src/config/settings_store.dart';
 import 'src/config/shared_prefs_capabilities_store.dart';
+import 'src/config/shared_prefs_encode_evidence_store.dart';
 import 'src/config/shared_prefs_settings_store.dart';
 import 'src/ui/screens/agent_screen.dart';
 import 'src/ui/screens/bootstrap_screen.dart';
@@ -127,20 +130,22 @@ Future<void> _bootstrap() async {
 
   // Which codecs this device can produce is measured, not assumed. Today the
   // only probe is the baseline one — JPEG from the still-picture path — so the
-  // selection lands on `mjpeg`, which the server defines as exactly that.
+  // claim set is `mjpeg`, which the server defines as exactly that. What may be
+  // *announced* is decided later and more narrowly, from evidence: see
+  // `planCapture`.
   final available = await CompositeCodecProbe(
     probes: [const BaselineCodecProbe()],
   ).availableCodecs();
-  final codec = await CodecSelector(probe: StaticCodecProbe(available))
-      .select();
-  debugPrint(
-    '[codec] available=${available.map((c) => c.wireName).join(",")} '
-    'selected=${codec.wireName}',
-  );
+  debugPrint('[codec] available=${available.map((c) => c.wireName).join(",")}');
 
-  final settings = StreamSettings.defaults().copyWith(codec: codec);
+  // The **request**, not the declaration. `fps` is the ceiling the pump ticks
+  // at and is deliberately not narrowed to what the device measurably holds —
+  // that is `CameraMode.fps`, decided from evidence in `planCapture`. The codec
+  // is filled in from the plan once the evidence exists.
+  final settings = StreamSettings.defaults();
   final captureConfig = CaptureConfig.defaults();
   final capabilitiesStore = SharedPrefsCapabilitiesStore();
+  final evidenceStore = SharedPrefsEncodeEvidenceStore();
 
   // `runApp` is called **once**, with a root that probes first. Probing before
   // `runApp` would mean a black window for as long as the cameras take to rank
@@ -162,6 +167,7 @@ Future<void> _bootstrap() async {
         unrecognized: unrecognized,
         settingsStore: settingsStore,
         capabilitiesStore: capabilitiesStore,
+        evidenceStore: evidenceStore,
         connection: connection,
         settings: settings,
         available: available,
@@ -182,6 +188,7 @@ Future<Widget> _startKiosk({
   required UnrecognizedCommandLog unrecognized,
   required SettingsStore settingsStore,
   required CapabilitiesStore capabilitiesStore,
+  required EncodeEvidenceStore evidenceStore,
   required ConnectionSettings connection,
   required StreamSettings settings,
   required Set<CaptureCodec> available,
@@ -189,24 +196,47 @@ Future<Widget> _startKiosk({
 }) async {
   debugPrint('[camera] inventory: $inventory');
 
-  // Open camera 0 at the **default mode's** resolution — not its measured
-  // ceiling — through the one selector everything else uses. `CaptureConfig`
-  // is the only source of truth for what the pipeline is built at, and camera
-  // 0's announced mode must agree with it or the registration would describe a
-  // geometry the device never opened. Seeding the modes at 1080p while opening
-  // the pipeline at the ceiling would announce one thing and capture another,
-  // which is precisely the "declared resolution ≠ delivered resolution" bug
-  // the selector exists to close. A probe that found nothing keeps the build
-  // default, as the selector's fallback does.
-  final openResolution = defaultResolutionFor(
+  // What to open, what to declare and what to publish — decided in one place
+  // and in one order: the geometry from the inventory, the evidence measured at
+  // that geometry, the declared rate from the evidence, the codec list from
+  // both. See `planCapture`.
+  //
+  // No platform implements `EncodeBudgetProbe` yet (tasks #12 / #13 / #16 /
+  // #20), so the plan comes out as the floor — `mjpeg` at
+  // `kFpsWithoutEvidence` — and nothing downstream changes. That is the point
+  // of wiring it now: a device with no encoder still previews, still takes
+  // photos and still streams mjpeg, and the moment a platform probe is
+  // constructed here every number below moves with it instead of being
+  // recomputed in three places.
+  //
+  // The encoder identity is part of the evidence cache key, so it has to name
+  // the encoder that will actually run. Today that is the mjpeg floor; a
+  // platform that ships a native encoder passes its own name here.
+  final plan = await planCapture(
     measured: inventory.capabilities.isEmpty
         ? CameraCapabilities.empty
         : inventory.capabilities.first,
-    fallback: captureConfig.resolution,
+    available: available,
+    store: evidenceStore,
+    probe: null,
+    cameraFingerprint: cameraFingerprint(<String>[
+      for (final descriptor in inventory.descriptors) descriptor.name,
+    ]),
+    encoderIdentity: kMjpegEncoderIdentity,
+    fallbackResolution: captureConfig.resolution,
+    log: debugPrint,
   );
+  debugPrint('[capture] plan: $plan');
+
+  // Open camera 0 at the **plan's** resolution — not its measured ceiling and
+  // not a second opinion computed here. `CaptureConfig` is the only source of
+  // truth for what the pipeline is built at, and camera 0's announced mode must
+  // agree with it or the registration would describe a geometry the device
+  // never opened. A probe that found nothing keeps the build default, as the
+  // selector's fallback does.
   final openConfig = captureConfig.copyWith(
-    width: openResolution.width,
-    height: openResolution.height,
+    width: plan.resolution.width,
+    height: plan.resolution.height,
   );
 
   final cameraProvider = CameraProvider(
@@ -218,23 +248,21 @@ Future<Widget> _startKiosk({
     debugPrint('[camera] no backend available: ${openResult.failure}');
   }
 
-  // The announced codecs, in preference order. Derived from `wireCodecsFor`
-  // rather than ordered again here, so the capture-layer list and the wire list
-  // cannot disagree — that is the whole reason `wireCodecsFor` exists instead
-  // of a cast.
-  final announcedCodecs = <CaptureCodec>[
-    for (final codec in wireCodecsFor(available))
-      CaptureCodec.tryParse(codec.wireName)!,
-  ];
-
-  /// The live inventory. A re-probe replaces it, and the gateway factory reads
-  /// it at registration time.
-  ///
-  /// Mutable for one reason: a re-probe can change the canonical **order**, and
-  /// the announcements and the backend's permutation have to change together or
-  /// the server would be asking for a camera the backend does not have. See
-  /// [applyInventory] for the ordering that keeps them in step.
+  // The live inventory and the live evidence. A re-probe replaces both, and the
+  // gateway factory reads them at registration time.
+  //
+  // Mutable for one reason each: a re-probe can change the canonical **order**,
+  // and the announcements and the backend's permutation have to change
+  // together; and it can change what the device was measured holding, which is
+  // what the published codec list is filtered by. See [applyInventory] for the
+  // ordering that keeps them in step.
   var currentInventory = inventory;
+  var currentEvidence = plan.evidence;
+
+  // The claim set, in the one definition the plan also used. Passed to the
+  // coordinator so the mode it seeds and the codecs it publishes are derived
+  // from the same device the plan described.
+  final claimed = claimedCodecs(available);
 
   // The gateway and the coordinator refer to each other: the gateway needs the
   // coordinator's live state for its periodic `status`, and the coordinator
@@ -277,7 +305,22 @@ Future<Widget> _startKiosk({
           WebSocketBackendChannel(WebSocketChannel.connect(uri)),
       cameras: () => buildAnnouncements(
         cameras: _declarations(currentInventory, coordinator, openConfig),
-        codecs: wireCodecsFor(available),
+        // Re-derived on every registration rather than captured once. The
+        // server stores nothing for `switch_camera`, so a mode change is only
+        // visible through a re-registration — and the codec list has to be
+        // recomputed with it, because availability is per mode: a codec that
+        // held 1080p30 is not available at 1080p60. Publishing the list from
+        // start-up would keep offering a codec the device is no longer in a
+        // position to serve. The active camera's mode is the one the server
+        // will open a stream on, so that is the mode the list describes.
+        codecs: wireCodecsFor(
+          announcedCodecsFor(
+            available: available,
+            evidence: currentEvidence,
+            resolution: coordinator.activeMode.resolution,
+            fps: coordinator.activeMode.fps,
+          ).toSet(),
+        ),
       ),
       statusReport: () => coordinator.reportStatus(),
       unrecognizedLog: unrecognized,
@@ -299,9 +342,11 @@ Future<Widget> _startKiosk({
     initialCamera: camera,
     initialBackendId: openResult.backendId,
     config: openConfig,
-    settings: settings,
+    settings: settings.copyWith(codec: plan.codecs.first),
     capabilities: inventory.capabilities,
-    announcedCodecs: announcedCodecs,
+    announcedCodecs: plan.codecs,
+    encodeSamples: plan.samples,
+    codecCandidates: claimed,
     // The server never waits for an ack and records nothing about most
     // commands, so the console is the only place a refusal is visible. Without
     // this, a device that acks `ok:false` looks identical to one that ignored
@@ -328,14 +373,18 @@ Future<Widget> _startKiosk({
   // round trip.
   unawaited(coordinator.start());
 
-  /// Re-probes every camera and adopts the result.
+  /// Re-probes every camera, re-measures, and adopts the result.
   ///
-  /// **The order of the first two statements is load-bearing.** `adoptInventory`
-  /// reconnects, and the gateway factory reads `currentInventory` when it builds
-  /// the registration — so the new inventory has to be in place *before* the
-  /// reconnect, or the device would publish a camera order its backend does not
-  /// implement. Swapping them is a one-line change with no compile-time signal
-  /// and a failure that only shows up as the server opening the wrong camera.
+  /// **The order of these statements is load-bearing.** `adoptInventory`
+  /// reconnects, and the gateway factory reads `currentInventory` and
+  /// `currentEvidence` when it builds the registration — so both have to be in
+  /// place *before* the reconnect, or the device would publish a camera order
+  /// its backend does not implement, or a codec it was never measured holding.
+  /// Reordering them is a one-line change with no compile-time signal and a
+  /// failure that only shows up as the server opening the wrong camera.
+  ///
+  /// The re-measure is forced because the operator pressed the button: a cached
+  /// rate would be exactly the lie the button exists to remove.
   Future<CameraInventory> applyInventory() async {
     final fresh = await ensureInventory(
       enumerate: pluginCameraEnumerator(),
@@ -349,12 +398,32 @@ Future<Widget> _startKiosk({
       log: debugPrint,
     );
 
+    final freshPlan = await planCapture(
+      measured: fresh.capabilities.isEmpty
+          ? CameraCapabilities.empty
+          : fresh.capabilities.first,
+      available: available,
+      store: evidenceStore,
+      probe: null,
+      cameraFingerprint: cameraFingerprint(<String>[
+        for (final descriptor in fresh.descriptors) descriptor.name,
+      ]),
+      encoderIdentity: kMjpegEncoderIdentity,
+      fallbackResolution: captureConfig.resolution,
+      forceRemeasure: true,
+      log: debugPrint,
+    );
+    debugPrint('[capture] re-planned: $freshPlan');
+
     currentInventory = fresh;
+    currentEvidence = freshPlan.evidence;
     await coordinator.adoptInventory(
       cameraProvider: CameraProvider(
         backends: buildBackendChain(cameraOrder: fresh.order),
       ),
       capabilities: fresh.capabilities,
+      encodeSamples: freshPlan.samples,
+      announcedCodecs: freshPlan.codecs,
     );
     return fresh;
   }

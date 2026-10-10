@@ -123,6 +123,7 @@ List<CameraMode> _seedModes({
   required List<CameraCapabilities> capabilities,
   required CaptureConfig config,
   required List<EncodeSample> samples,
+  required Iterable<CaptureCodec> codecs,
 }) {
   final count = capabilities.isEmpty ? 1 : capabilities.length;
   return <CameraMode>[
@@ -134,6 +135,7 @@ List<CameraMode> _seedModes({
         samples: samples,
         fallbackResolution: config.resolution,
         unmeasuredFps: kFpsWithoutEvidence,
+        codecs: codecs,
       ),
   ];
 }
@@ -163,6 +165,7 @@ class AgentCoordinator {
       CaptureCodec.mjpeg,
     ],
     List<EncodeSample> encodeSamples = const <EncodeSample>[],
+    List<CaptureCodec> codecCandidates = CaptureCodec.preference,
     VideoEncoderFactory? encoderFactory,
     void Function(String message)? log,
     DateTime Function()? clock,
@@ -183,10 +186,12 @@ class AgentCoordinator {
              : announcedCodecs,
        ),
        _encodeSamples = List<EncodeSample>.unmodifiable(encodeSamples),
+       _codecCandidates = List<CaptureCodec>.unmodifiable(codecCandidates),
        _modes = _seedModes(
          capabilities: capabilities,
          config: config ?? CaptureConfig.defaults(),
          samples: encodeSamples,
+         codecs: codecCandidates,
        ),
        _log = log {
     // Assigned here rather than in the initializer list because the default
@@ -223,6 +228,19 @@ class AgentCoordinator {
   /// still needs the factory's own answer before it acks.
   List<EncodeSample> _encodeSamples;
 
+  /// The codecs the device can produce **at all**, best first.
+  ///
+  /// The claim set, not the announced list. Seeding a mode asks "what is the
+  /// best rate this device could hold", and a codec that the current mode
+  /// cannot serve is still part of that question — narrowing it here would
+  /// answer with a list the evidence had already filtered, so a device that
+  /// only held 30 in the mode it happened to start in could never be asked to
+  /// declare anything higher.
+  ///
+  /// It has to be the same set the start-up plan used, or the announced rate
+  /// and the published codec list would be derived from different devices.
+  final List<CaptureCodec> _codecCandidates;
+
   /// What each announced camera was measured to accept, indexed by
   /// `camera_enum`. Empty on a device whose probe found nothing, which is not a
   /// failure state — it just means every camera declares only the mode it is in.
@@ -230,7 +248,11 @@ class AgentCoordinator {
 
   /// The codecs announced at registration, in order. The **first** is the
   /// preferred one, which is what an unnamed `start_recording.codec` selects.
-  final List<CaptureCodec> _announcedCodecs;
+  ///
+  /// Replaced by [adoptInventory], never mutated in place: a re-detect can
+  /// produce different evidence, and the published list has to move with it or
+  /// the device would keep offering a codec it no longer measurably holds.
+  List<CaptureCodec> _announcedCodecs;
 
   /// The mode each announced camera is at right now, indexed by `camera_enum`.
   ///
@@ -707,6 +729,8 @@ class AgentCoordinator {
   Future<void> adoptInventory({
     required CameraProvider cameraProvider,
     required List<CameraCapabilities> capabilities,
+    List<EncodeSample>? encodeSamples,
+    List<CaptureCodec>? announcedCodecs,
   }) async {
     _report('adopt inventory: ${capabilities.length} camera(s)');
 
@@ -715,10 +739,21 @@ class AgentCoordinator {
 
     _cameraProvider = cameraProvider;
     _capabilities = List<CameraCapabilities>.unmodifiable(capabilities);
+    // The fresh measurement, when the caller made one. Both halves move
+    // together: the modes are seeded *from* the samples, and the published
+    // codecs are filtered by them — adopting one without the other would
+    // announce a rate the device was never measured holding.
+    if (encodeSamples != null) {
+      _encodeSamples = List<EncodeSample>.unmodifiable(encodeSamples);
+    }
+    if (announcedCodecs != null && announcedCodecs.isNotEmpty) {
+      _announcedCodecs = List<CaptureCodec>.unmodifiable(announcedCodecs);
+    }
     _modes = _seedModes(
       capabilities: capabilities,
       config: _config,
       samples: _encodeSamples,
+      codecs: _codecCandidates,
     );
     // The modes above already claim the fresh defaults, and `reconfigure`
     // below re-opens camera 0 through `_openCamera(_config)` — so the config

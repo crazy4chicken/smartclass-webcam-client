@@ -263,8 +263,27 @@
 ### #14 跨平台 Dart 适配器与应用启动装配
 **依赖：** #4、#5、#7、#9、#10、#11。**文件：** plugin-facing adapter、纯接口、main、Flutter messenger 测试。
 - [ ] Android 与 desktop 插件事件各自接统一通道，不重复注册 method handler；fake 接口与 Flutter bridge 分层测。
-- [ ] 先 inventory/实测证据、再默认模式/打开管线、再同源注册；native probe 存在不等于 mode 可用。
-- [ ] 重检/切模式失效证据并重算后注册；不支持平台仍能预览/照片/MJPEG。验收：Android 实际接通后才能称当前端到端链路完成，其他平台待对应实现。
+  > **仍待办**，要等原生侧（#13/#17/#20）才有东西可接。今天没有第二个通道，也就没有可重复注册的
+  > handler。
+- [x] 先 inventory/实测证据、再默认模式/打开管线、再同源注册；native probe 存在不等于 mode 可用。
+  > **2026-10-10 完成。** 新增 `lib/src/app/capture_bootstrap.dart`（纯 Dart，门禁跑）：
+  > `ensureEncodeEvidence()`（命中不测；无探针不测**也不写缓存**；探针抛错 / 答的是别的摄像头或
+  > 编码器 → 空证据，绝不当成"实测为零"缓存下来）+ `announcedCodecsFor()`（**公告 = 平台声称 ∩
+  > 实测**；`canServeMode` 按模式判定，所以「H.265 在 30 可用」不会变成「1080p60 可用」）+
+  > `planCapture()`（**几何 → 实测 → 声明帧率 → 公告**，一条顺序，`defaultFpsFor` 的 codec 集合
+  > 取「设备声称的」而不是「所有有样本的」）。`main.dart` 按这条顺序装配；协调器新增
+  > `codecCandidates`，与 plan 用**同一份**声称集合播种模式。门禁新增
+  > `tool/verify_capture_bootstrap.dart`（+43 条），8 个变异全部变红。
+- [x] 重检/切模式失效证据并重算后注册；不支持平台仍能预览/照片/MJPEG。验收：Android 实际接通后才能称当前端到端链路完整，其他平台待对应实现。
+  > **2026-10-10 完成（Dart 侧）。** ① **重检**：`applyInventory` 强制重测（`forceRemeasure`）
+  > → 重新 plan → 先换 `currentEvidence` 再 `adoptInventory`（顺序载重）；`adoptInventory` 新增
+  > `encodeSamples`/`announcedCodecs`，模式随新样本重播种。② **切模式**：gateway 的 codec 列表
+  > 改为**每次注册时**按 `coordinator.activeMode` 重算 —— `switch_camera` 本来就走 `_reregister`，
+  > 于是「切模式 → 重算 → 注册」自然成立，不再是把启动时算好的列表一直发下去。③ **无原生编码的
+  > 平台**：没有任何平台实现 `EncodeBudgetProbe`，所以今天 `probe: null` → 计划恒为 `mjpeg` @
+  > `kFpsWithoutEvidence`，**与改动前逐字相同**；预览 / 照片 / mjpeg 流照旧。验收仍是
+  > 「Android 实际接通后才算端到端完成」—— 现在只把链接上了，链上还没有证据。
+  > **注**：`main.dart` 助手跑不了（要 Flutter），只做了 `check_compile.py` 类型检查。
 
 ### #15 Android 真机端到端与长稳验收
 **依赖：** #6、#13、#14、#23。**操作者：** 用户跑构建/安装/flutter test，指挥者整理回放步骤与证据。

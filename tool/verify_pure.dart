@@ -62,6 +62,7 @@ import 'package:webcam_client/src/config/connection_settings.dart';
 // it because nothing is read at top-level initialisation time. Both are called
 // from `main` below — a suite that is never called is a suite that can rot.
 import 'verify_annexb.dart';
+import 'verify_capture_bootstrap.dart';
 import 'verify_default_mode.dart';
 import 'verify_diagnostics.dart';
 import 'verify_rate_calibration.dart';
@@ -6201,6 +6202,7 @@ Future<void> main() async {
   await guard('annex b', runAnnexBChecks);
   await guard('encode budget', runEncodeBudgetChecks);
   await guard('default mode', runDefaultModeChecks);
+  await guard('capture bootstrap', runCaptureBootstrapChecks);
   await guard('sustained rate', runSustainedRateChecks);
   await guard('rate calibration', runRateCalibrationChecks);
   await guard('diagnostics', runDiagnosticsChecks);

@@ -102,6 +102,14 @@ abstract interface class VideoEncoder {
   Stream<EncodedFrame> get frames;
 }
 
+/// What the mjpeg floor calls itself.
+///
+/// Exported because it is part of an evidence cache key: a caller building one
+/// before an encoder exists has to name the same encoder the fallback will
+/// actually run, or the first real measurement would be filed under a different
+/// identity and never found again.
+const String kMjpegEncoderIdentity = 'mjpeg.takePicture';
+
 /// [VideoEncoder] that passes JPEG frames straight through.
 ///
 /// No transcoding happens, and none is needed: a JPEG *is* an mjpeg frame. The
@@ -136,7 +144,7 @@ class MjpegEncoder implements VideoEncoder {
   /// still-picture path and, on a native platform, could be served by an
   /// encoder — and the two hold very different rates.
   @override
-  String get identity => 'mjpeg.takePicture';
+  String get identity => kMjpegEncoderIdentity;
 
   @override
   Stream<EncodedFrame> get frames => _frames.stream;

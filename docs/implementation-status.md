@@ -284,6 +284,7 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | #4.1 声明帧率 | ✅ 已修复 | 声明帧率与请求帧率拆开：请求 60（泵不节流），声明在有证据时取实测、**无证据时取下限 5**（不再声明 60）。探针给不出这个数——它只测「接受」不测「持续」，已写进 ADR |
 | #9 编码通道契约 | ⚠️ 2/3 | `EncodedPacket` 增加 `sourceSeq`/`sourcePts`/`sessionGeneration`/`isEos`；`EncodedStreamChannel.open()` 增加 `sessionGeneration`；`EncodedFrame` 增加 `sourceSeq`/`sourcePts`。`start`/`stop` 走 `SerialLock`，`open` 失败回滚，旧 run 的包按代次丢弃（`stalePackets`）。**缺：bitrate（协议无此字段）、`close()` 超时兜底** |
 | #9/A2 生产者接线 | ✅ 已完成 | `measureDeliveredRate()`（`sustained_rate.dart`）把编码器交付流喂给 `SustainedRateMeter`，喂 `sourceSeq` 而非 `seq`。门禁用**真实 `NativeVideoEncoder`** + 重复源序号证明「重复不算交付」。**注意：生产侧暂无调用者** —— 它是各平台 `EncodeBudgetProbe` 的公共身体，而那些实现都还没有 |
+| #14 启动装配 | ⚠️ 2/3 | 新增 `lib/src/app/capture_bootstrap.dart`：`ensureEncodeEvidence()`（缓存命中 → 不测；无探针 → 不测**也不写缓存**；探针抛错/答的是别的摄像头或编码器 → 空证据）+ `announcedCodecsFor()`（**公告 = 平台声称 ∩ 实测**，`canServeMode` 按模式判定）+ `planCapture()`（几何 → 实测 → 声明帧率 → 公告，一条顺序）。`main.dart` 按这条顺序装配：plan → 开管线 → 同源注册；gateway 的 codec 列表改为**每次注册时**按 `coordinator.activeMode` 重算（切模式 → 重算 → 重注册）；「重新检测」强制重测再 adopt（`adoptInventory` 新增 `encodeSamples`/`announcedCodecs`，模式随之重播种）。**没有平台实现 `EncodeBudgetProbe`，所以今天 `probe: null` → 计划恒为 `mjpeg` @ `kFpsWithoutEvidence`，行为与之前逐字相同** —— 不支持原生编码的平台照旧预览 / 照片 / mjpeg。**缺：插件事件桥接那一半（统一通道、不重复注册 method handler、fake 与 Flutter bridge 分层测），要等原生侧** |
 
 **变异验证记录**（改坏实现 → 确认断言变红）：
 
@@ -317,11 +318,21 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | 诊断：网关拒收仍计为已发送 | 3 条 |
 | 诊断：把「传输」提到「相机」之前判 | 4 条 |
 | 诊断：滚动窗口不裁剪（不衰减） | 2 条 |
+| 启动装配：公告不再过滤证据（声称即可发布） | 7 条（含「有 H.265 但没测过 → 仍然只发 mjpeg」） |
+| 启动装配：忽略样本是在哪个几何测的 | 1 条 |
+| 启动装配：允许公告列表为空 | 8 条 |
+| 启动装配：忽略「重新检测」（复用缓存） | 2 条 |
+| 启动装配：不读缓存（每次重测） | 2 条 |
+| 启动装配：信任答的是别的摄像头/编码器的证据 | 2 条 |
+| 启动装配：声明帧率从「所有有样本的 codec」取，而非设备声称的 | 1 条 |
+| 启动装配：去掉「没有探针」分支 | 编译不过（`probe` 是可空类型） |
 
 **明确没做的**：#7/#12–#13（Android vendor + 原生编码）、#16–#22（Windows/macOS/Linux 原生）、
-#14 的插件事件桥接一半、#24 的远端验收、#25 的最终 whole-branch 复核。
+#14 的**插件事件桥接**那一半、#24 的远端验收、#25 的最终 whole-branch 复核。
 这些需要用户跑构建/真机，助手侧无法验收。
 （**#23 实测状态已于 2026-10-10 完成**，含状态条 widget 的 `flutter test`（用户跑的，全过）。
+**#14 的启动装配已于 2026-10-10 完成**（Dart 侧，含门禁与变异验证）—— 它把「证据 → 模式 →
+注册」接成一条链，但**链上还没有任何平台提供证据**，所以今天每个平台的计划都是 mjpeg 下限。
 **#24 的发布矩阵已收窄为三端**，Linux 移出。
 **#25 的「随做随同步」一直在做**，只剩「最终 whole-branch 复核」—— 它要求分支本身完成，
 原生端落地前只能复核到 Dart 侧，2026-10-10 的 A8 复核覆盖的就是这一层。）
