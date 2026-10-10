@@ -45,6 +45,11 @@ dependencies:
   # rebasable.
   camera_desktop:
     path: packages/camera_desktop
+  # Root dependency, not merely transitive: a path dependency here is what makes
+  # `camera` resolve its Android implementation to this fork. Only
+  # `camera_android_camerax` is forked — see packages/camera_android_camerax/VENDORED.md.
+  camera_android_camerax:
+    path: packages/camera_android_camerax
   # No permission_handler: camera_android_camerax and camera_avfoundation each
   # request camera access during initialize(), and permission_handler_windows
   # does not compile against current MSVC (it forces /await and C++/WinRT
