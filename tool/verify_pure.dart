@@ -68,6 +68,7 @@ import 'verify_diagnostics.dart';
 import 'verify_rate_calibration.dart';
 import 'verify_sustained_rate.dart';
 import 'verify_encode_budget.dart';
+import 'verify_encoded_stream.dart';
 
 // --- harness ----------------------------------------------------------------
 
@@ -6201,6 +6202,7 @@ Future<void> main() async {
   await guard('delivered rate from encoder', checkDeliveredRateFromEncoder);
   await guard('annex b', runAnnexBChecks);
   await guard('encode budget', runEncodeBudgetChecks);
+  await guard('encoded stream', runEncodedStreamChecks);
   await guard('default mode', runDefaultModeChecks);
   await guard('capture bootstrap', runCaptureBootstrapChecks);
   await guard('sustained rate', runSustainedRateChecks);
