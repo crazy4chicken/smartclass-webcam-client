@@ -1,9 +1,18 @@
-# Builds and publishes release artifacts for every platform except iOS.
+# Builds and publishes release artifacts for every platform except iOS and Linux.
 #
 # **iOS is deliberately absent.** A device build needs a signing certificate and
 # a provisioning profile from a paid Apple Developer account; without them the
 # build cannot produce anything installable. `ios/` stays in the repo — it is
 # simply not built here.
+#
+# **Linux is deliberately absent too (removed 2026-10-10, at the user's
+# request).** Its native encoded-stream work is paused and has never been
+# compiled (`docs/linux-encoded-stream-status.md`), so shipping a Linux bundle
+# would advertise a platform this project does not claim to deliver. The
+# `linux/` sources stay in the repo and `flutter build linux` is still the way
+# to smoke-test them locally — it is just not part of what a tag publishes.
+# Re-adding it is a matrix entry plus the two Linux-only steps and the asset
+# assertion below; see `docs/release.md`.
 #
 # Cutting a release:
 #     git tag v1.0.0 && git push origin v1.0.0
@@ -77,7 +86,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # One job per platform. `fail-fast: false` so a Windows-only breakage still
-  # produces the Linux and Android artifacts.
+  # produces the macOS and Android artifacts.
   # ---------------------------------------------------------------------------
   build:
     name: Build ${{ matrix.name }}
@@ -95,10 +104,6 @@ jobs:
             os: macos-latest
             target: macos
             artifact: macos
-          - name: Linux x64
-            os: ubuntu-latest
-            target: linux
-            artifact: linux-x64
           - name: Android APKs
             os: ubuntu-latest
             target: apk
@@ -136,7 +141,7 @@ jobs:
           echo "Building ${raw}+${GITHUB_RUN_NUMBER}"
 
       # Stamping pubspec.yaml is what makes every platform agree on one version:
-      # Windows and Linux have no `--build-name` flag, and Android reads
+      # Windows has no `--build-name` flag, and Android reads
       # versionName/versionCode straight from here. The file is modified in the
       # runner only and is never committed.
       - name: Stamp version into pubspec.yaml
@@ -153,17 +158,10 @@ jobs:
       # Platform prerequisites
       # ---------------------------------------------------------------------
 
-      # `camera_desktop` links GStreamer directly for its V4L2 backend, and
-      # Flutter's Linux desktop needs GTK and ninja. None of it is on the
-      # runner image.
-      - name: Install Linux dependencies
-        if: matrix.target == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libgtk-3-dev liblzma-dev pkg-config ninja-build cmake clang \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            gstreamer1.0-plugins-good
+      # The Linux step that used to live here (GTK / GStreamer / ninja / cmake)
+      # was removed with the Linux matrix entry — see the note at the top of
+      # this file. Nothing else needs it: the Android job uses the SDK below and
+      # the desktop jobs use their runner images as-is.
 
       - name: Set up Java 17
         if: matrix.target == 'apk'
@@ -282,20 +280,6 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$stage" "release/${stage}.zip"
           ls -la release
 
-      - name: Package (Linux)
-        if: matrix.target == 'linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
-          stage="webcam_client-${version}-linux-x64"
-          mkdir -p release
-          # The bundle is a self-contained tree; keep the layout intact.
-          cp -r build/linux/x64/release/bundle "$stage"
-          cp README.md "$stage"
-          tar -czf "release/${stage}.tar.gz" "$stage"
-          ls -la release
-
       - name: Package (Android)
         if: matrix.target == 'apk'
         shell: bash
@@ -347,6 +331,10 @@ jobs:
       # download. `files: dist/*` matches directories as well as files and the
       # release action skips directories without complaining, so a nested path
       # (`dist/dist/…`) disappears silently. Assert the set instead.
+      #
+      # Three platforms, not four: Linux was removed from this workflow on
+      # 2026-10-10 (see the note at the top). If it is ever re-added, its
+      # `-linux-x64.tar.gz` suffix belongs back in this list.
       - name: Verify every platform is present
         shell: bash
         run: |
@@ -358,7 +346,6 @@ jobs:
           for suffix in \
             '-windows-x64.zip' \
             '-macos.zip' \
-            '-linux-x64.tar.gz' \
             '-android-arm64-v8a.apk'
           do
             # shellcheck disable=SC2144
@@ -370,16 +357,17 @@ jobs:
             echo "::error::release would be incomplete, missing: ${missing[*]}"
             exit 1
           fi
-          echo "all four platforms present"
+          echo "all three platforms present"
 
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           draft: false
           body: |
-            Cross-platform camera edge probe. Builds for **Windows, macOS, Linux
-            and Android**; iOS is not built (it needs an Apple Developer
-            certificate and provisioning profile).
+            Cross-platform camera edge probe. Builds for **Windows, macOS and
+            Android**; iOS and Linux are not built (iOS needs an Apple Developer
+            certificate and provisioning profile; Linux native capture is
+            paused and has never been compiled).
 
             ### Assets
 
@@ -387,7 +375,6 @@ jobs:
             | --- | --- |
             | Windows x64 | `webcam_client-<version>-windows-x64.zip` |
             | macOS (universal) | `webcam_client-<version>-macos.zip` |
-            | Linux x64 | `webcam_client-<version>-linux-x64.tar.gz` |
             | Android | `webcam_client-<version>-android-<abi>.apk` |
 
             ### Before you run it
@@ -400,8 +387,6 @@ jobs:
             `POST /api/devices` on the server issues the pair; **the token is
             returned only once**.
 
-            - **Linux** additionally needs GStreamer at runtime:
-              `sudo apt install libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 gstreamer1.0-plugins-good`
             - **macOS** builds are unsigned, so Gatekeeper blocks the first
               launch. Right-click → Open, or
               `xattr -dr com.apple.quarantine webcam_client.app`.

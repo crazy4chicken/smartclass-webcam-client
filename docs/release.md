@@ -3,9 +3,14 @@
 两个工作流：
 
 - **`.github/workflows/ci.yml`** —— 每次分支 push 和每个 PR，只跑 gate（见下）。
-- **`.github/workflows/release.yml`** —— 推 tag 时跑同样的 gate，然后四端并行出包。
+- **`.github/workflows/release.yml`** —— 推 tag 时跑同样的 gate，然后三端并行出包。
 
-**iOS 不参与**（原因见最后一节）。
+**iOS 与 Linux 不参与**（原因见「为什么没有 iOS」与「为什么没有 Linux」两节）。
+
+> **2026-10-10 变更：Linux 已从 release 工作流移除**（用户要求）。Linux 原生采集一直处于暂停、
+> **一行都没编译过**（`docs/linux-encoded-stream-status.md`），把一个 Linux 包发出去等于宣传一个
+> 本项目并不声称交付的平台。`linux/` 源码留在仓库里，`flutter build linux` 仍是本地冒烟的方式，
+> 只是不再随 tag 发布。
 
 ## 产出
 
@@ -13,7 +18,6 @@
 | --- | --- | --- |
 | Windows x64 | `webcam_client-<版本>-windows-x64.zip` | `build/windows/x64/runner/Release/` 整个目录 |
 | macOS（通用二进制） | `webcam_client-<版本>-macos.zip` | `webcam_client.app` + README |
-| Linux x64 | `webcam_client-<版本>-linux-x64.tar.gz` | `bundle/` 目录（含 `lib/`、`data/`） |
 | Android | `webcam_client-<版本>-android-<abi>.apk` | 按 ABI 拆分的三个 APK |
 
 版本号来自 tag（`v1.0.0` → `1.0.0`），build number 用 `github.run_number`。
@@ -25,7 +29,7 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-推 tag 会：跑测试 → 四个平台并行构建 → 建一个 GitHub Release 并附上全部产物。
+推 tag 会：跑测试 → 三个平台并行构建 → 建一个 GitHub Release 并附上全部产物。
 
 **只想验证流水线**：Actions → Release → Run workflow。
 手动触发**不会**建 Release，产物只留在那次运行的页面上（可下载），
@@ -33,7 +37,7 @@ git push origin v1.0.0
 
 ## 前置：一个 gate
 
-`verify` job 按顺序跑四件事，全绿才开始构建。任何一项挂了，四个平台都不会出包 ——
+`verify` job 按顺序跑四件事，全绿才开始构建。任何一项挂了，三个平台都不会出包 ——
 这是有意的，但如果你确实要在测试红的情况下出包，把 `build.needs: verify` 删掉即可。
 
 | 步骤 | 命令 | 为什么 |
@@ -102,12 +106,12 @@ base64 -w0 release.jks    # 贴进 ANDROID_KEYSTORE_BASE64
 
 产物**不捆绑**系统库，目标机器上要有：
 
-- **Linux**：GStreamer（`camera_desktop` 直接链接它做 V4L2 采集）
-  ```bash
-  sudo apt install libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 gstreamer1.0-plugins-good
-  ```
 - **Windows / macOS**：无额外依赖，但见下面的签名说明。
 - **Android**：无。`usesCleartextTraffic="true"` 已开，明文 `http://` 后端可直接用。
+
+（**Linux** 曾需要 GStreamer：`sudo apt install libgstreamer1.0-0
+libgstreamer-plugins-base1.0-0 gstreamer1.0-plugins-good`。Linux 不再随 tag 发布，
+但本地 `flutter build linux` 跑起来时仍然需要这些。）
 
 ## 已知限制
 
@@ -116,8 +120,6 @@ base64 -w0 release.jks    # 贴进 ANDROID_KEYSTORE_BASE64
   要真正分发得配 Apple Developer 证书 + `notarytool`，目前没做。
 - **Windows 产物未签名**：SmartScreen 会提示。
 - **Android 默认 debug 签名**：见上面「可选：Android 正式签名」。
-- **Linux 产物的 glibc 下限**取决于 runner 镜像。`ubuntu-latest` 目前是 24.04
-  （glibc 2.39），在更老的发行版上跑不起来。要覆盖老系统就把它改成 `ubuntu-22.04`。
 
 ## 为什么没有 iOS
 
@@ -130,6 +132,24 @@ base64 -w0 release.jks    # 贴进 ANDROID_KEYSTORE_BASE64
 `.p12` + `xcodebuild` 用 profile 打包 + 导出 `ipa`，再加 `app-store-connect` 上传。
 这一整套依赖账号和证书，不适合放在"推个 tag 就出包"的默认流水线里。
 
+## 为什么没有 Linux
+
+**2026-10-10 移除，用户要求。** 理由不是"编不出来"，而是**不能声称交付**：
+
+- Linux 的原生编码分支一直处于**暂停**状态，`packages/camera_desktop/linux/**` 那批 C++
+  **一行都没有编译过**（本机缺 GStreamer / GTK / `flutter_linux` 头文件）。
+  详见 `docs/linux-encoded-stream-status.md`。
+- 一个能下载、能安装的 Linux 包会被当成"这个平台支持"，而设备要交付的 1080p60 编码流
+  在 Linux 上根本没有实现 —— 发出去就是**用产物替未验证的代码背书**。
+
+**代码没删，构建方式也没变**：`linux/` 源码留在仓库里，本地 `flutter build linux`
+仍是将来验它时的第一件事；只是**不再随 tag 发布**。
+
+**要加回来**：`build.matrix` 加一条 Linux 条目 + 两个 Linux-only 步骤
+（`Install Linux dependencies`、`Package (Linux)`）+ 把 `-linux-x64.tar.gz` 放回
+release job 的完整性校验列表 + 更新本文件与 release notes。别只加矩阵条目 ——
+少了安装依赖那步，构建会在缺 GTK/GStreamer 的 runner 上失败。
+
 ## 几个实现上的坑（改工作流前先读）
 
 - **所有平台都必须把产物放进同一个 `release/` 目录，上传只用 `release/*` 这一个 pattern。**
@@ -140,16 +160,16 @@ base64 -w0 release.jks    # 贴进 ANDROID_KEYSTORE_BASE64
   于是 APK 在 artifact 里被存成 `dist/….apk`；release job 拿到的是 `dist/dist/….apk`，
   而 `files: dist/*` 只匹配到那个**目录**（release action 会跳过目录且不报错）→
   **APK 从 release 里凭空消失，全程零报错。** 只有 Android 用了子目录，所以只有它中招。
-- **release job 会校验四个平台都在**，缺任何一个直接 `::error::` 退出。
+- **release job 会校验三个平台都在**，缺任何一个直接 `::error::` 退出。
   发布一个"看起来正常但少了某个平台"的 release 是最糟的结果 —— 没人会立刻发现。
 - **版本号是「盖」进 `pubspec.yaml` 的，不是用 `--build-name` 传的。**
-  Windows 和 Linux 的 `flutter build` 没有 `--build-name`，而 Android 的
-  `versionName`/`versionCode` 直接读 pubspec —— 只有改 pubspec 才能让四个平台
+  Windows 的 `flutter build` 没有 `--build-name`，而 Android 的
+  `versionName`/`versionCode` 直接读 pubspec —— 只有改 pubspec 才能让所有平台
   对同一个版本号。文件只在 runner 里改，不提交。
 - **macOS 打包必须用 `ditto` 而不是 `zip`。** `.app` 是带符号链接和扩展属性的 bundle，
   普通 zip 会把 loader 需要的链接拍平，产出一个打不开的 app。
 - **Android 的 `setup-android` 必须显式传 `packages`**（默认值是已被删除的 `tools` 包），
   而且**包名按空格分隔**；NDK 是必需的（`ndkVersion = flutter.ndkVersion`）。
-- **`fail-fast: false`**：Windows 挂了不该把 Linux / Android 的产物一起取消。
+- **`fail-fast: false`**：Windows 挂了不该把 macOS / Android 的产物一起取消。
 - **`pubspec.lock` 是提交进仓库的。** 这是应用不是库；不提交的话 CI 每次取
   "最新的兼容版本"，某天依赖发了新版就可能出一个和本地不一样的包。
