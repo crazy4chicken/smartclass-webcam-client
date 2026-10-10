@@ -183,7 +183,9 @@ class AnnexBSplitter {
         continue;
       }
 
-      final int type = hevc ? (buffer[header] >> 1) & 0x3F : buffer[header] & 0x1F;
+      final int type = hevc
+          ? (buffer[header] >> 1) & 0x3F
+          : buffer[header] & 0x1F;
       if (_isVcl(type, hevc)) {
         units.add(
           AccessUnit(

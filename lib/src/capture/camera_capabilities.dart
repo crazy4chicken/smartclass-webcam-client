@@ -30,8 +30,10 @@ const List<CameraResolution> kCommonResolutions = <CameraResolution>[
 /// Frame rates worth offering an operator, same reasoning as
 /// [kCommonResolutions].
 ///
-/// Includes 5 because that is `AppConfig.defaultFps`: a device that cannot hold
-/// 60 must still be able to declare the rate it is actually running at.
+/// Includes 60 because that is `AppConfig.defaultFps`, so the rate a device
+/// seeds at is published by the ladder itself rather than only folded in by
+/// [withCurrent]. 5 stays as a legitimate low rung: an operator who wants long
+/// segments and small uploads picks it on purpose, not as a fallback.
 const List<int> kCommonFramerates = <int>[5, 10, 15, 20, 24, 25, 30, 50, 60];
 
 /// What one camera can do, as **measured** rather than assumed.
@@ -119,9 +121,10 @@ class CameraCapabilities {
   ///
   /// Applied **last**, always: the server rejects a registration that does not
   /// list the camera's current `resolution` / `fps`, and a probe can legitimately
-  /// never surface either one (the ladder is coarse, and `AppConfig.defaultFps`
-  /// is 5 while a probe only tries 60/30/15). Without this, the device would be
-  /// unable to register at the mode it is actually running in.
+  /// never surface either one — the ladder is coarse, and a camera that could
+  /// not be measured at all gets no ladder, because [withCommonBaseline] has no
+  /// ceiling to cap against. Without this, the device would be unable to
+  /// register at the mode it is actually running in.
   CameraCapabilities withCurrent({
     required CameraResolution resolution,
     required int fps,

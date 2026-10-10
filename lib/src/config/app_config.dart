@@ -65,7 +65,15 @@ class AppConfig {
   /// uses to estimate segment durations — so it must be a rate the device can
   /// actually hold. Announcing more than is delivered makes the server
   /// overstate how long a segment lasted.
-  static const int defaultFps = 5;
+  ///
+  /// Caveat: 60 is the rate the device *declares*, not the rate the current
+  /// frame pump delivers. The pump takes one still picture per frame
+  /// (`takePicture()`), and its single-flight lock drops every tick that lands
+  /// while a capture is still in flight — roughly 5-10 fps at 1080p. Closing
+  /// that gap needs the native encoder pipeline, which is paused; see
+  /// `docs/linux-encoded-stream-status.md`. The rate is declared honestly as
+  /// what the hardware is asked for, and the shortfall is a known one.
+  static const int defaultFps = 60;
 
   /// Preview is on by default; turning it off must not stop capture.
   static const bool defaultPreviewEnabled = true;

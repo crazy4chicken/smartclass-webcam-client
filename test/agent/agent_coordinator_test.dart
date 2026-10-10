@@ -623,8 +623,8 @@ void main() {
 
   group('camera mode', () {
     // What a 1080p webcam really reports. Every camera seeds at its own
-    // measured ceiling — 1920x1080 here — at the built-in 5fps, which is *not*
-    // one of the probed rates.
+    // measured ceiling — 1920x1080 here — at the built-in 60fps, which is also
+    // the top rate the probe returned.
     final measured = CameraCapabilities.of(
       resolutions: const [
         CameraResolution(width: 1920, height: 1080),
@@ -766,7 +766,7 @@ void main() {
           coordinator.activeMode.resolution,
           const CameraResolution(width: 1920, height: 1080),
         );
-        expect(coordinator.activeMode.fps, 5);
+        expect(coordinator.activeMode.fps, 60);
       },
     );
 
@@ -786,7 +786,7 @@ void main() {
       verifyNever(() => camera.switchCamera(0));
       expect(coordinator.cameraEnum, 1);
       expect(coordinator.cameraModes[1].fps, 30);
-      expect(coordinator.cameraModes[0].fps, 5);
+      expect(coordinator.cameraModes[0].fps, 60);
       expect(coordinator.reportStatus()['active_camera'], 1);
     });
 
@@ -964,7 +964,7 @@ void main() {
             id: 'e',
             cameraEnum: 0,
             resolution: CameraResolution(width: 1280, height: 720),
-            fps: 5,
+            fps: 60,
           ),
         );
 

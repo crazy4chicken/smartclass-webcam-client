@@ -48,6 +48,7 @@ import 'package:webcam_client/src/capture/resolution_selector.dart';
 import 'package:webcam_client/src/capture/serial_lock.dart';
 import 'package:webcam_client/src/capture/stream_settings.dart';
 import 'package:webcam_client/src/capture/video_encoder.dart';
+import 'package:webcam_client/src/config/app_config.dart';
 import 'package:webcam_client/src/config/capabilities_store.dart';
 import 'package:webcam_client/src/config/connection_settings.dart';
 
@@ -332,18 +333,11 @@ Uint8List _h264Nal(int type, List<int> payload, {bool fourByte = true}) =>
 
 /// One HEVC NAL of [type]. The type sits in bits 1-6 of the header byte, not
 /// in the low five as in H.264.
-Uint8List _h265Nal(int type, List<int> payload) => Uint8List.fromList(<int>[
-  0x00,
-  0x00,
-  0x00,
-  0x01,
-  type << 1,
-  ...payload,
-]);
+Uint8List _h265Nal(int type, List<int> payload) =>
+    Uint8List.fromList(<int>[0x00, 0x00, 0x00, 0x01, type << 1, ...payload]);
 
-Uint8List _cat(List<Uint8List> parts) => Uint8List.fromList(<int>[
-  for (final part in parts) ...part,
-]);
+Uint8List _cat(List<Uint8List> parts) =>
+    Uint8List.fromList(<int>[for (final part in parts) ...part]);
 
 /// A channel whose packets the test drives by hand.
 class _FakeEncodedChannel implements EncodedStreamChannel {
@@ -3668,7 +3662,11 @@ void checkNativeVideoEncoder() {
     async.flushMicrotasks();
     eq('the channel was opened once', channel.openCalls, 1);
     eq('for the bound camera', channel.lastCameraEnum, 3);
-    eq('at absolute pixels', '${channel.lastWidth}x${channel.lastHeight}', '1920x1080');
+    eq(
+      'at absolute pixels',
+      '${channel.lastWidth}x${channel.lastHeight}',
+      '1920x1080',
+    );
     eq('and the declared rate', channel.lastFps, 60);
     eq('a channel that was never opened is not closed', channel.closeCalls, 0);
 
@@ -3693,19 +3691,23 @@ void checkNativeVideoEncoder() {
     channel.emit(EncodedPacket(bytes: slice, pictures: 1));
     async.flushMicrotasks();
     eq('a second access unit is a second frame', received.length, 2);
-    eq('a predictive frame is not a key frame', received.last.isKeyFrame, false);
-    eq('seq advances', received.last.seq, 1);
-    eqBytes(
-      'and carries only its own bytes',
-      received.last.bytes,
-      slice,
+    eq(
+      'a predictive frame is not a key frame',
+      received.last.isKeyFrame,
+      false,
     );
+    eq('seq advances', received.last.seq, 1);
+    eqBytes('and carries only its own bytes', received.last.bytes, slice);
 
     // The count is the only cross-check Annex B allows. A packet holding two
     // pictures while claiming one is not a stream anybody can decode.
     channel.emit(EncodedPacket(bytes: _cat([idr, slice]), pictures: 1));
     async.flushMicrotasks();
-    eq('a packet whose units disagree with its count is dropped whole', received.length, 2);
+    eq(
+      'a packet whose units disagree with its count is dropped whole',
+      received.length,
+      2,
+    );
     eq('the dropped packet is counted', encoder.droppedPackets, 1);
     eq('and so are the units it was dropped for', encoder.droppedUnits, 2);
 
@@ -3717,7 +3719,11 @@ void checkNativeVideoEncoder() {
     };
     encoder.stop();
     async.flushMicrotasks();
-    eq('the tail the plugin flushes still reaches the wire', received.length, 3);
+    eq(
+      'the tail the plugin flushes still reaches the wire',
+      received.length,
+      3,
+    );
     eqBytes('as its own frame', received.last.bytes, trailing);
     eq('stop closed the channel', channel.closeCalls, 1);
 
@@ -3747,7 +3753,11 @@ void checkNativeVideoEncoder() {
       EncodedPacket(bytes: Uint8List.fromList([0x00, 0x00, 0x01]), pictures: 0),
     );
     async.flushMicrotasks();
-    eq('a start code with nothing behind it is not a frame', received.length, 0);
+    eq(
+      'a start code with nothing behind it is not a frame',
+      received.length,
+      0,
+    );
     channel.emit(
       EncodedPacket(bytes: Uint8List.fromList([0xAB, 0xCD, 0xEF]), pictures: 0),
     );
@@ -4749,7 +4759,8 @@ Future<void> checkCoordinator() async {
   // --- camera mode: switch_camera parameters and the requested codec --------
 
   // What a 1080p webcam really reports. The device seeds at the measured
-  // ceiling — 1920x1080 @ 5fps, a rate that is *not* one of the probed ones.
+  // ceiling — 1920x1080 @ 60fps, `AppConfig.defaultFps`, which is also the top
+  // rate the probe returned.
   final measured = CameraCapabilities.of(
     resolutions: <CameraResolution>[
       const CameraResolution(width: 1920, height: 1080),
@@ -4847,6 +4858,22 @@ Future<void> checkCoordinator() async {
     );
   }
 
+  // The declared default rate, locked end to end: it is what `StreamSettings`
+  // seeds every camera at, what the registration body announces, and what the
+  // server divides by to estimate segment durations. A drift back to a low
+  // number is invisible locally — nothing throws — and only shows up as a
+  // server recording segments shorter than it thinks.
+  eq('the device declares the required default rate', AppConfig.defaultFps, 60);
+  eq(
+    'a freshly built coordinator seeds every camera at it',
+    buildWithMode(cameraCount: 2).coordinator.activeMode.fps,
+    60,
+  );
+  check(
+    'and a camera probed at [60, 30, 15] declares 60',
+    buildWithMode().coordinator.declaredFor(0).framerates.contains(60),
+  );
+
   {
     // A declared resolution and rate are applied for real: the capture
     // geometry is rebuilt, not merely recorded.
@@ -4896,7 +4923,7 @@ Future<void> checkCoordinator() async {
     eq(
       'and the mode is unchanged',
       h.coordinator.activeMode.toString(),
-      'CameraMode(1920x1080 @ 5fps)',
+      'CameraMode(1920x1080 @ 60fps)',
     );
   }
 
@@ -4946,17 +4973,17 @@ Future<void> checkCoordinator() async {
     eq(
       'and the mode is untouched',
       h.coordinator.activeMode.toString(),
-      'CameraMode(1920x1080 @ 5fps)',
+      'CameraMode(1920x1080 @ 60fps)',
     );
     eq(
       'the other camera keeps its own mode',
       h.coordinator.cameraModes[0].fps,
-      5,
+      60,
     );
     eq(
       'which is recorded per announced enum',
       h.coordinator.cameraModes[1].fps,
-      5,
+      60,
     );
     eq('and reported', h.coordinator.reportStatus()['active_camera'], 1);
     eq(
@@ -5179,7 +5206,7 @@ Future<void> checkCoordinator() async {
         id: 'e',
         cameraEnum: 0,
         resolution: CameraResolution(width: 1280, height: 720),
-        fps: 5,
+        fps: 60,
       ),
     );
     eq(
