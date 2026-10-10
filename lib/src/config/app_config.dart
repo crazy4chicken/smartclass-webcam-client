@@ -62,17 +62,21 @@ class AppConfig {
   /// Declared capture rate, in whole frames per second.
   ///
   /// The server rejects a fractional `fps` outright, and this value is what it
-  /// uses to estimate segment durations — so it must be a rate the device can
-  /// actually hold. Announcing more than is delivered makes the server
-  /// overstate how long a segment lasted.
+  /// uses to estimate segment durations — so the honest value is a rate the
+  /// device can actually hold. Announcing more than is delivered makes the
+  /// server overstate how long a segment lasted.
   ///
-  /// Caveat: 60 is the rate the device *declares*, not the rate the current
-  /// frame pump delivers. The pump takes one still picture per frame
-  /// (`takePicture()`), and its single-flight lock drops every tick that lands
-  /// while a capture is still in flight — roughly 5-10 fps at 1080p. Closing
-  /// that gap needs the native encoder pipeline, which is paused; see
-  /// `docs/linux-encoded-stream-status.md`. The rate is declared honestly as
-  /// what the hardware is asked for, and the shortfall is a known one.
+  /// **60 is required, and today it is a claim rather than a measurement.** The
+  /// frame pump takes one still picture per frame (`takePicture()`), and its
+  /// single-flight lock drops every tick that lands while a capture is still in
+  /// flight — roughly 5-10 fps at 1080p. So the device declares 60 and delivers
+  /// far less, and the server will overstate segment durations until the gap is
+  /// closed. Closing it needs the native encoder pipeline, which is paused; see
+  /// `docs/linux-encoded-stream-status.md`.
+  ///
+  /// This is a deliberate, recorded deviation from "a declared rate is a
+  /// measured rate" — not an oversight. Do not quietly re-apply that rule here
+  /// without also deciding what the default should be.
   static const int defaultFps = 60;
 
   /// Preview is on by default; turning it off must not stop capture.

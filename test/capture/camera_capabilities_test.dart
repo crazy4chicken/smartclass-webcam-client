@@ -53,7 +53,9 @@ void main() {
     });
 
     test('adds an fps the probe never produced', () {
-      // `AppConfig.defaultFps` is 5 and the probe only tries 60/30/15.
+      // The current mode is assigned, not measured: a `switch_camera` can put
+      // the camera at any declared rate, which need not be one a probe
+      // happened to produce.
       final caps = CameraCapabilities.of(
         resolutions: const [_hd],
         framerates: const [60, 30, 15],
