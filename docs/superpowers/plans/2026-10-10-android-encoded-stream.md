@@ -29,17 +29,17 @@
 
 ### 目标真机的实测事实（2026-10-10 用 `adb` 读，写在这里避免重复测）
 
-| 项 | 值 | 来源命令 |
-| --- | --- | --- |
-| 机型 / SoC | vivo V2405A / `mt6991`（Dimensity 9400 级），`arm64-v8a` | `getprop ro.product.model` `ro.board.platform` `ro.product.cpu.abi` |
-| Android | **16**（API **36**） | `getprop ro.build.version.sdk` |
-| 摄像头 | 7 个 Camera2 设备；0 号 = `BACK`，`activeArraySize` 4096×3072，`orientation` 90 | `dumpsys media.camera` |
-| **目标帧率档** | `aeAvailableTargetFpsRanges` 含 **`[15,60]` 与 `[60,60]`** → **普通 session 就能请求 60fps，不必走高速 session** | 同上 |
-| 高速 session | 支持：`CONSTRAINED_HIGH_SPEED_VIDEO` 在 `availableCapabilities` 里；`availableHighSpeedVideoConfigurations` 含 3840×2160 30–120 | 同上 |
-| 1080p 流配置 | 1920×1080 在 `availableStreamConfigurations` 里有 OUTPUT 条目（format 33/34/35） | 同上 |
-| 硬件编码器 | `c2.mtk.hevc.encoder`（alias `OMX.MTK.VIDEO.ENCODER.HEVC`）、`c2.mtk.avc.encoder` | `cat /vendor/etc/media_codecs*.xml` |
-| 编码器实测档 | AVC 1920×1080 → **30–66 fps**；HEVC 1280×720 → 53–117、3840×2160 → 13–29（**无 1080p 条目**） | `cat /vendor/etc/media_codecs_performance.xml` |
-| 插件 | `camera_android_camerax` 0.7.5+1 是 **Java**（171 文件）+ `build.gradle.kts`，CameraX **1.6.2**（`android/build.gradle.kts:79`），`minSdk 23` | pub cache |
+| 项          | 值                                                                                                                                    | 来源命令                                                                |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| 机型 / SoC   | vivo V2405A / `mt6991`（Dimensity 9400 级），`arm64-v8a`                                                                                 | `getprop ro.product.model` `ro.board.platform` `ro.product.cpu.abi` |
+| Android    | **16**（API **36**）                                                                                                                   | `getprop ro.build.version.sdk`                                      |
+| 摄像头        | 7 个 Camera2 设备；0 号 = `BACK`，`activeArraySize` 4096×3072，`orientation` 90                                                             | `dumpsys media.camera`                                              |
+| **目标帧率档**  | `aeAvailableTargetFpsRanges` 含 **`[15,60]` 与 `[60,60]`** → **普通 session 就能请求 60fps，不必走高速 session**                                   | 同上                                                                  |
+| 高速 session | 支持：`CONSTRAINED_HIGH_SPEED_VIDEO` 在 `availableCapabilities` 里；`availableHighSpeedVideoConfigurations` 含 3840×2160 30–120             | 同上                                                                  |
+| 1080p 流配置  | 1920×1080 在 `availableStreamConfigurations` 里有 OUTPUT 条目（format 33/34/35）                                                            | 同上                                                                  |
+| 硬件编码器      | `c2.mtk.hevc.encoder`（alias `OMX.MTK.VIDEO.ENCODER.HEVC`）、`c2.mtk.avc.encoder`                                                       | `cat /vendor/etc/media_codecs*.xml`                                 |
+| 编码器实测档     | AVC 1920×1080 → **30–66 fps**；HEVC 1280×720 → 53–117、3840×2160 → 13–29（**无 1080p 条目**）                                               | `cat /vendor/etc/media_codecs_performance.xml`                      |
+| 插件         | `camera_android_camerax` 0.7.5+1 是 **Java**（171 文件）+ `build.gradle.kts`，CameraX **1.6.2**（`android/build.gradle.kts:79`），`minSdk 23` | pub cache                                                           |
 
 > **这张表里最重要的一行是"无 1080p 条目"。** AVC 的 30–66 说明 1080p60 够得着但**贴着上限**；HEVC 只有 720p 和 4K 两档，按像素率外推 1080p 约 52–116 —— **这是外推，不是证据**。所以「1080p60 能不能持续」只能由 `EncodeBudgetProbe` 在真机上测出来，这也正是「不承诺所有真机必达 60」的具体含义。
 
@@ -58,6 +58,7 @@
 ## Task 1: Vendor `camera_android_camerax` 0.7.5+1，让 app 解析到本地实现（#7）
 
 **Files:**
+
 - Create: `packages/camera_android_camerax/**`（从 pub cache 复制）
 - Create: `packages/camera_android_camerax/VENDORED.md`
 - Modify: `pubspec.yaml`（root `dependencies:` 段，约 :22）
@@ -65,9 +66,9 @@
 - Modify: `docs/implementation-status.md`（#7 行）
 
 **Interfaces:**
-- Consumes: 无
-- Produces: `package:camera_android_camerax` 可被 app 直接 import（Task 4 的 Flutter 薄壳要用）；`camera` 的 Android 实现从此是这份 fork。
 
+- [ ] Consumes: 无
+- [ ] Produces: `package:camera_android_camerax` 可被 app 直接 import（Task 4 的 Flutter 薄壳要用）；`camera` 的 Android 实现从此是这份 fork。
 - [x] **Step 1: 复制上游，保留范围对齐 `packages/camera_desktop/`**
 
 ```bash
@@ -85,52 +86,34 @@ rm -rf packages/camera_android_camerax/example \
 
 照 `packages/camera_desktop/VENDORED.md` 的四节写（来源与许可 / 为什么在这里 / 本 fork 的地面规则 / 如何升级）。必须写进去的确切值：
 
-- 上游：pub.dev `camera_android_camerax` **0.7.5+1**；sha256 见 `pubspec.lock`
-- 许可：**BSD-3-Clause**（`Copyright 2013 The Flutter Authors`），以 `LICENSE` 原文为准
-- CameraX：**1.6.2**，`minSdk 23`
-- 为什么 fork：编码必须在持有相机的进程内；`VideoCapture<Recorder>` 只有文件出口，没有 AU 出口
-- **改动范围：只新增文件。** 上游文件唯一一处改动是 `CameraAndroidCameraxPlugin.java` 里的两行注册（Task 4），rebase 时手工重放
-- 地面规则沿用 `camera_desktop/VENDORED.md` 的四条（只改采集/编码路径；帧不落盘、原始帧不进 Dart；声明必须是实测的；没有编码器就直说）
-
-- [x] **Step 3: `pubspec.yaml` 把 fork 挂上去 —— 必须用 `dependency_overrides`**
-
-> **⚠️ 2026-10-10 更正：原计划的写法（放 `dependencies:`）是错的，会让 `flutter pub get` 直接失败。**
-> `camera` 0.12.1 声明的是 `camera_android_camerax: ^0.7.4`（**hosted**），而 pub **不允许 root 的
-> `dependencies` 用 `path:` 去替换一个"已发布在 pub.dev 的传递依赖"**：
->
-> ```
-> Because camera 0.12.1 depends on camera_android_camerax ^0.7.4 ...,
-> camera ^0.12.1 requires camera_android_camerax from hosted.
-> ```
->
-> `camera_desktop` 能放在 `dependencies:` 里，只是**因为没有任何包依赖它**，所以没有源冲突。
-> 指向本地 fork 的传递依赖，唯一正确的机制是 `dependency_overrides`：
+- [ ] 上游：pub.dev `camera_android_camerax` **0.7.5+1**；sha256 见 `pubspec.lock`
+- [ ] 许可：**BSD-3-Clause**（`Copyright 2013 The Flutter Authors`），以 `LICENSE` 原文为准
+- [ ] CameraX：**1.6.2**，`minSdk 23`
+- [ ] 为什么 fork：编码必须在持有相机的进程内；`VideoCapture<Recorder>` 只有文件出口，没有 AU 出口
+- [ ] **改动范围：只新增文件。** 上游文件唯一一处改动是 `CameraAndroidCameraxPlugin.java` 里的两行注册（Task 4），rebase 时手工重放
+- [ ] 地面规则沿用 `camera_desktop/VENDORED.md` 的四条（只改采集/编码路径；帧不落盘、原始帧不进 Dart；声明必须是实测的；没有编码器就直说）
+- [x] **Step 3: `pubspec.yaml` 加 root path 依赖**
 
 ```yaml
-dependency_overrides:
+  # Root dependency, not merely transitive: a path dependency here is what makes
+  # `camera` resolve its Android implementation to this fork. Only
+  # `camera_android_camerax` is forked — see packages/camera_android_camerax/VENDORED.md.
   camera_android_camerax:
     path: packages/camera_android_camerax
 ```
 
 - [ ] **Step 4: 用户在自己的 PowerShell 里跑 `flutter pub get`**（助手不要跑）
+- [ ] **Step 5: 验证解析到了本地实现**
 
-- [ ] **Step 5: 验证解析到了本地实现，且插件仍被注册**
-
-Run: `grep -A4 "camera_android_camerax:" pubspec.lock`
+Run: `grep -A4 "camera_android_camerax:" pubspec.lock`  
 Expected: `source: path` 且 `description: path: "packages/camera_android_camerax"`（不再是 `source: hosted`）。
-
-再确认**插件仍然被注册**（`dependency_overrides` 只改源，不该把插件从构建里挤掉）：
-
-Run: `grep -c "camera_android_camerax" .flutter-plugins-dependencies`
-Expected: ≥ 1（这个文件由 `flutter pub get` 生成；若为 0，说明 override 让 Flutter 工具漏掉了插件，
-Android 侧会静默不注册 —— 那时要改回 `dependencies` 并另找办法）。
 
 - [ ] **Step 6: 用户编 debug APK，按 `docs/android-setup.md` §11 驱动真机**
 
 三条基线都不能坏：预览出画面、拍照成功、注册成功（`adb logcat -d | grep 'flutter :'` 里能看到 `[capture] plan:` 那行）。
 
 - [x] **Step 7: Commit**
-  > **2026-10-10 已提交 `deec697`**（`pubspec.lock` 与 `docs/implementation-status.md` 未随本次提交：
+  > **2026-10-10 已提交 `deec697`**（`pubspec.lock` 与 `docs/implementation-status.md` 未随本次提交：  >   
   > 前者要等用户的 `flutter pub get` 才产生变化，后者的 #7 行等构建证据）。
 
 ```bash
@@ -143,18 +126,19 @@ git commit -m "chore(android): vendor camera_android_camerax 0.7.5+1 so the enco
 ## Task 2: 定缝并冻结通道协议（#12 的设计那一半）
 
 **Files:**
+
 - Create: `docs/adr/0002-android-encoded-stream-seam.md`
 - Read（不改）: `packages/camera_android_camerax/android/src/main/java/io/flutter/plugins/camerax/{VideoCaptureProxyApi,RecorderProxyApi,ImageCaptureProxyApi,ImageAnalysisProxyApi,CameraProxyApi,ProxyApiRegistrar,CameraAndroidCameraxPlugin}.java`、`pigeons/camerax_library.dart`
 
 **Interfaces:**
-- Consumes: Task 1 的 fork
-- Produces（**本任务最重要的产出，Task 3/4 逐字依赖**）：
+
+- [ ] Consumes: Task 1 的 fork
+- [ ] Produces（**本任务最重要的产出，Task 3/4 逐字依赖**）：
   - 通道名：`MethodChannel('smartclass/encoded_stream')`、`EventChannel('smartclass/encoded_stream/packets')`
   - `open` 参数：`{cameraId: int, width: int, height: int, fps: int, quality: int, codec: String, sessionGeneration: int}` → 成功 resolve、失败 throw `PlatformException`
   - `close` 参数：`{}` → resolve 表示**已冲刷完毕**
   - `encoders` 参数：`{}` → `{encoders: [{codec: String, name: String, hardware: bool}]}`
   - 事件载荷：`{bytes: Uint8List, pictures: int, ptsUs: int?, generation: int, eos: bool}`
-
 - [x] **Step 1: 从源码核实三条事实**
 
 逐条读，**任一条不成立就停下来写 ADR，不要即兴改路线**：
@@ -164,9 +148,9 @@ git commit -m "chore(android): vendor camera_android_camerax 0.7.5+1 so the enco
 3. `c2.mtk.hevc.encoder` / `c2.mtk.avc.encoder` 接受 **surface 输入**。`/vendor/etc/media_codecs*.xml` 里已声明 `surface`，仍要在 Task 4 里跑通才算数。
 
 若事实 1 或 2 不成立，按下面的备选路线写 ADR，**不要现场发明第三条**：
-- **路线 C**：`ImageAnalysis`（YUV_420_888）→ `MediaCodec` ByteBuffer 输入。判据：编码器是否声明 `COLOR_FormatYUV420Flexible` 输入；且 1080p60 YUV 是约 124 MB/s 的 CPU 拷贝，实测到不了 60 就否决。
-- **路线 D**：`Recorder` + `FileDescriptor` 管道再解析容器 —— **已否决**：仍走容器，拿不到 AU，且违反"不落盘"。
 
+- [ ] **路线 C**：`ImageAnalysis`（YUV_420_888）→ `MediaCodec` ByteBuffer 输入。判据：编码器是否声明 `COLOR_FormatYUV420Flexible` 输入；且 1080p60 YUV 是约 124 MB/s 的 CPU 拷贝，实测到不了 60 就否决。
+- [ ] **路线 D**：`Recorder` + `FileDescriptor` 管道再解析容器 —— **已否决**：仍走容器，拿不到 AU，且违反"不落盘"。
 - [x] **Step 2: 写 `docs/adr/0002-android-encoded-stream-seam.md`**
 
 必须包含：选中的路线与理由；上表三条事实各自的源码证据（**文件:行号**）；被否决路线及判据；`sourceSeq` 的取法（见 Task 3 Step 3）；以及"本 ADR 只在 Task 4 拿到真机 AU 计数后才算被证实"。
@@ -183,11 +167,13 @@ git commit -m "docs(adr): choose the Android encoded-stream seam and freeze the 
 ## Task 3: Dart 侧适配器 —— 传输接口 + 适配器 + codec 声称探针（全部 Flutter-free，进门禁）
 
 **Files:**
+
 - Create: `lib/src/capture/encoded_stream_transport.dart`
 - Create: `tool/verify_encoded_stream.dart`
 - Modify: `tool/verify_pure.dart`（import + `guard('encoded stream', runEncodedStreamChecks)`）
 
 **Interfaces:**
+
 - Consumes: `EncodedPacket` / `EncodedStreamChannel`（`lib/src/capture/native_video_encoder.dart`，已存在）、`CodecProbe`（`codec_probe.dart`，已存在）
 - Produces:
   - `abstract interface class EncodedStreamTransport` —— 见 Step 2 的方法签名
@@ -220,6 +206,7 @@ abstract interface class EncodedStreamTransport {
 }
 ```
 
+
 - [x] **Step 3: 写 `AndroidEncodedStreamChannel implements EncodedStreamChannel`**
 
 `open(...)` 先订阅 `transport.events` **再** `await transport.open(...)`（先认领再启动，`NativeVideoEncoder` 也依赖这个次序）；`close()` 只 `await transport.close()`，**不 cancel 订阅**（尾包靠它送达）。
@@ -238,24 +225,22 @@ abstract interface class EncodedStreamTransport {
 **必须不抛**（接口契约）：任何异常 → 空集合（`CompositeCodecProbe` 会兜底成 `BaselineCodecProbe` 的 `{mjpeg}`）。
 
 - [x] **Step 5: 补齐用例**（每个都先红后绿）
-
-- 首包与尾包：`open` 之后、`close` 之前到达的事件都能转成 `EncodedPacket`（尾包不丢）。
-- 代次不符的包被丢弃，且不进 `frames`。
-- 重复 `ptsUs` 不推进 `sourceSeq`；递增 `ptsUs` 推进。
-- `ptsUs == null` 时每个包都推进（并计入诊断）。
-- `pictures` / `eos` 原样透传；事件里缺这两个字段时按 `0` / `false` 处理，不抛。
-- 非 `Uint8List` 的 `bytes` 被丢弃并计数，不抛。
-- 软件编码器（`hardware == false`）不进 `availableCodecs()`。
-- `encoders()` 抛异常 → `availableCodecs()` 返回空集合。
-- `open` 抛异常 → `AndroidEncodedStreamChannel.open` 把它透出去（让 `NativeVideoEncoder` 回滚 `_running`），且**不留订阅**。
-
+- [ ] 首包与尾包：`open` 之后、`close` 之前到达的事件都能转成 `EncodedPacket`（尾包不丢）。
+- [ ] 代次不符的包被丢弃，且不进 `frames`。
+- [ ] 重复 `ptsUs` 不推进 `sourceSeq`；递增 `ptsUs` 推进。
+- [ ] `ptsUs == null` 时每个包都推进（并计入诊断）。
+- [ ] `pictures` / `eos` 原样透传；事件里缺这两个字段时按 `0` / `false` 处理，不抛。
+- [ ] 非 `Uint8List` 的 `bytes` 被丢弃并计数，不抛。
+- [ ] 软件编码器（`hardware == false`）不进 `availableCodecs()`。
+- [ ] `encoders()` 抛异常 → `availableCodecs()` 返回空集合。
+- [ ] `open` 抛异常 → `AndroidEncodedStreamChannel.open` 把它透出去（让 `NativeVideoEncoder` 回滚 `_running`），且**不留订阅**。
 - [x] **Step 6: 接线进门禁**
 
 `tool/verify_pure.dart` 加 `import 'verify_encoded_stream.dart';` 与 `await guard('encoded stream', runEncodedStreamChecks);`。
 
 - [x] **Step 7: 跑门禁并做变异验证**
 
-Run: `dart run tool/verify_pure.dart` → `failed: 0`。
+Run: `dart run tool/verify_pure.dart` → `failed: 0`。  
 然后逐个改坏实现、确认**指名**的用例变红并记下条数：`sourceSeq` 改成每个包都推进 / 去掉代次过滤 / `open` 失败后留下订阅 / `encoders()` 的异常透出 / `close()` 顺手 cancel 订阅。
 
 - [x] **Step 8: Commit**
@@ -270,6 +255,7 @@ git commit -m "feat(capture): shape the Android encoded-stream transport in pure
 ## Task 4: native 编码器 + Flutter 薄壳 —— 第一次在真机上看到 AU（#12 的原型验证 / #13 主体）
 
 **Files:**
+
 - Create: `packages/camera_android_camerax/android/src/main/java/io/flutter/plugins/camerax/EncodedStreamVideoOutput.java`
 - Create: `packages/camera_android_camerax/android/src/main/java/io/flutter/plugins/camerax/EncodedStreamPlugin.java`
 - Modify: `packages/camera_android_camerax/android/src/main/java/io/flutter/plugins/camerax/CameraAndroidCameraxPlugin.java:27-46`（`onAttachedToEngine` / `onDetachedFromEngine` 各一行）
@@ -277,27 +263,25 @@ git commit -m "feat(capture): shape the Android encoded-stream transport in pure
 - Modify: `lib/main.dart`（**临时**调试入口，Task 5 会替换掉）
 
 **Interfaces:**
-- Consumes: Task 2 冻结的通道协议；Task 3 的 `EncodedStreamTransport`
-- Produces: `MethodChannelEncodedStreamTransport implements EncodedStreamTransport`（Task 5 用）；`EncodedStreamVideoOutput` / `EncodedStreamPlugin` 这两个类名（Task 5 不改名）
 
+- [ ] Consumes: Task 2 冻结的通道协议；Task 3 的 `EncodedStreamTransport`
+- [ ] Produces: `MethodChannelEncodedStreamTransport implements EncodedStreamTransport`（Task 5 用）；`EncodedStreamVideoOutput` / `EncodedStreamPlugin` 这两个类名（Task 5 不改名）
 - [ ] **Step 1: 写 `EncodedStreamVideoOutput implements VideoOutput`**
-
-- `onSurfaceRequested(SurfaceRequest request)`：按构造时给定的 `MediaFormat`（`KEY_MIME` = `video/hevc` 或 `video/avc`，`KEY_WIDTH/HEIGHT`，`KEY_FRAME_RATE`，`KEY_I_FRAME_INTERVAL` = 1，`KEY_BIT_RATE`）建 `MediaCodec.createEncoderByType(...)`，`configure(format, null, null, CONFIGURE_FLAG_ENCODE)`，`createInputSurface()`，然后 `request.provideSurface(surface, executor, result -> ...)`。
-- `getStreamInfo()`：返回 `StreamInfo.of(StreamInfo.STREAM_ID_ANY)`。
-- 输出侧用 **异步 `MediaCodec.Callback`**（不是轮询 `dequeueOutputBuffer`）：`onOutputBufferAvailable` 里读 `BufferInfo`，`presentationTimeUs` 原样上报为 `ptsUs`，`getOutputBuffer()` 用完必须 `releaseOutputBuffer`。
-- `pictures` 按本次 buffer 里**完整的图像**数上报：`BUFFER_FLAG_CODEC_CONFIG`（VPS/SPS/PPS）**本身不算一幅图**，上报 `pictures: 0`，由 `AnnexBSplitter` 把它挂到下一幅图前面 —— 这正是"关键帧必须携带带内参数集"的实现方式，已有门禁断言钉着，**不要在这里另做合并**。
-- `eos: true` 只在收到 `BUFFER_FLAG_END_OF_STREAM` 的那个包上上报（`close` 触发的冲刷收尾）。
-- **codec 名优先用 `MediaCodecList` 里的硬件实现**：HEVC 取 `c2.mtk.hevc.encoder`，AVC 取 `c2.mtk.avc.encoder`；找不到就返回失败，**不要退回 `c2.android.*` 软件编码器**（它会静默达不到 60，而这正是本计划要消灭的失效模式）。
-- 编码器身份（`identity`）上报实际选中的 codec 名。
-
+- [ ] `onSurfaceRequested(SurfaceRequest request)`：按构造时给定的 `MediaFormat`（`KEY_MIME` = `video/hevc` 或 `video/avc`，`KEY_WIDTH/HEIGHT`，`KEY_FRAME_RATE`，`KEY_I_FRAME_INTERVAL` = 1，`KEY_BIT_RATE`）建 `MediaCodec.createEncoderByType(...)`，`configure(format, null, null, CONFIGURE_FLAG_ENCODE)`，`createInputSurface()`，然后 `request.provideSurface(surface, executor, result -> ...)`。
+- [ ] `getStreamInfo()`：返回 `StreamInfo.of(StreamInfo.STREAM_ID_ANY)`。
+- [ ] 输出侧用 **异步 `MediaCodec.Callback`**（不是轮询 `dequeueOutputBuffer`）：`onOutputBufferAvailable` 里读 `BufferInfo`，`presentationTimeUs` 原样上报为 `ptsUs`，`getOutputBuffer()` 用完必须 `releaseOutputBuffer`。
+- [ ] `pictures` 按本次 buffer 里**完整的图像**数上报：`BUFFER_FLAG_CODEC_CONFIG`（VPS/SPS/PPS）**本身不算一幅图**，上报 `pictures: 0`，由 `AnnexBSplitter` 把它挂到下一幅图前面 —— 这正是"关键帧必须携带带内参数集"的实现方式，已有门禁断言钉着，**不要在这里另做合并**。
+- [ ] `eos: true` 只在收到 `BUFFER_FLAG_END_OF_STREAM` 的那个包上上报（`close` 触发的冲刷收尾）。
+- [ ] **codec 名优先用 `MediaCodecList` 里的硬件实现**：HEVC 取 `c2.mtk.hevc.encoder`，AVC 取 `c2.mtk.avc.encoder`；找不到就返回失败，**不要退回 `c2.android.*` 软件编码器**（它会静默达不到 60，而这正是本计划要消灭的失效模式）。
+- [ ] 编码器身份（`identity`）上报实际选中的 codec 名。
 - [ ] **Step 2: 写 `EncodedStreamPlugin`**
 
 注册两个通道；持有当前 `EncodedStreamVideoOutput` 与一个 `AtomicInteger generation`。
-- `open`：把参数解析成 `MediaFormat`，建 `EncodedStreamVideoOutput`，**把它作为一个 use case 与既有 Preview / ImageCapture 一起 bind**（Task 2 核实的路线）；成功后才回 `generation`，失败 throw `PlatformException(code: 'open_failed')` 并释放已建资源。
-- `close`：先 `signalEndOfInputStream()`，等 `onOutputBufferAvailable` 收到 `BUFFER_FLAG_END_OF_STREAM`（**有界超时，5 秒**）再回 resolve；随后 `stop()`/`release()`。`close` resolve 即代表尾包已交付。
-- 每个事件载荷里回显 `generation`。
-- 静态 `register(BinaryMessenger)` / `unregister()`，由 `CameraAndroidCameraxPlugin` 调用。
 
+- [ ] `open`：把参数解析成 `MediaFormat`，建 `EncodedStreamVideoOutput`，**把它作为一个 use case 与既有 Preview / ImageCapture 一起 bind**（Task 2 核实的路线）；成功后才回 `generation`，失败 throw `PlatformException(code: 'open_failed')` 并释放已建资源。
+- [ ] `close`：先 `signalEndOfInputStream()`，等 `onOutputBufferAvailable` 收到 `BUFFER_FLAG_END_OF_STREAM`（**有界超时，5 秒**）再回 resolve；随后 `stop()`/`release()`。`close` resolve 即代表尾包已交付。
+- [ ] 每个事件载荷里回显 `generation`。
+- [ ] 静态 `register(BinaryMessenger)` / `unregister()`，由 `CameraAndroidCameraxPlugin` 调用。
 - [ ] **Step 3: 改 `CameraAndroidCameraxPlugin` 两行**
 
 `onAttachedToEngine` 里 `EncodedStreamPlugin.register(binding.getBinaryMessenger());`；`onDetachedFromEngine` 里对应注销。**这是本 fork 对上游文件的唯一改动。**
@@ -319,6 +303,7 @@ adb logcat -c && sleep 12 && adb logcat -d | grep -E "EncodedStream|flutter :"
 ```
 
 **期望（这是本任务的验收）**：
+
 - 出现选中的 codec 名，且是 `c2.mtk.hevc.encoder`（**不是** `c2.android.hevc.encoder`）
 - 10 秒内 AU 计数 ≥ 550（即 ≥55fps，留一点余量），**不是 30 上下**
 - 同期 `ImageCapture` 拍照仍成功（Review Focus 3）
@@ -338,17 +323,18 @@ git commit -m "feat(android): encode in the capture process and hand access unit
 ## Task 5: 把编码器接进 app —— `EncodedStreamSource` + 工厂，第一次跑通 H.265 流（#13 收口）
 
 **Files:**
+
 - Modify: `lib/src/capture/camera_backend.dart`（新增 `EncodedStreamSource` 接口）
 - Modify: `lib/src/capture/camera_plugin_backend.dart`（实现它；物理下标只在这里出现）
 - Modify: `lib/main.dart`（删掉 Task 4 的临时入口；装配工厂与声称集合）
 
 **Interfaces:**
-- Consumes: Task 3 的 `AndroidEncodedStreamChannel` / `PlatformCodecProbe`；Task 4 的 `MethodChannelEncodedStreamTransport`；既有的 `VideoEncoderFactory` / `NativeVideoEncoder`
-- Produces:
+
+- [ ] Consumes: Task 3 的 `AndroidEncodedStreamChannel` / `PlatformCodecProbe`；Task 4 的 `MethodChannelEncodedStreamTransport`；既有的 `VideoEncoderFactory` / `NativeVideoEncoder`
+- [ ] Produces:
   - `abstract interface class EncodedStreamSource { EncodedStreamChannel? encodedStreamFor(int cameraEnum); }`
   - `CameraPluginBackend implements EncodedStreamSource`
   - `main.dart` 里把 `available` 从 `{mjpeg}` 换成 `CompositeCodecProbe([BaselineCodecProbe(), PlatformCodecProbe(...)])`
-
 - [ ] **Step 1: 加 `EncodedStreamSource` 接口**
 
 **不要**把它挂到 `CameraBackend` 上：那会迫使每个测试假件都实现一个它们根本不支持的方法。单独一个接口，"能产出编码流的后端才实现它"。
@@ -358,14 +344,11 @@ git commit -m "feat(android): encode in the capture process and hand access unit
 用**它自己持有的** `_cameraOrder` 把公告序号翻成物理下标，再翻成插件相机 id，返回一个绑好该相机的 `AndroidEncodedStreamChannel`。`Platform.isAndroid` 之外返回 `null`（其它平台还没接）。**物理下标到此为止**。
 
 - [ ] **Step 3: 删掉 Task 4 的临时调试入口**
-
 - [ ] **Step 4: `main.dart` 装配**
-
-- `available` 改为 `CompositeCodecProbe(probes: [BaselineCodecProbe(), PlatformCodecProbe(transport)])`
-- 保留 `buildBackendChain(...)` 返回的列表引用，用 `whereType<EncodedStreamSource>().firstOrNull` 取源
-- 给协调器传一个 `encoderFactory`：`codec` 是 `h264`/`h265` 时返回 `NativeVideoEncoder(codec: ..., cameraEnum: ..., streamId: ..., channel: source.encodedStreamFor(cameraEnum)!, identity: <该 codec 在 encoders() 里的 name>)`；取不到 channel 时返回 `null`（工厂拒绝 → `ack ok:false`，**不偷换 codec**）。`identity` 必须是平台真名（`c2.mtk.hevc.encoder`），它同时是 `EncodeEvidence` 的缓存键之一，写成常量会让换驱动后仍命中旧证据。
-- `probe:` 仍然传 `null`（Task 6 才接）
-
+- [ ] `available` 改为 `CompositeCodecProbe(probes: [BaselineCodecProbe(), PlatformCodecProbe(transport)])`
+- [ ] 保留 `buildBackendChain(...)` 返回的列表引用，用 `whereType<EncodedStreamSource>().firstOrNull` 取源
+- [ ] 给协调器传一个 `encoderFactory`：`codec` 是 `h264`/`h265` 时返回 `NativeVideoEncoder(codec: ..., cameraEnum: ..., streamId: ..., channel: source.encodedStreamFor(cameraEnum)!, identity: <该 codec 在 encoders() 里的 name>)`；取不到 channel 时返回 `null`（工厂拒绝 → `ack ok:false`，**不偷换 codec**）。`identity` 必须是平台真名（`c2.mtk.hevc.encoder`），它同时是 `EncodeEvidence` 的缓存键之一，写成常量会让换驱动后仍命中旧证据。
+- [ ] `probe:` 仍然传 `null`（Task 6 才接）
 - [ ] **Step 5: 用户跑 `flutter test` 与真机冒烟**
 
 真机上发一条 `start_recording(codec=h265)`（走 `docs/android-setup.md` §10 的真后端联调），确认：`ack ok:true`、状态条上 `codec = h265`、`编码` 那一档帧率不是 0。**这一步是"端到端第一次出 H.265 流"**。
@@ -382,14 +365,15 @@ git commit -m "feat(android): serve h264/h265 through the native encoder, keepin
 ## Task 6: 实测接上 —— `AndroidEncodeBudgetProbe` + `main.dart` 的 `probe:`（#14 收口）
 
 **Files:**
+
 - Create: `lib/src/capture/android_encode_probe.dart`
 - Modify: `lib/main.dart`（`probe:` 由 `null` 换成真实探针）
 - Modify: `lib/src/capture/encode_budget.dart`（**只在需要时**：`kEncodeEvidenceVersion` +1 若样本含义变了）
 
 **Interfaces:**
-- Consumes: Task 5 的 `EncodedStreamSource`；既有的 `SustainedRateMeter` / `measureDeliveredRate` / `evidenceFromMeasurements` / `EncodeBudgetProbe` / `planCapture`
-- Produces: `class AndroidEncodeBudgetProbe implements EncodeBudgetProbe`
 
+- [ ] Consumes: Task 5 的 `EncodedStreamSource`；既有的 `SustainedRateMeter` / `measureDeliveredRate` / `evidenceFromMeasurements` / `EncodeBudgetProbe` / `planCapture`
+- [ ] Produces: `class AndroidEncodeBudgetProbe implements EncodeBudgetProbe`
 - [ ] **Step 1: 写 `AndroidEncodeBudgetProbe.measure(...)`**
 
 对 `codecs` 里的每个 codec：用 `EncodedStreamSource` 开一个 `AndroidEncodedStreamChannel`，包一层 `NativeVideoEncoder`，用 `measureDeliveredRate` 把 `SustainedRateMeter`（预热 1.5s + 窗口 3s）喂起来，等窗口关闭（**有界超时**）后 `stop()`，把 `FrameRateMeasurement` 收进 `Map<CaptureCodec, FrameRateMeasurement>`，最后 `evidenceFromMeasurements(...)`。
@@ -402,7 +386,7 @@ git commit -m "feat(android): serve h264/h265 through the native encoder, keepin
 
 - [ ] **Step 3: 用户跑一次冷启动 + 一次热启动**
 
-冷启动：logcat 里出现 `[evidence] measured: ...`，且 `[capture] plan:` 的声明帧率**不是 5**。
+冷启动：logcat 里出现 `[evidence] measured: ...`，且 `[capture] plan:` 的声明帧率**不是 5**。  
 热启动：出现 `[evidence] cached: ...`，且**没有再测**（这是缓存键正确、启动变快的证据）。
 
 **模式级判据（Review Focus 5）**：如果 HEVC 实测只到 30，那么计划里必须出现 `1080p @ 30` + 公告 `h265`；此时运营侧点名 `1080p60 h265` 必须收到 `ack ok:false`，而**不是**被偷换成 30fps 或另一个 codec 跑起来。这一条要在真机上发一次命令确认，不能只看代码。
@@ -423,18 +407,18 @@ git commit -m "feat(android): measure what the encoder sustains and declare that
 ## Task 7: 真机端到端与长稳验收（#15）
 
 **Files:**
+
 - Modify: `docs/android-setup.md`（补一节"编码流验收"）
 - Modify: `docs/implementation-status.md`、`docs/superpowers/plans/2026-10-10-dual-mode-task-list.md`、`docs/agents/handover.md`
 
 **Interfaces:**
-- Consumes: Task 1–6 的全部
-- Produces: 一份可复现的验收记录（命令 + 期望 + 实测）
 
-- [ ] **Step 1: 三层计数分开统计，**不许用其中一层代替另一层
-
-- 源新帧：`adb logcat` 里 `AndroidEncodedStreamChannel` 报的 distinct-PTS 计数
-- 编码 AU：插件 `EncodedStream` 标签报的 AU 计数
-- 后端收到/保存：`tool/e2e/check_segment.py` 对着 `s3_stub.py`（**必须解 `aws-chunked`**）数
+- [ ] Consumes: Task 1–6 的全部
+- [ ] Produces: 一份可复现的验收记录（命令 + 期望 + 实测）
+- [ ] **Step 1: 三层计数分开统计，**&#x4E0D;许用其中一层代替另一层
+- [ ] 源新帧：`adb logcat` 里 `AndroidEncodedStreamChannel` 报的 distinct-PTS 计数
+- [ ] 编码 AU：插件 `EncodedStream` 标签报的 AU 计数
+- [ ] 后端收到/保存：`tool/e2e/check_segment.py` 对着 `s3_stub.py`（**必须解 `aws-chunked`**）数
 
 **判据**：三层数字接近且**源新帧不是靠重复帧凑出来的**（重复比例要单独报）。
 
