@@ -1,8 +1,9 @@
 # Vendored: `camera_desktop` 2.0.0
 
 A copy of [`camera_desktop`](https://github.com/hugocornellier/camera_desktop)
-2.0.0, taken from the pub cache and committed here. Upstream licence (BSD-3) is
-in `LICENSE`; nothing in this directory changes that.
+2.0.0, taken from the pub cache and committed here. Upstream licence (**MIT**)
+is in `LICENSE`; nothing in this directory changes that. (An earlier revision of
+this file said BSD-3, which was wrong — `LICENSE` is the authority.)
 
 ## Why it is here
 

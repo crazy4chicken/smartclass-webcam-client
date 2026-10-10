@@ -26,7 +26,7 @@ class CameraOpenResult {
 /// can actually deliver a camera.
 ///
 /// A backend that probes fine but throws on open is skipped rather than fatal,
-/// so adding a fallback backend (a native encoder, an ffmpeg fallback) is a
+/// so adding a fallback backend — a second camera plugin, for instance — is a
 /// matter of appending to the list.
 class CameraProvider {
   CameraProvider({required List<CameraBackend> backends})

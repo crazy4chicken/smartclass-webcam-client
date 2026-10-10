@@ -36,8 +36,13 @@ import 'src/ui/screens/bootstrap_screen.dart';
 
 /// The ordered camera backend chain.
 ///
-/// `camera` + `camera_desktop` covers all five platforms. A future native or
-/// ffmpeg encoder is added here and nowhere else.
+/// `camera` + `camera_desktop` covers all five platforms. A future platform
+/// backend — for example a vendored `camera_android_camerax` that can hand
+/// encoded access units straight to Dart — is added here and nowhere else.
+///
+/// Encoding is **not** a backend and does not belong in this list: the native
+/// encoders attach at the `VideoEncoder` seam (`lib/src/capture/video_encoder.dart`),
+/// because they consume the camera's frames rather than producing a camera.
 ///
 /// [cameraOrder] is the announced → physical permutation the capability probe
 /// produced. Null keeps the identity mapping, which is what a caller with no

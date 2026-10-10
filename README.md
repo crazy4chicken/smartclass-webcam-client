@@ -141,8 +141,8 @@ dart run tool/verify_pure.dart    # 纯 Dart 自检，不需要 Flutter 引擎
 ```
 
 断言数**以实跑输出为准**（文档不写静态计数，那会立刻过期）；最近一次为
-`passed: 1071, failed: 0`。专项检查（Annex B、编码吞吐、默认模式、持续帧率）都由主入口调用，
-不是只写未运行的文件。
+`passed: 1173, failed: 0`。专项检查（Annex B、编码吞吐、默认模式、持续帧率、速率标定、
+流诊断）都由主入口调用，不是只写未运行的文件。
 
 端到端联调（真机 × 真服务端）见 `docs/superpowers/plans/2026-10-04-android-server-e2e-test.md`，
 工具在 `tool/e2e/`：
@@ -194,6 +194,8 @@ AgentCoordinator ── 命令驱动的状态机：每条命令都 ack，没收�
   capture/default_mode ── defaultModeFor：1080p 封顶 + 同形状 + 帧率只降不升（唯一入口）
   capture/encode_budget ── EncodeSample / 可持续速率 / 按模式 codec / EncodeEvidence 缓存
   capture/sustained_rate ── SustainedRateMeter（预热不计、只数新帧）+ EncodeBudgetProbe 接缝
+  capture/rate_calibration ── 窗口标定的判据（够长 ⟺ 不取决于窗口位置）+ peak/plateau 系列读数
+  agent/stream_diagnostics ── 五档帧率 + 瓶颈归因（相机慢 / 编码慢 / 网络慢）
   capture/annexb ── AnnexBSplitter：多 slice 合并为同一 access unit
   capture/camera_order ── canonicalCameraOrder（rear → external → front，组内按像素降序）
   capture/capability_probe ── CapabilityProbe 接口 + kProbeFramerates
@@ -284,6 +286,13 @@ Linux 的 GStreamer 分支已写完但**尚未编译**，现暂停。
 - 真实的持续帧率由 `SustainedRateMeter`（`lib/src/capture/sustained_rate.dart`）
   从交付的帧流里数出来：**预热期不计、只数新帧、窗口固定**，只向下取整。
   平台接缝是 `EncodeBudgetProbe` —— **尚未有平台实现**，所以现在声明的是占位下限。
+- **窗口长度不是常数，是判据**（`lib/src/capture/rate_calibration.dart`）：*一个窗口够长，
+  当且仅当答案不再取决于窗口放在哪里*。`calibrateRateWindow()` 在预热/窗口阶梯里取**最小**的
+  收敛组合；`rateSpread()` 让平台探针直接问「出厂默认 1.5s / 3s 对**这台**硬件够不够」。
+  **收敛不了也是结果**（`settled: false` + 原因），不是"没数据"。
+- **`max` 不是持续能力**：热降频下**第一次最快**。`readRateSeries()` 把 `peakFps`（今天的
+  `sustainableRates` 用的）与 `plateauFps`（尾部中位数）分开报，`peakOverstatesSustained`
+  指出"声明会高于实际"的情况。**注册里该写哪个仍是待决策项** —— 见 ADR §4.1.1。
 
 现行决策入口是 **`docs/adr/0001-dual-mode-capture-decisions.md`**；旧计划里与之冲突的
 假设已被取代，不要照抄。
@@ -324,7 +333,14 @@ Linux 的 GStreamer 分支已写完但**尚未编译**，现暂停。
   顶部状态条只放信息。Android 的系统状态栏占着右上角，放上面会被盖住、点不到。
 - **设置齿轮在摄像头报错页上也渲染**：全新安装最可能看到的正是那一屏，入口不能只挂在预览分支里。
 - **状态条与设置界面共用 `linkStateLabel()`**，避免两屏对同一个状态用不同的词
-  （"链路失败" / "连接失败"）让人以为它们说的不是一回事。
+  （"链路失败" / "连接失败"）让人以为它们说的不是一回事。同理 `bottleneckLabel()` 是全屏唯一的
+  「相机慢 / 编码慢 / 网络慢」措辞来源。
+- **状态条在推流时多出两行诊断**（`lib/src/agent/stream_diagnostics.dart`）：一行是
+  **目标 / 声明 / 采集 / 编码 / 发送** 五个帧率，另一行是 `codec · WxH · 硬件身份 · 丢 N · 重 N`。
+  目的是让「只有 12 fps」变成可行动的 —— 光一个数字分不出是相机、编码器还是链路的锅。
+  空闲时只显示「目标 / 声明」，因为那时没有实测速率可解释。
+  注意**采集取自源序号的前进量**（不是到达计数），否则「编码器丢画面」和「相机没产出」
+  在数字上完全一样；「丢」只计**网关拒收**的帧（`sendRecordingFrame` 返回 `false`）。
 - **预览必须保持原始宽高比**：`CameraPreview` 内部用 `AspectRatio`，而
   `Stack(fit: StackFit.expand)` 会传**紧约束**，`RenderAspectRatio` 遇到紧约束直接返回
   `constraints.smallest` —— 宽高比被无视，画面被拉伸变形。所以 `_PreviewArea` 外面套了一层
@@ -512,11 +528,12 @@ switch_camera(camera=1) →
 
 ## 发布
 
-`.github/workflows/release.yml`：**Windows / macOS / Linux / Android** 四端并行出包，
-iOS 不参与（需要 Apple Developer 证书，见 `docs/release.md`）。
+`.github/workflows/release.yml`：**Windows / macOS / Android** 三端并行出包。
+iOS 与 Linux 不参与 —— iOS 需要 Apple Developer 证书；**Linux 的原生采集暂停且从未编译过**
+（2026-10-10 按用户要求移出发布流水线，源码仍保留在仓库里，理由见 `docs/release.md`）。
 
 ```bash
-git tag v1.0.0 && git push origin v1.0.0    # 跑测试 → 四端构建 → 建 Release 附产物
+git tag v1.0.0 && git push origin v1.0.0    # 跑测试 → 三端构建 → 建 Release 附产物
 ```
 
 - 手动触发（Actions → Release → Run workflow）**只出产物、不建 Release**，用来验流水线。

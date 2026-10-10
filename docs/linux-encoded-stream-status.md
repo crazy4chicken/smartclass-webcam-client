@@ -7,8 +7,26 @@
 > 帧必须在插件自己的管线里编码完再进 Dart。
 >
 > 计划：`docs/superpowers/plans/2026-10-09-linux-encoded-stream.md`
-> 上游计划：`docs/superpowers/plans/2026-10-09-recording-correctness-and-native-encoder.md`（Task 6）
+> 上游计划：`docs/superpowers/plans/2026-10-09-recording-correctness-and-native-encoder.md`（Task 6，
+> **其 ffmpeg 架构已作废**，见该文件顶部取代标记）
 > 总览：`docs/implementation-status.md`
+
+---
+
+## 〇、三层验证 —— 先分清哪一层能在哪台机器上验
+
+这条链路上有三层，**可验证性完全不同**。混在一起说会得出「所有插件 Dart 都能由纯 VM 测」
+这种错误结论 —— **Flutter bridge 那层就不能**：
+
+| 层 | 例子 | 本机（Windows 助手 shell）能拿到什么证据 | 需要什么 |
+| --- | --- | --- | --- |
+| **① 纯领域模型**（不 import `package:flutter`） | `annexb.dart`、`encode_budget.dart`、`sustained_rate.dart`、`native_video_encoder.dart`、`lib/src/agent/**` | ✅ **跑过**：`dart run tool/verify_pure.dart`（含断言 + 变异验证） | 无 |
+| **② 插件 Dart bridge**（`package:flutter` + MethodChannel / FFI） | 插件 Dart 侧（Task 5）、app 侧适配器（Task 6）、`CameraPlatform.instance` 强转 | ⚠️ 只有**类型检查**：`python tool/check_compile.py`。**编译 ≠ 断言** | **用户跑 `flutter test`** |
+| **③ Linux C++** | `packages/camera_desktop/linux/**`、GStreamer 管线 | ❌ 连编译都不行（缺 GStreamer / GTK / `flutter_linux` 头文件） | **一台 Linux 机器** |
+
+→ **本机唯一能给出「跑过」证据的是第 ① 层。** 第 ② 层最强只能到「编译通过」，
+第 ③ 层什么都没有。**恢复时不要拿 ① 的绿灯去替 ② / ③ 背书**，也不要因为第 ② 层
+「是 Dart」就以为它能进纯 VM 门禁 —— 它要 Flutter 引擎和 test runner。
 
 ---
 
@@ -25,6 +43,15 @@
 
 继续往下写 Windows / macOS / Android 三端，等于攒一批**没人编译过**的原生代码再一起祈祷
 —— 这正是上游计划里 T6 Step 1 那个闸要防的事。所以停。
+
+### 暂停的范围（哪些停、哪些不停）
+
+- **停**：`packages/camera_desktop/linux/**` 的原生编码实现 —— 不再往下写，**不宣称交付**。
+- **不停**：共享 Dart 层（第 ① 层）继续演进，因为它**不需要任何原生实现**就能验。
+  契约按 **Android → Windows → macOS → Linux** 的顺序，先在**能编能跑**的平台上验 ——
+  所以「Linux 编不了」**不是**三端全部停工的理由，Linux 只是**排在最后**。
+- **恢复条件（缺一不可）**：① 用户明确恢复 Linux 开发；② 一台装了 GStreamer + GTK +
+  `flutter_linux` 头文件的 Linux 机器。恢复步骤见第六节。
 
 ---
 
@@ -117,26 +144,33 @@ Linux 的 `Camera::SendError` 也在用同一个函数。没有新开 EventChann
 
 ## 五、还没做的
 
-上游计划的 Task 5–8，加上另外三端：
+上游计划的 Task 5–8，加上另外三端。**「能验到哪一层」见第〇节** —— 这里最容易误判：
 
-| Task | 内容 | 备注 |
+| Task | 内容 | 验证层 / 备注 |
 | --- | --- | --- |
-| 5 | 插件的 Dart 侧：`EncodedStreamPacket` 类型、`startEncodedStream` / `stopEncodedStream` / `availableEncoders()`、`_handleNativeCall` 里加 `encodedStreamPacket` 分支 | 纯 Dart，`dart format` 可语法校验 |
-| 6 | app 侧适配器 `lib/src/capture/plugin_encoded_stream.dart`，实现 `EncodedStreamChannel`。**通过 `CameraPlatform.instance` 强转拿到插件实例** —— 不能自己 new 一个，它的 `_ensureNativeCallHandler` 会覆盖掉活的 channel handler | 纯 Dart，可进 harness |
-| 7 | 把 `availableEncoders()` 接成 `CodecProbe`（与 `BaselineCodecProbe` 用 `CompositeCodecProbe` 并起来） | 纯 Dart |
-| 8 | **实测吞吐**，把数字喂给 Task 4 的 `sustainableRates` | 没有实测就没有资格声明 60 |
-| T7/T8/T9 | Windows（Media Foundation）/ macOS（VideoToolbox）/ Android（CameraX + MediaCodec） | 用户已确认 **Android 这一轮要做** |
-| T11 | LICENSE 改 GPLv2+（x264/x265 一旦进包）、打包动态库、更新文档 | 用户已确认接受 GPL |
+| 5 | 插件的 Dart 侧：`EncodedStreamPacket` 类型、`startEncodedStream` / `stopEncodedStream` / `availableEncoders()`、`_handleNativeCall` 里加 `encodedStreamPacket` 分支 | **第 ② 层**（MethodChannel）。本机只能 `dart format` 语法校验，**验证要用户 `flutter test`** |
+| 6 | app 侧适配器 `lib/src/capture/plugin_encoded_stream.dart`，实现 `EncodedStreamChannel`。**通过 `CameraPlatform.instance` 强转拿到插件实例** —— 不能自己 new 一个，它的 `_ensureNativeCallHandler` 会覆盖掉活的 channel handler | **第 ② 层**。`CameraPlatform.instance` 与 channel handler 都要 Flutter 引擎，**不是纯 VM** |
+| 7 | 把 `availableEncoders()` 接成 `CodecProbe`（与 `BaselineCodecProbe` 用 `CompositeCodecProbe` 并起来） | `CodecProbe` **接口**是第 ① 层；**实现**是第 ② 层（它要问插件） |
+| 8 | **实测吞吐**，把数字喂给 Task 4 的 `sustainableRates` | 第 ② / ③ 层 + 真机。**没有实测就没有资格声明 60** |
+| T7/T8/T9 | Windows（Media Foundation）/ macOS（VideoToolbox）/ Android（CameraX + MediaCodec） | 各平台独立验收；**Android 这一轮要做**，且顺序在最前 |
+| T11 | 打包动态库、更新文档 | ⚠️ **前提已变**：原写「LICENSE 改 GPLv2+（x264/x265 一旦进包）」，但 **ffmpeg / x264 / x265 已否定**（见 ADR §5）→ 编码走各平台系统 API，**GPL 义务不再自动成立**。实际许可义务按**真正分发的东西**判定（#24），不要机械沿用 GPL 结论 |
 
 ---
 
 ## 六、恢复步骤
 
+**先记住顺序**：契约先在 **Android** 上验（有真机、能编能跑），再 Windows、macOS，
+**Linux 排最后**。所以「恢复 Linux」不等于「恢复原生编码」—— 前三端不需要这台 Linux 机器。
+
+要恢复 **Linux 这一端**时：
+
 1. 一台 Linux 机器，`flutter build linux`。
-   **编不过就把报错贴回来改** —— 预计第一道坎是上表第 3 条。
+   **编不过就把报错贴回来改** —— 预计第一道坎是第四节表第 3 条（`fl_value_new_uint8_list`）。
 2. 编过之后，按第四节那张表逐条验（第 1、2、4 条都要在真机上量，不是看代码能定的）。
-3. 然后是 Task 5 → 6 → 7，把链路打通。
+3. 然后是 Task 5 → 6 → 7，把链路打通 —— 注意这三项是**第 ② 层**，需要用户的 `flutter test`。
 4. Task 8 的实测数据出来之前，**不要声明任何高于 mjpeg 能稳住帧率的速率**。
+
+> **恢复之前**：① 用户明确恢复；② Linux 机器可用（见第一节「恢复条件」）。
 
 ---
 

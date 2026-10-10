@@ -39,8 +39,8 @@ class StaticCodecProbe implements CodecProbe {
 
 /// Unions several probe sources.
 ///
-/// A future native or ffmpeg probe is added to the list and immediately
-/// participates in selection — nothing else changes.
+/// A future native probe is added to the list and immediately participates in
+/// selection — nothing else changes.
 class CompositeCodecProbe implements CodecProbe {
   CompositeCodecProbe({required List<CodecProbe> probes})
     : _probes = List<CodecProbe>.unmodifiable(probes);

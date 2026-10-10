@@ -1,7 +1,7 @@
 # AI 交接文档 — 未完成的任务
 
 > **面向接手本仓库的 AI 代理。** 先读这一份，再动手。  
-> 最后更新：2026-10-10。对应门禁 `passed: 1071, failed: 0`。
+> 最后更新：2026-10-10（第二批）。对应门禁 `passed: 1132, failed: 0`（**断言数以实跑输出为准**）。
 >
 > 这份文档只讲**还没做完的事**和**做之前必须知道的约束**。  
 > 已完成的部分见 `docs/implementation-status.md`；不可动摇的约定见  
@@ -15,8 +15,8 @@
 接入 `smartclass-webcam-server` 的设备协议。**设备是从属角色**——没收到 `start_recording`  
 就什么都不推。
 
-**现在的状态**：共享 Dart 层（协议、采集抽象、协调器、编码契约）已完成并有门禁断言  
-（断言数以实跑输出为准，最近一次 1071 条）；  
+**现在的状态**：共享 Dart 层（协议、采集抽象、协调器、编码契约、**流诊断**）已完成并有门禁断言  
+（断言数以实跑输出为准，最近一次 1132 条）；  
 **所有原生编码实现都没做**（Android/Windows/macOS 一个都没有，Linux 写了但没编译过）。
 
 **你要做的第一件事**：跑 `dart run tool/verify_pure.dart`，确认基线是 `failed: 0`。  
@@ -34,13 +34,14 @@
 
 ### 助手 shell 能跑什么
 
-| 命令                                           | 能跑？         | 说明                                                             |
-| -------------------------------------------- | ----------- | -------------------------------------------------------------- |
-| `dart run tool/verify_pure.dart`             | ✅           | **唯一可执行的门禁**。进程内执行                                             |
-| `dart format`                                | ✅           | 进程内执行                                                          |
-| `flutter test` / `build` / `run` / `analyze` | ❌           | `ProcessException: All pipe instances are busy`（`errno = 231`） |
-| `dart analyze`                               | ❌           | 同上                                                             |
-| `flutter pub get`（**Windows 上**）             | ⚠️ **绝不要跑** | 见下                                                             |
+| 命令                                           | 能跑？         | 说明                                                                       |
+| -------------------------------------------- | ----------- | ------------------------------------------------------------------------ |
+| `dart run tool/verify_pure.dart`             | ✅           | **唯一可执行的门禁**。进程内执行                                                       |
+| `dart format`                                | ✅           | 进程内执行                                                                    |
+| `python tool/check_compile.py`               | ✅           | **整仓类型检查**（`lib/` + 全部 `test/`、`tool/`），约 5 分钟。**只编译不运行** —— 编译通过 ≠ 断言通过 |
+| `flutter test` / `build` / `run` / `analyze` | ❌           | `ProcessException: All pipe instances are busy`（`errno = 231`）           |
+| `dart analyze`                               | ❌           | 同上                                                                       |
+| `flutter pub get`（**Windows 上**）             | ⚠️ **绝不要跑** | 见下                                                                       |
 
 > ⚠️ **Windows 上绝不要用助手 shell 跑 `flutter pub get`。** 它会重建  
 > `{windows,linux}/flutter/ephemeral/.plugin_symlinks/*`，但沙箱里 `Link.createSync`  
@@ -96,13 +97,38 @@
 | 协调器编码工厂（拒绝即 `ack ok:false`，不偷换 codec） | `lib/src/agent/agent_coordinator.dart`                                                        |
 | 决策收口（取代旧计划、纠正许可与断言数）                  | `docs/adr/0001-dual-mode-capture-decisions.md`                                                |
 
+### 3.1 第二批（2026-10-10 晚）
+
+| 内容（原 §4 的 A 类项）           | 落点                                                                                                                                        |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| **A4 / #23 实测状态与可诊断失败信息** | `lib/src/agent/stream_diagnostics.dart`（新）、`agent_status.dart`、`agent_coordinator.dart`、`status_bar_overlay.dart`                         |
+| **A6 / #2 文档与注释腐化**       | `lib/main.dart`、`camera_provider.dart`、`codec_probe.dart`、`packages/camera_desktop/VENDORED.md`、`docs/implementation-status.md`、旧计划顶部取代标记 |
+| **A7 / #3 Linux 文档三层验证**  | `docs/linux-encoded-stream-status.md` 第〇节                                                                                                 |
+
+**A4 的实际内容**（细节见任务清单 #23）：
+
+- `AgentStatus` 的**单个 `fps` 已删除**，换成 `diagnostics`（`StreamDiagnostics`）：**目标 / 声明 /  
+  实际采集 / 编码 / 发送**五个帧率 + `codec` + 硬件身份 + WxH + `droppedFrames` + `repeatedFrames`
+  - 降级原因。状态条新增两行。
+- **`BackendGateway.sendRecordingFrame` 由 `void` 改为 `bool`**（网关拒收时返回 `false`）。  
+  这是「网络慢」能被区分出来的**前提** —— 此前链路断了也一律计为已发送。
+- **采集帧率取自源序号前进量**，不是到达计数。否则「编码器丢了画面」与「相机没产出」  
+  在数字上完全一样，`PipelineBottleneck.encoder` 永远不可达。
+- `classifyBottleneck` 按**管线顺序**判：相机 → 编码 → 传输，**第一个不达标的赢**。
+- **`队列` 有意未做**：`sendRecordingFrame` 是同步的，没有队列可报。不要为了凑字段加一个恒为 0 的。
+
+> ⚠️ **A4 未验的部分**：状态条是 Flutter widget，`test/ui/status_bar_overlay_test.dart` 已按新  
+> 字段重写，但**助手跑不了 `flutter test`** —— 那份用例由用户跑。助手侧只做了  
+> `tool/check_compile.py` 类型检查（**编译 ≠ 断言**）。
+
 ---
 
 ## 4. 未完成的任务
 
 ### A 类：**助手可以做**（纯 Dart，不需要硬件）
 
-> **2026-10-10 已完成 A1 + A2**（见本节末「已完成」）。下面 A3 起仍未做。
+> **2026-10-10 已完成 A1、A2、A4、A5、A6、A7**（A1/A2/A5 见本节末；A4/A6/A7 见 §3.1）。  
+> **剩下 A3 与 A8。** 编号保持原样，避免与日志和任务清单里的引用对不上。
 
 #### A3. #11 的收尾 —— `EncodeBudgetProbe` 的**非原生**部分
 
@@ -117,18 +143,10 @@
 
 ---
 
-#### A4. #23 实测状态与可诊断失败信息
+#### A4. #23 实测状态与可诊断失败信息 —— **已完成（见 §3.1）**
 
-**现状**：**基本没做。** `lib/src/agent/agent_status.dart` 只有  
-`linkState` / `captureState` / `activeStreamId` / `cameraName` /  
-**一个** `fps`（公告值）/ `previewEnabled` / `framesSent` / `lastError`。
-
-**要做的**：把那个 `fps` 拆成 **目标 / 选中 / 实际采集 / 编码 / 发送** 五个，  
-再加上 codec、硬件身份、WxH、掉帧、队列、降级原因。
-
-**验收**：能区分「相机慢、编码慢、网络慢」。
-
-**注意**：**不新增未定义的服务端字段**、**不泄漏凭据**（token 绝不能进状态）。
+`AgentStatus` 的单个 `fps` 已拆成五档，`sendRecordingFrame` 改为返回是否送达，  
+`classifyBottleneck` 按管线顺序归因。**细节与未验项见 §3.1。**
 
 ---
 
@@ -139,27 +157,18 @@
 
 ---
 
-#### A6. #2 的剩余部分（文档与注释腐化）
+#### A6. #2 的剩余部分（文档与注释腐化）—— **已完成（见 §3.1）**
 
-我修了断言计数与 `camera_desktop` 的许可描述，**还剩**：
-
-| 位置                                                                                | 问题                                                                                                                 |
-| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `lib/main.dart:40`                                                                | 注释写「A future native or ffmpeg encoder is added here and nowhere else」—— ffmpeg 路线已否定，现为 native                     |
-| `packages/camera_desktop/VENDORED.md:4`                                           | 写「Upstream licence (BSD-3)」，**实际是 MIT**（以 `packages/camera_desktop/LICENSE` 原文为准）                                  |
-| `lib/src/capture/camera_provider.dart:29`、`lib/src/capture/codec_probe.dart:42`   | 仍把 ffmpeg 当作未来回退项，语义已过时                                                                                            |
-| `docs/superpowers/plans/2026-10-09-recording-correctness-and-native-encoder.md:7` | Architecture 段仍描述「libavcodec / GPL build / ffmpeg 硬件 wrapper」，与实际 native 方案不符；该文件整体已被 ADR 取代，**建议只加顶部取代标记，不要逐句重写** |
-| `docs/implementation-status.md` §7                                                | 状态写「Phase A 完成（T1–T4）、T5 完成」——与旧计划自身的分段描述对不上，需要按实际提交重新核对                                                           |
-
-> 核对原则：**改注释前先确认代码真的那么做**。上表每条都标了行号，改之前打开看一眼。
+表中五条全部处理：`main.dart` 的 ffmpeg 注释、`VENDORED.md` 的 BSD-3 → **MIT**、  
+`camera_provider.dart` / `codec_probe.dart` 的 ffmpeg 回退语义、旧计划顶部取代标记、  
+`implementation-status.md` 的 Phase 划分与状态复核。
 
 ---
 
-#### A7. #3 Linux 文档分层
+#### A7. #3 Linux 文档分层 —— **已完成（见 §3.1）**
 
-`docs/linux-encoded-stream-status.md` 要把**纯领域模型 / 插件 Flutter bridge /  
-Linux C++** 分成三个验证层。**不能声称「所有插件 Dart 都能由纯 VM 测」**——  
-Flutter bridge 需要 `flutter test`。
+`linux-encoded-stream-status.md` 新增第〇节「三层验证」，并改掉了第五节表里把 Task 5/6/7  
+标成「纯 Dart」的过度声称。
 
 ---
 
@@ -220,17 +229,18 @@ Flutter bridge 需要 `flutter test`。
 
 ### B 类：**必须用户跑构建 / 真机**（你只能准备好代码与验收脚本）
 
-| 任务          | 内容                                                                       | 为什么只能用户做                                            |
-| ----------- | ------------------------------------------------------------------------ | --------------------------------------------------- |
-| **#7**      | vendor `camera_android_camerax` 0.7.5+1，过构建闸                             | 需要 `flutter pub get` + APK 构建                       |
-| **#12**     | Android 连续采集 + 编码方案验证（Camera2 帧率 range、高速 session 限制、MediaCodec 硬件 HEVC） | 需要真机 API 行为                                         |
-| **#13**     | Android native H.265/H.264 编码流                                           | 需要真机编译运行                                            |
-| **#14**     | 跨平台 Dart 适配器与应用启动装配                                                      | 一半纯 Dart（可做），一半插件事件桥接（需 `flutter test`）             |
-| **#15**     | Android 真机端到端与长稳验收                                                       | 真机                                                  |
-| **#16–#18** | Windows Media Foundation 设计 / 实现 / 验收                                    | 本机可编译，但助手 shell 跑不了构建                               |
-| **#19–#20** | macOS VideoToolbox                                                       | 需要 Mac                                              |
-| **#21–#22** | Linux GStreamer                                                          | **暂停**。本机谁都编不了（缺 GStreamer/GTK/`flutter_linux` 头文件） |
-| **#24**     | 许可 / 依赖 / 四端 CI 发布完整性                                                    | CI 在远端                                              |
+| 任务          | 内容                                                                        | 为什么只能用户做                                            |
+| ----------- | ------------------------------------------------------------------------- | --------------------------------------------------- |
+| **#7**      | vendor `camera_android_camerax` 0.7.5+1，过构建闸                              | 需要 `flutter pub get` + APK 构建                       |
+| **#12**     | Android 连续采集 + 编码方案验证（Camera2 帧率 range、高速 session 限制、MediaCodec 硬件 HEVC）  | 需要真机 API 行为                                         |
+| **#13**     | Android native H.265/H.264 编码流                                            | 需要真机编译运行                                            |
+| **#14**     | 跨平台 Dart 适配器与应用启动装配                                                       | 一半纯 Dart（可做），一半插件事件桥接（需 `flutter test`）             |
+| **#15**     | Android 真机端到端与长稳验收                                                        | 真机                                                  |
+| **#16–#18** | Windows Media Foundation 设计 / 实现 / 验收                                     | 本机可编译，但助手 shell 跑不了构建                               |
+| **#19–#20** | macOS VideoToolbox                                                        | 需要 Mac                                              |
+| **#21–#22** | Linux GStreamer                                                           | **暂停**。本机谁都编不了（缺 GStreamer/GTK/`flutter_linux` 头文件） |
+| **#24**     | 许可 / 依赖 / CI 发布完整性（**三端**：Windows/macOS/Android；Linux 已于 2026-10-10 移出发布） | CI 在远端                                              |
+
 
 **B 类里你能做的**：把接口、契约、fake 实现、验收脚本写好，  
 让用户那边「接上就能跑」。**参考 `tool/e2e/` 里已有的做法**  
@@ -295,6 +305,12 @@ Flutter bridge 需要 `flutter test`。
    **首字节最高位**（H.264 `first_mb_in_slice==0` / HEVC `first_slice_segment_in_pic_flag`），  
    **不是**靠「无 B 帧」推的。→ 测试 fixture 里 slice 的**首字节是语义位**  
    （≥0x80 = 开新图），HEVC NAL 头是 **2 字节**。
+5. **采集帧率取自源序号的前进量，不是到达计数。** 一个「源序号跳了 5、只交出一个 AU」的产出者  
+   是**编码器**丢了画面；数到达会让它和「相机没产出」变成同一个数字，`PipelineBottleneck.encoder`  
+   就永远不可达。重复帧（前进量为 0）计 `repeatedFrames`，**不计采集**。
+6. **`sendRecordingFrame` 返回是否送达；拒收必须计 `droppedFrames`。** 把它当 `void` 用  
+   （或忽略返回值）会让链路断了也读成「一切正常」——「网络慢」就再也区分不出来。  
+   同理：**诊断字段绝不进 `reportStatus()`**（那是服务端字段），也不含任何凭据。
 
 ---
 
@@ -304,14 +320,14 @@ Flutter bridge 需要 `flutter test`。
 
 - [ ] 跑 `dart run tool/verify_pure.dart`，记下基线 `passed/failed`。
 - [ ] 读 `docs/adr/0001-dual-mode-capture-decisions.md`。
-
-
 - [ ] 在 `MEMORY.md` 里搜你要碰的模块，看有没有相关不变量。
 
 提交之前：
 
 - [ ] 门禁 `failed: 0`，且**新增的 section 真的出现在输出里**。
 - [ ] `dart format --output=none --set-exit-if-changed lib test tool` 干净。
+- [ ] 动了 `lib/` 或 `test/` 的公开形状（接口、字段、构造参数）→ 跑  
+  `python tool/check_compile.py`（约 5 分钟，**编译 ≠ 断言**），它才能发现坏掉的 `test/` 文件。
 - [ ] 新写的断言做过**变异验证**（把实现改坏，确认它变红）——  
   没有变红过的断言等于没有断言。
 - [ ] 新增独立检查文件时，**接线与变异验证同一次做完**。

@@ -164,8 +164,10 @@ class MockBackendGateway implements BackendGateway {
   void send(DeviceMessage message) => sentMessages.add(message);
 
   @override
-  void sendRecordingFrame(RecordingFrameMeta meta, Uint8List bytes) {
+  bool sendRecordingFrame(RecordingFrameMeta meta, Uint8List bytes) {
     recordedFrames++;
+    // The mock has no wire to lose a frame on.
+    return true;
   }
 
   @override

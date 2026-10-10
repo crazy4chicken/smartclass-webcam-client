@@ -21,7 +21,7 @@
 | 4 | `…/2026-10-04-android-server-e2e-test.md` | ✅ **已通过（T0–T8）** | `e49be97` `9763c18` |
 | 5 | `…/2026-10-05-runtime-backend-settings.md` | ✅ **已实现（T1–T8）** | `81a0d1f` `c8262de` `95ca378` |
 | 6 | `…/2026-10-07-camera-capability-probe.md` | ✅ **已实现（T1–T9）** | `23e7495`…`8be70c7`，`8c2b709` `dbd1135` `61504e9` |
-| 7 | `…/2026-10-09-recording-correctness-and-native-encoder.md` | ⚠️ **Phase A 完成（T1–T4）、T5 完成**；Phase B 原生端进行中 | `87f6fe0` `a438a74` `604316d` `36f55a8` `6ca637c` `f2341e5` |
+| 7 | `…/2026-10-09-recording-correctness-and-native-encoder.md` | ⚠️ **Phase A（T1–T2）+ Phase B 的 Dart 侧（T3–T5、T10）完成**；T6–T9 原生端**未开始**（Linux 暂停）。Phase B 的 ffmpeg/libavcodec 架构已被 ADR 取代 | `87f6fe0` `a438a74` `604316d` `36f55a8` `6ca637c` `f2341e5` |
 | 8 | `…/2026-10-09-linux-encoded-stream.md` | ⏸ **已暂停**（Task 1–4 已写，**未编译**） | `f10f86c` `83df291` |
 | 9 | `…/2026-10-10-dual-mode-capture.md` | 🚧 **已开工**：共享 Dart 层落地（任务清单 #1/#4/#5部分/#10部分/#11部分） | 见第 10 节 |
 | 10 | `…/2026-10-10-dual-mode-task-list.md` | 🚧 **清单 #1/#4/#5(协调器侧)/#10(部分)/#11(模型+缓存+校验) 已完成**，原生平台项未动 | 见第 10 节 |
@@ -193,14 +193,23 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 
 - **原生编码管线** —— 让原始帧不进 Dart：fork/vend `camera_desktop`，在同进程的
   GStreamer / Media Foundation 管线里编码，只有压缩字节跨进 Dart。
-- **H.264 / H.265** —— 原生层接 ffmpeg（x264/x265 的 GPL 构建，或仅 H.264 的 `libopenh264`），
-  硬件编码器作为同一 `NativeEncoder` 接口后的第二个后端。
+- **H.264 / H.265** —— 计划当时写的是「原生层接 ffmpeg（x264/x265 的 GPL 构建，或仅 H.264 的
+  `libopenh264`），硬件编码器作为同一 `NativeEncoder` 接口后的第二个后端」。
+  **2026-10-10 更正：ffmpeg 通道已否定**（命令式 API、GPL、救不了帧率）→ 改为**各平台自己的
+  native 编码器**，接缝仍是 `VideoEncoder` / `CodecProbe`。见 ADR §5。
 - **无磁盘帧通路** —— 依赖上一条；在此之前 `TakePictureFrameSource` 保持原位。
-  → **三条都已开工**，见下面第 7、8 节。
+  → **原记「三条都已开工」已不成立**：原生编码一条都没落地（第 7 节 T6–T9）。
 
 ---
 
-### 7. `2026-10-09-recording-correctness-and-native-encoder.md` — ⚠️ Phase A + T5 完成，Phase B 进行中
+### 7. `2026-10-09-recording-correctness-and-native-encoder.md` — ⚠️ Phase A + Phase B 的 Dart 侧完成，原生端未开始
+
+> **⚠️ 2026-10-10 复核：本计划的 Phase B 架构已被取代。** 它写的是「一个 libavcodec（GPL 构建
+> x264/x265）编码器 + ffmpeg 硬件 wrapper 服务所有平台」，**ffmpeg 通道已否定**（命令式 API、
+> GPL、救不了帧率），现行方案是**各平台自己的 native 编码器**，接缝仍是 `VideoEncoder` /
+> `CodecProbe`。冲突时以 `docs/adr/0001-dual-mode-capture-decisions.md` 为准。
+> 下面的表按**实际提交**核对过；分段与计划自身的 Phase 划分对齐：**Phase A = T1–T2**，
+> **Phase B = T3–T11**（此前总览把 T3/T4 也算进 Phase A，是错的）。
 
 两阶段：先修两个被 Feature 1 从「潜在」变成「活的」的录制正确性 bug，再给设备一个真编码器。
 
@@ -208,12 +217,12 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | --- | --- | --- |
 | T1 `start_recording` 必须激活它点名的摄像头 | ✅ `604316d` | `agent_coordinator.dart` 抽出 `_activateCamera()` |
 | T2 裸切到不同上限的摄像头必须重建几何 | ✅ `6ca637c` | 比较对象从「目标摄像头自己的 mode」换成**管线实际所处的 `_config`** |
-| T3 Annex B 切分 | ✅ `36f55a8` `d910ea0` | `annexb.dart`，且从无状态函数改成有状态的 `AnnexBSplitter`（libavcodec 会把 SPS/PPS 单独打成包，无状态切分会把参数集丢了） |
+| T3 Annex B 切分 | ✅ `36f55a8` `d910ea0` | `annexb.dart`，且从无状态函数改成有状态的 `AnnexBSplitter`（native 侧会把 SPS/PPS 单独打成包，无状态切分会把参数集丢了） |
 | T4 可持续帧率模型 | ✅ `a438a74` | `encode_budget.dart`：`sustainableRates` / `sustainableCodecs` / `maxSustainableFps` |
 | T5 Dart 侧编码器契约 | ✅ `f2341e5` | `native_video_encoder.dart` |
-| T6–T9 四端原生编码流 | ⏸ **Linux 已暂停**，其余未开始 | 见第 8 节 |
-| T10 协调器换 `EncoderFactory` + per-mode codec | ❌ 未开始 | 纯 Dart，可独立做 |
-| T11 许可 / 打包 / 文档 | ❌ 未开始 | 用户已确认接受 GPLv2+ |
+| T6–T9 四端原生编码流 | ⏸ **未开始**（Linux 暂停，其余未动） | 见第 8 节；落地顺序已改为 Android → Windows → macOS → Linux |
+| T10 协调器换 `EncoderFactory` + per-mode codec | ✅ 2026-10-10 | `agent_coordinator.dart` 的 `VideoEncoderFactory` + `codecsForMode()`（证据 ∩ 公告）；工厂拒绝 → `ack ok:false`，不偷换 codec。见第 10 节 |
+| T11 许可 / 打包 / 文档 | ⚠️ **部分** | 2026-10-10：`ci.yml` + `release.yml`（gate + 出包）、`docs/release.md`、camera_desktop 许可改正（**MIT**，非 BSD-3）。**发布矩阵已收窄为三端**（Windows / macOS / Android，用户要求移除 Linux —— 见 `docs/release.md`「为什么没有 Linux」）。**未做**：Android ABI/minSdk、Mac 架构、Windows DLL 的实际核对（#24 剩余项） |
 
 #### T5 的两处偏离（有意）
 
@@ -270,7 +279,8 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | #4 默认模式 | ✅ 2/3 | `default_mode.dart` 唯一选择器；main 的 `openConfig`、协调器 `seedModes`、`adoptInventory` 三处同源。4K→1080p、形状保持（交叉相乘）、帧率只降不升。**未闭合：无证据时的 fps 仍是 60（#26 开放决策）** |
 | #5 协调器编码工厂 | ✅ 协调器侧 | `VideoEncoderFactory` 替代裸泵路径；`codecsForMode()` 按模式过滤（证据∩公告）；工厂拒绝 → `ack ok:false`；`isIntraOnly` 不再作可用性判据；点名 codec 不偷换 |
 | #10 AU 切分 | ⚠️ 部分 | 多 slice 合并为一个 AU（H.264/HEVC 首 slice 标志）；chunk 边界收口语义文档化；**pending 字节量有上限**（`kMaxPendingBytes` = 1 MiB，超限丢弃并计数 `pendingOverflows`/`droppedPendingBytes`，随后按下一个起始码重新同步）；残缺/非法 slice 头系统用例（无 slice 头、单字节 HEVC NAL、未知类型、相邻起始码、孤立 continuation、后缀 SEI）。**缺：真实样本解码证明（B 类）** |
-| #11 吞吐证据 | ⚠️ 模型层 | `EncodeSample` 证据模型 + `EncodeEvidence` 缓存（版本/指纹/编码器身份，损坏自愈）+ `canServeMode`/`sustainableCodecsAt` 按模式校验 + `SustainedRateMeter`（预热不计、只数新帧、窗口固定）+ `EncodeBudgetProbe` 接缝 + `SharedPrefsEncodeEvidenceStore`。**缺：插件侧测量管线（没有任何平台实现 `EncodeBudgetProbe`）** |
+| #11 吞吐证据 | ⚠️ 模型层 | `EncodeSample` 证据模型 + `EncodeEvidence` 缓存（版本/指纹/编码器身份，损坏自愈）+ `canServeMode`/`sustainableCodecsAt` 按模式校验 + `SustainedRateMeter`（预热不计、只数新帧、窗口固定）+ `EncodeBudgetProbe` 接缝 + `SharedPrefsEncodeEvidenceStore`。**2026-10-10 补**：`rate_calibration.dart` —— 窗口标定的**判据**（*够长 ⟺ 答案不取决于窗口位置*）、`calibrateRateWindow()`、以及「取最快样本」的审查（`readRateSeries()` 分开报 peak / plateau，`peakOverstatesSustained`）。**缺：插件侧测量管线（没有任何平台实现 `EncodeBudgetProbe`），以及 peak-vs-plateau 的策略决策（ADR §4.1.1，待用户定）** |
+| #23 实测状态 | ✅ 已完成 | `stream_diagnostics.dart`：`AgentStatus` 的单个 `fps` 拆成目标/声明/采集/编码/发送五档 + codec + 硬件身份 + WxH + 丢/重 + 降级原因；`classifyBottleneck` 按管线顺序归因（相机→编码→传输）。`BackendGateway.sendRecordingFrame` 改返回 `bool`（拒收 → 计入丢帧），采集取自**源序号前进量**。状态条新增两行。**状态条 widget 的用例要用户跑 `flutter test`** |
 | #4.1 声明帧率 | ✅ 已修复 | 声明帧率与请求帧率拆开：请求 60（泵不节流），声明在有证据时取实测、**无证据时取下限 5**（不再声明 60）。探针给不出这个数——它只测「接受」不测「持续」，已写进 ADR |
 | #9 编码通道契约 | ⚠️ 2/3 | `EncodedPacket` 增加 `sourceSeq`/`sourcePts`/`sessionGeneration`/`isEos`；`EncodedStreamChannel.open()` 增加 `sessionGeneration`；`EncodedFrame` 增加 `sourceSeq`/`sourcePts`。`start`/`stop` 走 `SerialLock`，`open` 失败回滚，旧 run 的包按代次丢弃（`stalePackets`）。**缺：bitrate（协议无此字段）、`close()` 超时兜底** |
 | #9/A2 生产者接线 | ✅ 已完成 | `measureDeliveredRate()`（`sustained_rate.dart`）把编码器交付流喂给 `SustainedRateMeter`，喂 `sourceSeq` 而非 `seq`。门禁用**真实 `NativeVideoEncoder`** + 重复源序号证明「重复不算交付」。**注意：生产侧暂无调用者** —— 它是各平台 `EncodeBudgetProbe` 的公共身体，而那些实现都还没有 |
@@ -301,7 +311,9 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | Annex B：把 HEVC 后缀 SEI 当图像数据 | 10 条 |
 
 **明确没做的**：#7/#12–#13（Android vendor + 原生编码）、#16–#22（Windows/macOS/Linux 原生）、
-#23（实测状态 UI）、#24/#25（发布收口）。这些需要用户跑构建/真机，助手侧无法验收。
+#24/#25（发布收口）。这些需要用户跑构建/真机，助手侧无法验收。
+（**#23 实测状态已于 2026-10-10 完成** —— 除状态条 widget 的 `flutter test` 需用户跑。
+**#24 的发布矩阵已收窄为三端**，Linux 移出。）
 
 ---
 
@@ -330,7 +342,7 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | `flutter test` | ⚠️ **用户跑的；3 条陈旧断言已修，待重跑** | 助手跑不了（同上）。2026-10-10 用户跑出 `+354 -3`：`test/agent/agent_coordinator_test.dart` 里三条断言还写着「声明 60」，而 #4.1 之后**无证据时声明的是 `kFpsWithoutEvidence`（5）** —— 门禁那侧改对了、`test/` 这侧漏扫（同一类漏扫的第二次，第一次见 `a28d144`）。已改成具名常量。**另：`AppConfig.defaultFps` 的注释声称「设备声明 60」，也是陈旧的 —— 它是请求帧率，声明值在 `CameraMode.fps`。** |
 | `flutter build` / `run` / Linux C++ 编译 | ❌ **本机完全跑不了** | 两条独立的限制：① 助手 shell 建不了子进程管道；② Linux 的 GStreamer / GTK / `flutter_linux` 头文件在本机不存在。这就是 Linux 端暂停的原因 |
 | 真机 · Android 端到端 | ⚠️ 部分 | 基础链路跑通过一整轮（见计划 4）。**但能力探测这一轮（T8/T9）没在真机上验过**，`61504e9` 的 kiosk 修复也待重出包确认 |
-| CI 四端出包 | ⚠️ 未确认 | `.github/workflows/release.yml` 已建，Android SDK 与 artifact 路径两个问题已修；远端已打 `v1.0.0`–`v1.0.3`，但运行结论本机看不到（GitHub API 限流、无 `gh`） |
+| CI 出包（三端） | ⚠️ 未确认 | `.github/workflows/release.yml` 已建，Android SDK 与 artifact 路径两个问题已修；远端已打 `v1.0.0`–`v1.0.3`，但运行结论本机看不到（GitHub API 限流、无 `gh`）。**2026-10-10 起 Linux 已移出发布**，校验项由四项变三项（本地 YAML 严格解析通过，远端未跑） |
 
 ### 变异测试（「断言有牙」的证据）
 
@@ -377,13 +389,14 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
    `metadata` 快照应跟着更新（这需要重新注册，已实现但未验）。
 4. **T8.3「401 恢复」未单独走一遍**（runtime-settings 计划）：令牌改错 → 保存 → 应出现
    「链路失败」且不再重试 → 改回正确令牌 → 保存 → 必须能重新连上。
-5. **CI 四端出包的成功与否未确认**，且 Android 产物是否已随 artifact 路径修复正常进入
-   Release 也未确认。
+5. **CI 出包（现为三端）的成功与否未确认**，且 Android 产物是否已随 artifact 路径修复正常进入
+   Release 也未确认。**2026-10-10 起 Linux 已移出发布矩阵**，本地只验到「严格 YAML 解析通过 +
+   矩阵剩三端 + 两个 `verify` 步骤列表仍逐字相同」。
 6. **Phase B 剩下的纯 Dart 部分可以先做**（不依赖 Linux）：Task 10 协调器换
    `EncoderFactory` + per-mode `supported_codec`。它独立于原生端，而且没有它，
    即使原生端通了，per-mode 的 codec 菜单也不会重算。
-7. Windows / macOS / Android 三端原生编码流（T7–T9）等 Linux 端编译通过再动。
-   用户已确认 **Android 这一轮要做**。
+7. Windows / macOS / Android 三端原生编码流（T7–T9）按 **Android → Windows → macOS** 的顺序做
+   （**不是**等 Linux 编译通过 —— 顺序已在 2026-10-10 改过）。用户已确认 **Android 这一轮要做**。
 
 > 关于计划文件里的 `- [ ]` 复选框：这些计划是**一次性执行**的，复选框未逐个勾选，
 > **执行状态以本文档为准**（逐个勾选会把「跑 `flutter test` 期望 PASS」这类

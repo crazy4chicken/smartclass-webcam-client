@@ -80,6 +80,15 @@ abstract interface class VideoEncoder {
   /// The stream the encoder is feeding.
   String get streamId;
 
+  /// What this encoder is, as the platform names it.
+  ///
+  /// Carried for the same reason [EncodeEvidence.encoderIdentity] exists: what
+  /// a hardware encoder holds and what a software fallback holds are different
+  /// numbers, and an operator looking at a slow stream needs to know which one
+  /// is running. Empty is a legitimate answer — it means the platform did not
+  /// say — and is weaker identification, not a failure.
+  String get identity;
+
   /// [width] / [height] are absolute pixels, never a `ResolutionPreset`.
   Future<void> start({
     required int width,
@@ -120,6 +129,14 @@ class MjpegEncoder implements VideoEncoder {
 
   @override
   CaptureCodec get codec => CaptureCodec.mjpeg;
+
+  /// Named after what actually produces the frames, not the codec.
+  ///
+  /// The distinction matters: the same `mjpeg` wire name is served here by the
+  /// still-picture path and, on a native platform, could be served by an
+  /// encoder — and the two hold very different rates.
+  @override
+  String get identity => 'mjpeg.takePicture';
 
   @override
   Stream<EncodedFrame> get frames => _frames.stream;

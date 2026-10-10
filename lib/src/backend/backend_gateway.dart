@@ -71,7 +71,15 @@ abstract interface class BackendGateway {
   void send(DeviceMessage message);
 
   /// Sends one `recording.frame`: a JSON header plus one encoded video frame.
-  void sendRecordingFrame(RecordingFrameMeta meta, Uint8List bytes);
+  ///
+  /// Returns whether the frame was handed to the wire. **False is a real
+  /// answer, not a formality**: a frame sent while the link is down, or one
+  /// that would exceed the 16 MiB frame limit, is dropped here rather than
+  /// killing the connection — and a caller that counted it as delivered would
+  /// report a healthy stream over a link that is delivering nothing. That is
+  /// the difference between "the network is behind" and "everything is fine",
+  /// which is exactly the question the diagnostics have to answer.
+  bool sendRecordingFrame(RecordingFrameMeta meta, Uint8List bytes);
 
   /// Sends one `photo.photo`: a JSON header plus one image.
   void sendPhoto(PhotoMeta meta, Uint8List bytes);

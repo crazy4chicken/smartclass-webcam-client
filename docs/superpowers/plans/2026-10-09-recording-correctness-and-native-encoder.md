@@ -1,5 +1,18 @@
 # Recording correctness & native H.264/H.265 encoder
 
+> **⚠️ 已被取代（2026-10-10）——读之前先看这段。**
+>
+> 本计划的 **Phase B 架构已作废**：下面写的「一个 libavcodec（GPL 构建 x264/x265）编码器 +
+> ffmpeg 硬件 wrapper（`h264_vaapi` / `h264_videotoolbox` / `h264_mf` / `h264_mediacodec`）
+> 服务所有平台」**不是现行方案**。**ffmpeg 通道已否定**（命令式 API、GPL、救不了帧率），
+> 现行方案是**各平台自己的 native 编码器**，接缝仍是 `VideoEncoder` / `CodecProbe`；
+> 原生落地顺序也改成 **Android → Windows → macOS → Linux**。
+>
+> **冲突时以 `docs/adr/0001-dual-mode-capture-decisions.md` 为准。** 仍然有效的部分：
+> Phase A 的两个录制正确性修复（T1–T2），以及 Phase B 的 Dart 侧（T3–T5）与 T10 —— 都已完成，
+> 核对过的状态见 `docs/implementation-status.md` 第 7 节。
+> **不要照抄本文件的 ffmpeg 假设**；本文件只作历史留档，不逐句重写。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Fix two recording-correctness bugs that Feature 1 turned from latent into live, then give the device a real encoder — capture and encode inside a forked native camera plugin so that 1080p60 H.264/H.265 is actually deliverable, with the declared capabilities measured rather than assumed.

@@ -170,6 +170,7 @@ class NativeVideoEncoder implements VideoEncoder {
     required this.streamId,
     required EncodedStreamChannel channel,
     DateTime Function()? clock,
+    this.identity = '',
   }) : _channel = channel,
        _clock = clock ?? DateTime.now {
     if (codec != CaptureCodec.h264 && codec != CaptureCodec.h265) {
@@ -189,6 +190,14 @@ class NativeVideoEncoder implements VideoEncoder {
 
   @override
   final String streamId;
+
+  /// What the platform called the encoder that is feeding [channel].
+  ///
+  /// Empty when it did not say, which is the honest default: this layer cannot
+  /// tell a hardware H.265 encoder from a software one, and inventing a name
+  /// would make the diagnostics claim more than the device knows.
+  @override
+  final String identity;
 
   final EncodedStreamChannel _channel;
   final DateTime Function() _clock;

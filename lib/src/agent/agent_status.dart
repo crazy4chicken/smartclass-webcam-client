@@ -1,4 +1,5 @@
 import '../backend/backend_gateway.dart';
+import 'stream_diagnostics.dart';
 
 /// What the device is doing right now.
 ///
@@ -25,8 +26,8 @@ class AgentStatus {
     required this.captureState,
     required this.activeStreamId,
     required this.cameraName,
-    required this.fps,
     required this.previewEnabled,
+    this.diagnostics = StreamDiagnostics.idle,
     this.framesSent = 0,
     this.lastError,
   });
@@ -39,12 +40,14 @@ class AgentStatus {
 
   final String cameraName;
 
-  /// The frame rate announced at registration, in whole frames per second.
+  /// The rates, codec, geometry and loss counters behind the current stream.
   ///
-  /// The server rejects a fractional `fps` outright and snapshots this value
-  /// into the stream metadata, so it is the number that governs how the server
-  /// estimates segment durations — not a local measurement.
-  final int fps;
+  /// Replaces the single announced `fps` this used to carry: one number could
+  /// not tell a slow camera from a slow encoder from a slow link, which is the
+  /// question an operator actually has when a recording looks wrong. The
+  /// announced rate is still here — as [StreamDiagnostics.selectedFps] — but it
+  /// is now one of five, next to the target and the three measured rates.
+  final StreamDiagnostics diagnostics;
 
   /// Purely local: the server has no command for the preview.
   final bool previewEnabled;
@@ -72,7 +75,6 @@ class AgentStatus {
     captureState: CaptureState.idle,
     activeStreamId: null,
     cameraName: '',
-    fps: 0,
     previewEnabled: true,
   );
 
@@ -82,7 +84,7 @@ class AgentStatus {
     String? activeStreamId,
     bool clearActiveStreamId = false,
     String? cameraName,
-    int? fps,
+    StreamDiagnostics? diagnostics,
     bool? previewEnabled,
     int? framesSent,
     String? lastError,
@@ -93,7 +95,7 @@ class AgentStatus {
         ? null
         : (activeStreamId ?? this.activeStreamId),
     cameraName: cameraName ?? this.cameraName,
-    fps: fps ?? this.fps,
+    diagnostics: diagnostics ?? this.diagnostics,
     previewEnabled: previewEnabled ?? this.previewEnabled,
     framesSent: framesSent ?? this.framesSent,
     lastError: lastError ?? this.lastError,
@@ -102,5 +104,5 @@ class AgentStatus {
   @override
   String toString() =>
       'AgentStatus(${linkState.name}/${captureState.name}, '
-      'stream=$activeStreamId, ${fps}fps, sent=$framesSent)';
+      'stream=$activeStreamId, $diagnostics, sent=$framesSent)';
 }

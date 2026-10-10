@@ -18,6 +18,7 @@ import 'dart:typed_data';
 import 'package:fake_async/fake_async.dart';
 import 'package:webcam_client/src/agent/agent_coordinator.dart';
 import 'package:webcam_client/src/agent/agent_status.dart';
+import 'package:webcam_client/src/agent/stream_diagnostics.dart';
 import 'package:webcam_client/src/app/capability_bootstrap.dart';
 import 'package:webcam_client/src/backend/backend_gateway.dart';
 import 'package:webcam_client/src/backend/device_credentials.dart';
@@ -62,6 +63,8 @@ import 'package:webcam_client/src/config/connection_settings.dart';
 // from `main` below — a suite that is never called is a suite that can rot.
 import 'verify_annexb.dart';
 import 'verify_default_mode.dart';
+import 'verify_diagnostics.dart';
+import 'verify_rate_calibration.dart';
 import 'verify_sustained_rate.dart';
 import 'verify_encode_budget.dart';
 
@@ -287,13 +290,20 @@ const BackendProbe _okProbe = BackendProbe(
 /// The coordinator's codec checks must not depend on bytes coming out — the
 /// point of the factory is whether an encoder can be built at all.
 class _FakeVideoEncoder implements VideoEncoder {
-  _FakeVideoEncoder({required this.codec, required this.streamId});
+  _FakeVideoEncoder({
+    required this.codec,
+    required this.streamId,
+    this.identity = 'fake',
+  });
 
   @override
   final CaptureCodec codec;
 
   @override
   final String streamId;
+
+  @override
+  final String identity;
 
   @override
   int cameraEnum = 0;
@@ -304,8 +314,16 @@ class _FakeVideoEncoder implements VideoEncoder {
   int? lastHeight;
   int? lastFps;
 
+  /// Real rather than empty so a check can drive the diagnostics windows: the
+  /// three measured rates exist to tell a slow camera from a slow encoder from
+  /// a slow link, and that rule is only exercised by feeding it frames.
+  final StreamController<EncodedFrame> _frames =
+      StreamController<EncodedFrame>.broadcast();
+
   @override
-  Stream<EncodedFrame> get frames => const Stream<EncodedFrame>.empty();
+  Stream<EncodedFrame> get frames => _frames.stream;
+
+  void emit(EncodedFrame frame) => _frames.add(frame);
 
   @override
   Future<void> start({
@@ -542,10 +560,16 @@ class _FakeGateway implements BackendGateway {
   @override
   void send(DeviceMessage message) => sent.add(message);
 
+  /// When set, the gateway behaves like a live link whose wire is refusing
+  /// frames — the case a `void` send could never have reported.
+  bool refuseFrames = false;
+
   @override
-  void sendRecordingFrame(RecordingFrameMeta meta, Uint8List bytes) {
+  bool sendRecordingFrame(RecordingFrameMeta meta, Uint8List bytes) {
+    if (refuseFrames) return false;
     frameMeta.add(meta);
     frameBytes.add(bytes);
+    return true;
   }
 
   @override
@@ -4524,7 +4548,13 @@ Future<void> checkCoordinator() async {
       _FakeCameraService camera,
     })
   >
-  build({Uint8List? frameBytes, bool initialized = true}) async {
+  build({
+    Uint8List? frameBytes,
+    bool initialized = true,
+    VideoEncoderFactory? encoderFactory,
+    DateTime Function()? clock,
+    StreamSettings? settings,
+  }) async {
     final gateway = _FakeGateway();
     final pump = _FakeFramePump();
     final camera = _FakeCameraService(bytes: frameBytes);
@@ -4539,6 +4569,9 @@ Future<void> checkCoordinator() async {
       connection: testConnection,
       initialCamera: camera,
       initialBackendId: 'stub',
+      encoderFactory: encoderFactory,
+      clock: clock,
+      settings: settings,
     );
     await coordinator.start();
     return (
@@ -4826,11 +4859,33 @@ Future<void> checkCoordinator() async {
 
     final status = h.coordinator.status;
     eq(
-      'the status carries the announced rate',
-      status.fps,
-      h.coordinator.announcedFps,
+      'the status carries the requested rate',
+      status.diagnostics.targetFps,
+      h.coordinator.settings.fps,
     );
-    check('the announced rate is positive', status.fps > 0);
+    check('the requested rate is positive', status.diagnostics.targetFps > 0);
+    eq(
+      'the status carries the declared rate, not the requested one',
+      status.diagnostics.selectedFps,
+      h.coordinator.activeMode.fps,
+    );
+    check('the status says it is recording', status.diagnostics.recording);
+    eq(
+      'the status names the codec',
+      status.diagnostics.codec,
+      CaptureCodec.mjpeg,
+    );
+    eq(
+      'the status carries the geometry the encoder was opened at',
+      '${status.diagnostics.width}x${status.diagnostics.height}',
+      '${h.coordinator.activeMode.resolution.width}'
+          'x${h.coordinator.activeMode.resolution.height}',
+    );
+    eq(
+      'and the identity the platform reported for the encoder',
+      status.diagnostics.encoderIdentity,
+      'mjpeg.takePicture',
+    );
     eq('the status carries the camera name', status.cameraName, 'fake camera');
   }
 
@@ -5898,6 +5953,196 @@ Future<void> checkCoordinator() async {
     eq('and the link comes back', coordinator.linkState, LinkState.live);
     eq('through the new gateway', factory.built.last.startCalls, 1);
   }
+
+  // --- diagnostics name the stage holding the rate down ----------------------
+  //
+  // #23's acceptance is "tell a slow camera from a slow encoder from a slow
+  // link", and that is a claim about the wiring, not just the rule: the three
+  // rolling windows have to be fed from the right counters or the comparison
+  // ends up comparing a number with itself.
+  //
+  // Target is 30 throughout (rather than the 60 default) so the 80% threshold
+  // is a round 24 and every number below is chosen to clear or miss it for one
+  // reason only.
+  final fast = StreamSettings.defaults().copyWith(fps: 30);
+
+  /// Builds a coordinator whose encoder is reachable, with a clock the check
+  /// drives by hand.
+  Future<
+    ({
+      AgentCoordinator coordinator,
+      _FakeGateway gateway,
+      _FakeVideoEncoder enc,
+    })
+  >
+  buildDiagnostics(DateTime Function() clock) async {
+    _FakeVideoEncoder? encoder;
+    final h = await build(
+      clock: clock,
+      settings: fast,
+      encoderFactory:
+          ({required codec, required cameraEnum, required streamId}) {
+            encoder = _FakeVideoEncoder(codec: codec, streamId: streamId);
+            return encoder;
+          },
+    );
+    await h.coordinator.handleCommand(
+      const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: streamId),
+    );
+    return (coordinator: h.coordinator, gateway: h.gateway, enc: encoder!);
+  }
+
+  // Nothing measured yet is not a slow camera.
+  {
+    var now = DateTime.utc(2026, 10, 10, 12);
+    final h = await buildDiagnostics(() => now);
+
+    final start = h.coordinator.diagnostics;
+    check('the status knows it is recording', start.recording);
+    eq('before a frame, capture is not measured', start.capturedFps, null);
+    eq('nor encode', start.encodedFps, null);
+    eq('nor send', start.sentFps, null);
+    eq(
+      'so the stage is unknown, not a slow camera',
+      start.bottleneck,
+      PipelineBottleneck.unknown,
+    );
+    eq('the target is the requested rate', start.targetFps, fast.fps);
+    eq('the codec is recorded', start.codec, CaptureCodec.mjpeg);
+    eq('the encoder identity is recorded', start.encoderIdentity, 'fake');
+    eq(
+      'the geometry is what the encoder was opened at',
+      '${start.width}x${start.height}',
+      '${h.coordinator.activeMode.resolution.width}'
+          'x${h.coordinator.activeMode.resolution.height}',
+    );
+
+    // Ten new pictures a second for two seconds, one access unit each.
+    for (var i = 0; i < 20; i++) {
+      now = now.add(const Duration(milliseconds: 100));
+      h.enc.emit(
+        EncodedFrame(
+          seq: i,
+          ts: now,
+          bytes: Uint8List.fromList(<int>[i]),
+          isKeyFrame: true,
+          sourceSeq: i,
+        ),
+      );
+    }
+    await settle();
+
+    final steady = h.coordinator.diagnostics;
+    eq('capture is measured', steady.capturedFps, 10);
+    eq('encode is measured', steady.encodedFps, 10);
+    eq('send is measured', steady.sentFps, 10);
+    eq('nothing was dropped', steady.droppedFrames, 0);
+    eq('nothing repeated', steady.repeatedFrames, 0);
+    // 10 fps against a 30 fps target: the camera is what is holding it down.
+    eq(
+      'the camera is named as the bottleneck',
+      steady.bottleneck,
+      PipelineBottleneck.camera,
+    );
+  }
+
+  // A producer whose sequence jumps: the source advanced, the access units did
+  // not. That is the encoder losing pictures, and it is only visible because
+  // capture is measured from the sequence rather than from arrivals.
+  {
+    var now = DateTime.utc(2026, 10, 10, 12);
+    final h = await buildDiagnostics(() => now);
+
+    // 20 units over two seconds, each three source pictures apart: the source
+    // advanced 58 pictures (1 + 19x3) — 29 fps — while 10 units a second came
+    // out. Capture clears the 24 fps threshold, so the camera is not blamed;
+    // encode does not, so the encoder is.
+    for (var i = 0; i < 20; i++) {
+      now = now.add(const Duration(milliseconds: 100));
+      h.enc.emit(
+        EncodedFrame(
+          seq: i,
+          ts: now,
+          bytes: Uint8List.fromList(<int>[i]),
+          isKeyFrame: true,
+          sourceSeq: i * 3,
+        ),
+      );
+    }
+    await settle();
+
+    final skipped = h.coordinator.diagnostics;
+    eq('the source advanced three pictures per unit', skipped.capturedFps, 29);
+    eq('but only one unit per three came out', skipped.encodedFps, 10);
+    eq(
+      'so the encoder is named, not the camera',
+      skipped.bottleneck,
+      PipelineBottleneck.encoder,
+    );
+  }
+
+  // A live stream whose wire is refusing frames. The link stays up — so the
+  // recording is not torn down — and the gateway answers `false` for every
+  // frame. Counting arrivals as *sent* would have hidden this completely.
+  {
+    var now = DateTime.utc(2026, 10, 10, 12);
+    final h = await buildDiagnostics(() => now);
+    h.gateway.refuseFrames = true;
+
+    // 60 units over two seconds, one source picture each: capture and encode
+    // both clear the threshold, so the only stage left to blame is the link.
+    for (var i = 0; i < 60; i++) {
+      now = now.add(const Duration(milliseconds: 33));
+      h.enc.emit(
+        EncodedFrame(
+          seq: i,
+          ts: now,
+          bytes: Uint8List.fromList(<int>[i]),
+          isKeyFrame: true,
+          sourceSeq: i,
+        ),
+      );
+    }
+    await settle();
+
+    eq('no frames were handed over', h.gateway.frameMeta.length, 0);
+    final offline = h.coordinator.diagnostics;
+    eq('capture kept up', offline.capturedFps, 30);
+    eq('the encoder kept up', offline.encodedFps, 30);
+    eq('nothing reached the gateway', offline.sentFps, 0);
+    eq('and the loss is counted', offline.droppedFrames, 60);
+    eq(
+      'so the link is named as the bottleneck',
+      offline.bottleneck,
+      PipelineBottleneck.network,
+    );
+  }
+
+  // A repeated picture is not a new one, however fast the access units arrive.
+  {
+    var now = DateTime.utc(2026, 10, 10, 12);
+    final h = await buildDiagnostics(() => now);
+
+    for (var i = 0; i < 20; i++) {
+      now = now.add(const Duration(milliseconds: 100));
+      h.enc.emit(
+        EncodedFrame(
+          seq: i,
+          ts: now,
+          bytes: Uint8List.fromList(<int>[i]),
+          isKeyFrame: true,
+          // Every other tick repeats the previous picture.
+          sourceSeq: i ~/ 2,
+        ),
+      );
+    }
+    await settle();
+
+    final padded = h.coordinator.diagnostics;
+    eq('twenty units arrived', padded.encodedFps, 10);
+    eq('but only ten pictures were produced', padded.capturedFps, 5);
+    eq('and the repeats are counted', padded.repeatedFrames, 10);
+  }
 }
 
 Future<void> main() async {
@@ -5933,6 +6178,8 @@ Future<void> main() async {
   await runEncodeBudgetChecks();
   runDefaultModeChecks();
   runSustainedRateChecks();
+  runRateCalibrationChecks();
+  runDiagnosticsChecks();
   await checkCameraProvider();
   await checkFrameStore();
   await checkMockGateway();

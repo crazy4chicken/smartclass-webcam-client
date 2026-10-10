@@ -413,24 +413,32 @@ class SmartClassBackendGateway implements BackendGateway {
   }
 
   @override
-  void sendRecordingFrame(RecordingFrameMeta meta, Uint8List bytes) =>
+  bool sendRecordingFrame(RecordingFrameMeta meta, Uint8List bytes) =>
       _sendBinary(meta.toMessage(), bytes);
 
   @override
-  void sendPhoto(PhotoMeta meta, Uint8List bytes) =>
-      _sendBinary(meta.toMessage(), bytes);
+  void sendPhoto(PhotoMeta meta, Uint8List bytes) {
+    _sendBinary(meta.toMessage(), bytes);
+  }
 
-  void _sendBinary(Message header, Uint8List bytes) {
+  /// Returns whether the frame reached the wire.
+  ///
+  /// Every early return here is a frame the server will never see, and the
+  /// caller needs to be able to count it as lost rather than as delivered.
+  bool _sendBinary(Message header, Uint8List bytes) {
     final channel = _channel;
-    if (channel == null || _state != LinkState.live) return;
+    if (channel == null || _state != LinkState.live) return false;
     try {
       channel.sink.add(encodeBinaryFrame(header, bytes));
+      return true;
     } on BinaryFrameError catch (error) {
       // Sending it would kill the connection with a 1009, so drop it and say
       // why instead.
       _reportError(error.message);
+      return false;
     } catch (_) {
       // Same reasoning as `send`.
+      return false;
     }
   }
 

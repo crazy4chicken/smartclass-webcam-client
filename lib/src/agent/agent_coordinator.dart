@@ -18,6 +18,7 @@ import '../capture/stream_settings.dart';
 import '../capture/video_encoder.dart';
 import '../config/connection_settings.dart';
 import 'agent_status.dart';
+import 'stream_diagnostics.dart';
 
 /// Builds the pump for one recording.
 ///
@@ -164,6 +165,7 @@ class AgentCoordinator {
     List<EncodeSample> encodeSamples = const <EncodeSample>[],
     VideoEncoderFactory? encoderFactory,
     void Function(String message)? log,
+    DateTime Function()? clock,
   }) : _gatewayFactory = gatewayFactory,
        _connection = connection,
        _gateway = gatewayFactory(connection),
@@ -173,6 +175,7 @@ class AgentCoordinator {
        _backendId = initialBackendId,
        _config = config ?? CaptureConfig.defaults(),
        _settings = settings ?? StreamSettings.defaults(),
+       _clock = clock ?? DateTime.now,
        _capabilities = List<CameraCapabilities>.unmodifiable(capabilities),
        _announcedCodecs = List<CaptureCodec>.unmodifiable(
          announcedCodecs.isEmpty
@@ -194,6 +197,11 @@ class AgentCoordinator {
     _encoderFactory =
         encoderFactory ??
         mjpegEncoderFactory(pumpFactory: pumpFactory, camera: () => _camera);
+
+    _statuses = StreamController<AgentStatus>.broadcast(
+      onListen: _startStatusTicker,
+      onCancel: _stopStatusTicker,
+    );
   }
 
   final BackendGatewayFactory _gatewayFactory;
@@ -253,8 +261,18 @@ class AgentCoordinator {
   /// the command.
   final void Function(String message)? _log;
 
-  final StreamController<AgentStatus> _statuses =
-      StreamController<AgentStatus>.broadcast();
+  /// Broadcast to whoever is showing the status.
+  ///
+  /// The ticker that keeps the rates live is started and stopped by listeners
+  /// rather than by the lifecycle: the status stream emits on state changes,
+  /// which is right for the link but leaves a diagnostics display frozen on the
+  /// first second of a recording. Tying the ticker to `onListen`/`onCancel`
+  /// means a coordinator nobody is watching — every test, and the gate — never
+  /// has a timer running at all.
+  ///
+  /// Assigned in the constructor body because the callbacks are instance
+  /// methods, and a field initialiser may not touch `this`.
+  late final StreamController<AgentStatus> _statuses;
 
   CameraService? _camera;
   CameraFailure? _failure;
@@ -283,6 +301,57 @@ class AgentCoordinator {
   String? _lastError;
   bool _started = false;
   bool _paused = false;
+
+  /// The clock the diagnostics rates are sampled against.
+  ///
+  /// Injected so a test can drive the rolling windows without waiting: the
+  /// rates are what tell a slow camera from a slow encoder from a slow link,
+  /// and that rule is worth exercising.
+  final DateTime Function() _clock;
+
+  // --- live diagnostics -----------------------------------------------------
+
+  /// Frames per second the camera produced, the encoder emitted and the
+  /// gateway accepted, over a rolling window.
+  ///
+  /// Three windows rather than one because a single number cannot say *where*
+  /// the loss is. They are cleared when a stream starts, so a fresh recording
+  /// never reports the previous one's rate.
+  final RollingRate _capturedRate = RollingRate();
+  final RollingRate _encodedRate = RollingRate();
+  final RollingRate _sentRate = RollingRate();
+
+  /// The last source sequence seen, so a repeated picture is not counted as a
+  /// new frame. Starts below any real sequence.
+  int _lastSourceSeq = -1;
+
+  /// Whether any frame has arrived for the current stream.
+  ///
+  /// Keeps "no window has produced a number yet" apart from "the pipeline
+  /// stalled": the first reads as unknown, the second as a rate of zero.
+  bool _sawFrame = false;
+
+  /// Access units the encoder produced that never reached the gateway, and
+  /// access units that carried no new picture. Both reset per stream.
+  int _droppedFrames = 0;
+  int _repeatedFrames = 0;
+
+  /// What the current stream is running: the codec the command resolved to,
+  /// the encoder's own identity, and the geometry it was opened at.
+  CaptureCodec? _streamCodec;
+  String _encoderIdentity = '';
+  int _streamWidth = 0;
+  int _streamHeight = 0;
+
+  /// Why the device is not at the requested rate, when it knows.
+  String? _degradationReason;
+
+  /// Refreshes the status stream while a recording runs.
+  ///
+  /// The rates move every frame, but the status stream only emits on state
+  /// changes — so without a ticker a diagnostics display would freeze on the
+  /// first second of a recording and read as a stalled pipeline.
+  Timer? _statusTicker;
 
   // --- read-only view -------------------------------------------------------
 
@@ -428,13 +497,53 @@ class AgentCoordinator {
 
   Stream<AgentStatus> get onStatus => _statuses.stream;
 
+  /// The live rates, codec and geometry behind the current stream.
+  ///
+  /// Reads the rolling windows at call time rather than caching a snapshot:
+  /// the whole point is to answer "what is happening now", and a value frozen
+  /// when a state change happened would report the first second of every
+  /// recording forever.
+  StreamDiagnostics get diagnostics {
+    final mode = activeMode;
+    final recording =
+        _captureState == CaptureState.recording && _activeStreamId != null;
+
+    // Idle: the target and the declared mode are still worth showing — they are
+    // what the device *would* run at — but there are no measured rates to
+    // report, and reporting the previous stream's would be a lie.
+    if (!recording) {
+      return StreamDiagnostics(targetFps: _settings.fps, selectedFps: mode.fps);
+    }
+
+    final now = _clock();
+    // Before the first frame there is nothing to divide by: "not measured" has
+    // to stay distinguishable from "measured and slow", or every recording
+    // would open by blaming the camera.
+    final measured = _sawFrame;
+    return StreamDiagnostics(
+      recording: true,
+      targetFps: _settings.fps,
+      selectedFps: mode.fps,
+      capturedFps: measured ? _capturedRate.rateAt(now) : null,
+      encodedFps: measured ? _encodedRate.rateAt(now) : null,
+      sentFps: measured ? _sentRate.rateAt(now) : null,
+      codec: _streamCodec,
+      encoderIdentity: _encoderIdentity,
+      width: _streamWidth,
+      height: _streamHeight,
+      droppedFrames: _droppedFrames,
+      repeatedFrames: _repeatedFrames,
+      degradationReason: _degradationReason,
+    );
+  }
+
   AgentStatus get status => AgentStatus(
     linkState: _linkState,
     captureState: _captureState,
     activeStreamId: _activeStreamId,
     cameraName: cameraName,
-    fps: _settings.fps,
     previewEnabled: _settings.previewEnabled,
+    diagnostics: diagnostics,
     framesSent: _framesSent,
     lastError: _lastError,
   );
@@ -521,6 +630,7 @@ class AgentCoordinator {
   }
 
   Future<void> stop() async {
+    _stopStatusTicker();
     await _stopRecording();
     await _unbindGateway();
     await _healthSub?.cancel();
@@ -806,6 +916,29 @@ class AgentCoordinator {
     }
     _encoder = encoder;
 
+    // Reset the diagnostics before any frame can land, so a fresh recording
+    // never reports the previous one's rates, geometry or losses. The codec,
+    // geometry and encoder identity are fixed here rather than read back from
+    // the encoder later: `identity` is the platform's word and must not change
+    // mid-stream.
+    _capturedRate.clear();
+    _encodedRate.clear();
+    _sentRate.clear();
+    _lastSourceSeq = -1;
+    _sawFrame = false;
+    _droppedFrames = 0;
+    _repeatedFrames = 0;
+    _streamCodec = codec;
+    _encoderIdentity = encoder.identity;
+    _streamWidth = mode.resolution.width;
+    _streamHeight = mode.resolution.height;
+    // The one degradation this layer can name without a measurement: the
+    // still-picture floor is the only path in this build, and its ceiling is
+    // in the capture, not the codec.
+    _degradationReason = codec == CaptureCodec.mjpeg
+        ? 'mjpeg 逐帧 takePicture，1080p 上限约 5–10 fps'
+        : null;
+
     // Claim the stream BEFORE starting the producer. `_onEncodedFrame` drops
     // any frame that has no stream to belong to, so an encoder that emits while
     // `start()` is still in flight would otherwise lose its first frame — and
@@ -1031,10 +1164,51 @@ class AgentCoordinator {
   // --- media ----------------------------------------------------------------
 
   void _onEncodedFrame(EncodedFrame frame) {
-    final streamId = _activeStreamId;
-    if (streamId == null || _captureState != CaptureState.recording) return;
+    final now = _clock();
 
-    _gateway.sendRecordingFrame(
+    // Three windows, recorded in pipeline order, because they are what tell the
+    // three stages apart:
+    //
+    // * **capture** is measured from how far the source's own sequence moved,
+    //   not from how many access units arrived. A producer whose sequence jumps
+    //   from 4 to 9 has said five pictures happened; if it then hands over one
+    //   access unit, the encoder — not the camera — is the stage that lost
+    //   them. Counting arrivals here would make the two indistinguishable, and
+    //   the encoder stage unreachable.
+    // * **encode** is every access unit the encoder handed over, repeats
+    //   included.
+    // * **send** is what the gateway actually took.
+    //
+    // Collapsing these into one counter is exactly what makes a slow camera
+    // indistinguishable from a slow link.
+    final previous = _lastSourceSeq;
+    _lastSourceSeq = frame.sourceSeq;
+    // The first frame of a stream is one picture regardless of what number the
+    // producer starts counting from.
+    final advanced = previous < 0 ? 1 : frame.sourceSeq - previous;
+    _capturedRate.record(now, weight: advanced);
+    if (advanced <= 0) {
+      // A picture that repeated: the producer padded its output. Counting it
+      // as capture would report a rate nothing produced.
+      _repeatedFrames++;
+    }
+
+    _encodedRate.record(now);
+    _sawFrame = true;
+
+    final streamId = _activeStreamId;
+    if (streamId == null || _captureState != CaptureState.recording) {
+      // Produced but undeliverable: the tail a native encoder flushes after a
+      // stop lands here, and the server would discard those frames anyway.
+      _droppedFrames++;
+      return;
+    }
+
+    // The gateway answers whether the frame reached the wire. A frame it
+    // refused — link down, or over the 16 MiB frame limit — must not be counted
+    // as delivered, or "the network is behind" would read as "everything is
+    // fine", which is the one thing the transport stage exists to rule out.
+    final delivered = _gateway.sendRecordingFrame(
       RecordingFrameMeta(
         cameraEnum: _recordingCameraEnum ?? _cameraEnum,
         streamId: streamId,
@@ -1043,6 +1217,11 @@ class AgentCoordinator {
       ),
       frame.bytes,
     );
+    if (!delivered) {
+      _droppedFrames++;
+      return;
+    }
+    _sentRate.record(now);
     _framesSent++;
   }
 
@@ -1154,5 +1333,23 @@ class AgentCoordinator {
   void _emitStatus() {
     if (_statuses.isClosed) return;
     _statuses.add(status);
+  }
+
+  /// Keeps the measured rates moving while somebody is watching.
+  ///
+  /// One second is the coarsest tick that still reads as live and the finest
+  /// that costs nothing: the rates themselves are rolling windows, so a
+  /// slower tick would just sample the same window less often. Emits only
+  /// while recording — an idle device has no rate to report, and a status
+  /// stream that repeats itself once a second is noise for every listener.
+  void _startStatusTicker() {
+    _statusTicker ??= Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_captureState == CaptureState.recording) _emitStatus();
+    });
+  }
+
+  void _stopStatusTicker() {
+    _statusTicker?.cancel();
+    _statusTicker = null;
   }
 }

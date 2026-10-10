@@ -53,6 +53,9 @@ MockGateway _stubbedGateway() {
   when(() => gateway.state).thenReturn(LinkState.live);
   when(() => gateway.start(any())).thenAnswer((_) async {});
   when(() => gateway.stop()).thenAnswer((_) async {});
+  // The frame send answers whether the frame reached the wire; a stubbed
+  // gateway with a live link accepts everything.
+  when(() => gateway.sendRecordingFrame(any(), any())).thenReturn(true);
   return gateway;
 }
 
@@ -567,7 +570,7 @@ void main() {
   });
 
   group('status', () {
-    test('carries the announced rate and the live stream', () async {
+    test('carries the rates and the live stream', () async {
       final coordinator = build();
       await coordinator.handleCommand(
         const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: 's'),
@@ -577,8 +580,15 @@ void main() {
       expect(status.captureState, CaptureState.recording);
       expect(status.activeStreamId, 's');
       expect(status.cameraName, 'Integrated Camera');
-      expect(status.fps, coordinator.announcedFps);
-      expect(status.fps, greaterThan(0));
+      // Two separate numbers, and the distinction is the point: the target is
+      // what the pump is asked for, the declared rate is what the server is
+      // told. Collapsing them is how a device comes to announce a rate it has
+      // never delivered.
+      expect(status.diagnostics.targetFps, coordinator.settings.fps);
+      expect(status.diagnostics.selectedFps, coordinator.activeMode.fps);
+      expect(status.diagnostics.targetFps, greaterThan(0));
+      expect(status.diagnostics.recording, isTrue);
+      expect(status.diagnostics.codec, isNotNull);
     });
 
     test(

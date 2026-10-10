@@ -15,6 +15,7 @@
 ## Global Constraints
 
 - 默认目标 **1920×1080 @ 60fps**；更高分辨率可保留在能力声明中，但不默认使用。低于目标的设备选其可交付的最高合适尺寸；非 16:9 的选择规则由 #26 明确，禁止仅凭像素总数猜几何。
+- **「请求帧率」与「声明帧率」是两个数**（2026-10-10 确认）：请求 = 60，是管线被要求跑到的上限，泵按它取帧、**不因为声明值低就节流**；声明写进注册并被服务端用于估段时长，**不得高于已证实的交付量**。无实测证据时声明下限（`kFpsWithoutEvidence = 5`），**不声明 60**。
 - **先降帧率，保分辨率**；不支持当前请求应 `ack ok:false`，不能偷偷换成另一 codec 或另一模式再报成功。
 - **硬件 H.265 在当前模式可持续时优先，否则 H.264**。某 codec 在 30fps 可用不表示它在当前 60fps 可用。
 - 视频采集和编码在 native 内完成，原始帧不跨入 Dart，视频路径不落临时文件。照片是否也要求完全无磁盘，由 #26 消除旧文档歧义。
@@ -24,6 +25,10 @@
 - `lib/src/backend/`、`lib/src/config/`、非插件 `lib/src/capture/` 和 `capability_bootstrap.dart` 保持 Flutter-free。平台 bridge 和 Flutter messenger 测试独立于纯模型测试。
 - 用户运行 `flutter pub get`、`flutter test`、平台构建及真机测试；助手不在当前 Windows shell 中重建插件链接。原生编译和运行尚无证据时，不标成完成。
 - Linux 原生开发继续暂停；保留现有代码不等于支持已验收。不得擅自移除现有四端 CI 构建或绕过 verify。
+  > **2026-10-10 修订（用户明确要求，非"擅自"）：Linux 已从 release 流水线整条移除。**
+  > 移除的是**发布**，不是**构建能力** —— `linux/` 源码、`flutter build linux` 的本地冒烟方式都还在，
+  > `verify` 与原生编译门禁一字未动。理由：Linux 原生采集**一行都没编译过**，
+  > **不宣称交付的平台就不该发出可下载的产物**。见 `docs/adr/0001-dual-mode-capture-decisions.md` §五。
 
 ## Review Focus
 
@@ -63,65 +68,177 @@
 
 ### #1 把 Annex B 与吞吐模型检查接进门禁
 **依赖：** 无。**文件：** `tool/verify_pure.dart`、`verify_annexb.dart`、`verify_encode_budget.dart`。
-- [ ] 主入口导入并调用现有 `runAnnexBChecks()` / `runEncodeBudgetChecks()`；必要时抽公共断言助手解除循环导入，不复制检查。
-- [ ] 实跑主门禁，输出必须出现新增 section；记录真实 passed/failed，新增失败逐条诊断，不禁用用例。
-- [ ] 通过入口撤除/故意变异等方式确认检查确实被调用；CI 继续使用同一主入口。验收：不再有只写未运行的专项检查。
+- [x] 主入口导入并调用现有 `runAnnexBChecks()` / `runEncodeBudgetChecks()`；必要时抽公共断言助手解除循环导入，不复制检查。
+- [x] 实跑主门禁，输出必须出现新增 section；记录真实 passed/failed，新增失败逐条诊断，不禁用用例。
+- [x] 通过入口撤除/故意变异等方式确认检查确实被调用；CI 继续使用同一主入口。验收：不再有只写未运行的专项检查。
+  > **2026-10-10 完成。** 708 → 940（含后续任务新增）；Annex B 专项 15 条、编码吞吐 10 条变异命中，
+  > 门禁确实在跑这两个 suite。新增 `verify_default_mode.dart` 同样由主入口调用。
 
 ### #2 清理审计发现的文档与注释腐化
 **依赖：** #1。**文件：** `lib/main.dart`、README、release、implementation-status、VENDORED。
-- [ ] 旧 ffmpeg 接缝注释改为实际 native 契约/装配入口；修正 Phase A=T1–T2、Phase B 从 T3 开始等错位。
-- [ ] 断言数量用实跑记录或“以运行输出为准”，删除混杂的 586/705 等过期承诺；覆盖表分清直接专项测试和间接调用。
-- [ ] 修正 camera_desktop 的 MIT 来源描述，保留 LICENSE 原文；补旧计划取代链接。验收：实现、验证证据和状态说明一致。
+- [x] 旧 ffmpeg 接缝注释改为实际 native 契约/装配入口；修正 Phase A=T1–T2、Phase B 从 T3 开始等错位。
+  > **2026-10-10 完成。** `lib/main.dart` 的 backend chain 注释（原写「A future native or ffmpeg
+  > encoder is added here」）改为「未来平台 **backend** 加在这里；**编码不是 backend**，接在
+  > `VideoEncoder` 接缝」；`camera_provider.dart` / `codec_probe.dart` 的「ffmpeg fallback」改为
+  > 「第二个相机插件 / native probe」。`implementation-status.md` 总览与第 7 节按**实际提交**
+  > 重核：**Phase A = T1–T2**（原把 T3/T4 也算进 Phase A，错），Phase B 的 Dart 侧 T3–T5 与 T10
+  > 完成、T6–T9 未开始；并把「Phase B 原生端进行中」改成事实。旧计划顶部加**取代标记**（不逐句重写）。
+- [x] 断言数量用实跑记录或“以运行输出为准”，删除混杂的 586/705 等过期承诺；覆盖表分清直接专项测试和间接调用。
+- [x] 修正 camera_desktop 的 MIT 来源描述，保留 LICENSE 原文；补旧计划取代链接。
+  > **2026-10-10 完成。** `VENDORED.md` 的「BSD-3」改为 **MIT**（以 `packages/camera_desktop/LICENSE`
+  > 原文为准，并注明旧版写错）。验收：实现、验证证据和状态说明一致。
 
 ### #3 Linux 文档区分共享 Dart 任务与原生暂停
 **依赖：** 无。**文件：** `docs/linux-encoded-stream-status.md`、Linux 计划、implementation-status。
-- [ ] 把纯领域模型、插件 Flutter bridge、Linux C++ 分为三个验证层，不能声称所有插件 Dart 都可由纯 VM 测。
-- [ ] 写明契约会先在 Android 验证；Linux 未编译不是三端全部停工的理由，继续保留既有代码但不宣称交付。
-- [ ] 明确暂停范围和恢复条件。验收：读者知道现在能做什么、未来必须在哪台机器验什么。
+- [x] 把纯领域模型、插件 Flutter bridge、Linux C++ 分为三个验证层，不能声称所有插件 Dart 都可由纯 VM 测。
+- [x] 写明契约会先在 Android 验证；Linux 未编译不是三端全部停工的理由，继续保留既有代码但不宣称交付。
+- [x] 明确暂停范围和恢复条件。验收：读者知道现在能做什么、未来必须在哪台机器验什么。
+  > **2026-10-10 完成。** `linux-encoded-stream-status.md` 新增**第〇节「三层验证」**表：
+  > ① 纯领域模型（本机 `verify_pure.dart` 跑过）/ ② 插件 Flutter bridge（本机只有
+  > `check_compile.py` 类型检查，**编译 ≠ 断言**，验证要用户 `flutter test`）/ ③ Linux C++（本机
+  > 连编译都不行，要 Linux 机器）。并**改掉第五节表里把 Task 5/6/7 标成「纯 Dart」的过度声称**
+  > —— 它们都是第 ② 层。第一节补「暂停范围」（停 Linux 原生；不停共享 Dart 层；顺序
+  > Android → Windows → macOS → Linux）与「恢复条件」（用户授权 + Linux 机器，缺一不可）。
+  > 顺带修正 T11 的 GPL 前提：ffmpeg/x264/x265 已否定，GPL 义务不再自动成立。
 
 ### B. 共享采集基础（不等待 Linux）
 
 ### #9 统一编码通道契约并修复启停生命周期
 **依赖：** #1、#26。**文件：** `native_video_encoder.dart`、`video_encoder.dart`、纯门禁、对应测试。
 - [ ] 合同覆盖 codec、绝对 WxH/fps/bitrate、cameraEnum/插件 cameraId、源 seq/PTS、AU/分片边界、session 代次和成功/失败/EOS。
-- [ ] 保证生产前接收端就绪；open 失败释放资源；start/stop 串行、停止等待尾包/drain/stream done、有界超时、旧包不进入新流。
-- [ ] fake channel 验证首包、异步尾包、错误、重复 stop、restart 及并发；错误可见，不能只计数吞掉。验收：close 完成与取消订阅次序有唯一明确语义。
+  > **2026-10-10 部分完成。** 已有：codec、绝对 WxH、fps、`cameraEnum`（物理下标由
+  > `CameraPluginBackend` 内部映射，按规范序号规则不出插件）、**源 seq / 源 PTS**、
+  > AU 边界（`pictures` + `AnnexBSplitter`）、**session 代次**、失败（`open` 抛异常）、**EOS**。
+  > **缺**：**bitrate** —— 协议里没有码率字段，`quality` 是唯一的画质旋钮，所以契约里没有它
+  > （不是遗漏，是协议没有对应物）；`bitrate` 若要进契约，前提是服务端先加字段。
+- [x] 保证生产前接收端就绪；open 失败释放资源；start/stop 串行、停止等待尾包/drain/stream done、有界超时、旧包不进入新流。
+  > **2026-10-10 完成（有界超时除外）。** `start`/`stop` 走 `SerialLock` 串行；`open` 抛异常时
+  > 回滚 `_running`/`_splitter`（否则留下「已认领但没人喂」的状态）；每 run 递增 `_generation`，
+  > `_onPacket` 丢弃代次不符的包（`stalePackets`）。**缺：`close()` 挂住时没有超时兜底。**
+- [x] fake channel 验证首包、异步尾包、错误、重复 stop、restart 及并发；错误可见，不能只计数吞掉。验收：close 完成与取消订阅次序有唯一明确语义。
+  > **2026-10-10 完成。** fake channel 覆盖首包、`close()` 期间冲刷的尾包、流上错误（计入
+  > `latePackets` 而非抛出）、重复 `stop`、restart（代次递增 + 旧包被拒）、并发 `start`×2
+  > （`closeCalls == 1` 证明串行）、`open` 失败回滚。
+  > **次序语义已定死并写进代码注释**：`close()` 先于 `cancel()`，`close()` 被 await、
+  > `cancel()` 不被 await —— close 解析即代表尾包已交付，cancel 只是善后（单订阅流的 cancel
+  > 要到下一轮事件循环才完成，等它会让下一次 `start` 依赖一个已经不可能再交付的流的拆除）。
+  > 变异验证：拆掉串行锁 / 把 cancel 挪到 close 之前 / 去掉代次校验，分别挂 1、10、4 条。
 
 ### #10 修复 AU 切分与关键帧参数集保证
 **依赖：** #1。**文件：** `annexb.dart`、NativeVideoEncoder、专项检查与真实编码样本。
-- [ ] 核查多 slice、首 slice 标志、前/后缀 SEI、三/四字节起始码、残缺/非法头、碎片边界及 pending 内存上限。
-- [ ] 统一“原生明确 AU”与“Dart 拼分片”的边界职责；不能以无 B 帧推导单 slice，也不能以 pictures 数相等推导可解码。
+- [x] 核查多 slice、首 slice 标志、前/后缀 SEI、三/四字节起始码、残缺/非法头、碎片边界及 pending 内存上限。
+  > **2026-10-10 完成。** 多 slice 合并 + 首 slice 标志（H.264 `first_mb_in_slice==0` /
+  > HEVC `first_slice_segment_in_pic_flag`，均取 slice 头首字节最高位）；三/四字节起始码、
+  > 碎片边界、空/无码输入、前/后缀 SEI（后缀按前缀处理，有意、已文档化）、
+  > **残缺与非法 slice 头**（只有 NAL 头没有 slice 头、单字节 HEVC NAL、未知类型 0/12/31、
+  > 相邻两个起始码、孤立的 continuation 切片）、**pending 上限**（`kMaxPendingBytes` = 1 MiB，
+  > 超限即丢弃并计数 `pendingOverflows` / `droppedPendingBytes`，随后按下一个起始码重新同步）。
+  > 变异验证：退回「一个 VCL = 一幅图」7 条；关掉上限 6 条；无条件丢弃 19 条；
+  > 截断而非丢弃 1 条；不计数 2 条；把缺 slice 头当 continuation 1 条；把 HEVC 后缀 SEI 当图像数据 10 条。
+  > **仍缺：真实编码样本的解码证明**（需要原生编码器产出样本，B 类）。
+- [ ] 统一「原生明确 AU」与「Dart 拼分片」的边界职责；不能以无 B 帧推导单 slice，也不能以 pictures 数相等推导可解码。
+  > 边界已写死并文档化：**chunk 必须含完整 picture**（边界即收口），`NativeVideoEncoder` 的
+  > units==pictures 交叉校验因此保持成立；「无 B 帧 → 单 slice」的推导已从注释里删掉。
+  > **pictures 相等 ≠ 可解码**仍只靠交叉校验兜底，真正确认要等真实样本。
 - [ ] 多 slice 一幅图仍只发一帧，关键帧带所需参数集，丢包后恢复到可解码关键帧；真实样本解码证明。验收：不向后端发送拆错的单元。
+  > 前两项有用例；**真实编码样本解码证明未做**（没有 native 编码器可产样本）。
 
 ### #11 实现吞吐测量、缓存与模式 codec 选择
 **依赖：** #9、#10、#26。**文件：** `encode_budget.dart`、能力/缓存模型、插件测量接缝、门禁。
-- [ ] 记录按相机/几何/codec 的实际源新帧、AU、交付计数、PTS、掉帧和硬件身份；预热/多窗口测量，审查当前取最快样本是否能代表持续能力。
-- [ ] 缓存带版本、摄像头指纹和编码器身份；命中省探测，重检/版本变化失效，损坏自愈，独立于凭据设置。
-- [ ] 校验所选当前 fps 在该 codec 可持续列表内；测试 HEVC30/AVC60、热降频、空/负样本、重检。验收：静态支持列表不冒充实测。
+- [x] 记录按相机/几何/codec 的实际源新帧、AU、交付计数、PTS、掉帧和硬件身份；预热/多窗口测量，审查当前取最快样本是否能代表持续能力。
+  > **2026-10-10 部分完成。** `SustainedRateMeter`（`lib/src/capture/sustained_rate.dart`）
+  > 从交付帧流里数持续帧率：**预热期不计、只数新帧**（`videorate` 重复帧不算交付）、
+  > **窗口固定**、只向下取整；`close()` 让卡死的管线也能收口（零是测量结果，不是"没测"）。
+  > `EncodeBudgetProbe` 接缝 + `evidenceFromMeasurements` 已就位，产出直接进 `EncodeEvidence`。
+  > **缺**：每平台的 `EncodeBudgetProbe` 实现（跑真实管线取窗口）。**源 PTS 现在有承载字段**
+  > （`EncodedPacket.sourcePts` → `EncodedFrame.sourcePts`），但没有任何平台填它 —— 见 #9。
+  >
+  > **2026-10-10 晚补齐了「判据与算法」这一半**（`lib/src/capture/rate_calibration.dart`，
+  > 专项检查 `tool/verify_rate_calibration.dart`，由主入口调用）：
+  > - **预热/窗口标定的判据**：*一个窗口够长 ⟺ 答案不再取决于窗口放在哪里*（滑动窗口，最大相对
+  >   偏差 ≤ 10%）。`calibrateRateWindow()` 取**最小**的收敛组合；`rateSpread()` 让平台探针直接问
+  >   「出厂默认 1.5s/3s 对**这台**硬件够不够」；收敛不了是**结果**（`settled:false` + 原因）。
+  > - **「取最快样本」的审查结论**：`max` 是"被看见到过什么"，**不是**"可被信任交付什么" ——
+  >   热降频下第一次最快。`readRateSeries()` 把 `peakFps`（今天的策略）与 `plateauFps`（尾部）
+  >   分开报，并给出 `peakOverstatesSustained` 布尔。**策略该用哪个待用户决策**，
+  >   见 ADR §4.1.1；定之前 `sustainableRates` 保持现状。
+  > - **硬件身份**已贯通（`VideoEncoder.identity` → 诊断；`EncodeEvidence.encoderIdentity` 缓存键）。
+  >   仍缺的：平台探针真正填 PTS / 编码器侧掉帧计数（B 类，承载字段已存在）。
+  > - 变异验证：降频序列判成上升 2 条、窗口右端改成闭区间 2 条、不收敛也返回首个候选 5 条、
+  >   plateau 取整段中位数 2 条。
+- [x] 缓存带版本、摄像头指纹和编码器身份；命中省探测，重检/版本变化失效，损坏自愈，独立于凭据设置。
+  > **2026-10-10 完成（模型与存储）。** `EncodeEvidence`（版本 + 摄像头指纹 + 编码器身份 + 样本），
+  > 损坏一律 `invalid` → 未命中（自愈）；「实测为零」是**有效**结果、可与损坏区分并可缓存。
+  > `EncodeEvidenceStore` 接口 + `InMemory`（门禁用）+ `SharedPrefsEncodeEvidenceStore`（独立键
+  > `encode_evidence`，不碰凭据）。注意：**尚无任何平台真正写入它** —— 测量管线是上一条，未做。
+- [x] 校验所选当前 fps 在该 codec 可持续列表内；测试 HEVC30/AVC60、热降频、空/负样本、重检。验收：静态支持列表不冒充实测。
+  > **2026-10-10 完成。** `canServeMode` / `sustainableCodecsAt` 按模式判定；协调器
+  > `codecsForMode()` 与 `defaultFpsFor` 都走它。HEVC30/AVC60、热降频（慢跑不清除快跑）、
+  > 空/负样本、几何不串用均有用例。**边界**：完全无证据时不收窄（返回公告原样），由工厂兜底拒绝
+  > —— 已有专门用例（「有实测但无编码器 → ack ok:false」）。
 
 ### #4 默认模式算法：1080p 封顶与同分辨率降帧率
 **依赖：** #1、#11。**文件：** 默认模式领域选择器、agent_coordinator、main、harness/test。
-- [ ] 同源算法服务初始打开、seedModes、adoptInventory：4K 默认 1080p，低档用真实最高合适尺寸；声明仍保留更高已测能力。
-- [ ] 同分辨率选可持续最高档≤60；无证据回退与实测失败严格区分，不把失败当作空样本强推60。
-- [ ] 回归 4K/720p/非16:9/30fps/空证据及缓存重检；管线实际几何=当前模式=公告。验收：不再只改 coordinator 留 main 打开4K。
+- [x] 同源算法服务初始打开、seedModes、adoptInventory：4K 默认 1080p，低档用真实最高合适尺寸；声明仍保留更高已测能力。
+- [x] 同分辨率选可持续最高档≤60；无证据回退与实测失败严格区分，不把失败当作空样本强推60。
+  > **2026-10-10 完成（2026-10-10 用户确认口径）。** `defaultFpsFor` 的 `unmeasuredFps` 是必填参数；
+  > 调用方传 `kFpsWithoutEvidence = 5`（阶梯最低档），**不再传 60** —— 「声明 60 交付 5–10」
+  > 的缺口由此关闭。**声明帧率与请求帧率拆开**：请求仍是 60（泵按它取帧，不节流），
+  > 声明不得高于已证实的交付量。「实测为零」与「无证据」都答下限，因为下限就是回退值。
+  > 见 `docs/adr/0001-dual-mode-capture-decisions.md` §4.1。
+- [x] 回归 4K/720p/非16:9/30fps/空证据及缓存重检；管线实际几何=当前模式=公告。验收：不再只改 coordinator 留 main 打开4K。
+  > **2026-10-10 完成。** `default_mode.dart` 是唯一选择器；`main.dart` 的 `openConfig` 与
+  > `adoptInventory` 的重开几何都走它。变异验证：把选择器改回「取实测上限」，8 条断言变红
+  > （含 main 打开 4K、adoptInventory 重开 4K 两条）。
 
 ### #5 协调器换 EncoderFactory 与 per-mode supported_codec
 **依赖：** #9、#11。**文件：** agent_coordinator、video_encoder、Mjpeg/native 实现、门禁/test。
-- [ ] 创建请求保留 codec、cameraEnum、streamId，消费 EncodedFrame；无 native 时保留 MJPEG。
-- [ ] 先认领/订阅再启动，失败回滚；模式声明与可用性校验同源，mode 变更重注册；点名 codec 不偷换。
+- [x] 创建请求保留 codec、cameraEnum、streamId，消费 EncodedFrame；无 native 时保留 MJPEG。
+- [x] 先认领/订阅再启动，失败回滚；模式声明与可用性校验同源，mode 变更重注册；点名 codec 不偷换。
+  > **2026-10-10 完成（协调器侧）。** `VideoEncoderFactory` 进协调器，`codecsForMode()` 按模式过滤
+  > （证据 + 公告同源）；工厂拒绝 → `ack ok:false`，点名做不到的 codec 不偷换（有专门用例：
+  > 「只实测到 30 的 codec 在 60 被拒，错误信息带模式」）。`isIntraOnly` 不再作为可用性判据。
 - [ ] fake encoder 回归可持续60成功、不可持续拒绝、不点名默认、重配/后台资源互斥及每 id ack。验收：不再用 isIntraOnly 把真实 native codec 一律排除。
+  > 前四项（可持续60成功 / 不可持续拒绝 / 不点名默认 / 每 id ack）已有 fake-encoder 用例；
+  > **重配/后台互斥在 encoder 路径下的专项用例未写**（现有 pause/resume、reconfigure 回归走的是
+  > 默认 mjpeg 工厂，仍然全绿）。native 侧实现仍缺（见 #12/#13/#16）。
 
 ### #6 录像中拍照不打断视频、不改几何
 **依赖：** #5。**文件：** coordinator、still 相机资源层、harness/test。
 - [ ] 原生视频录制中 take_photo 仍发 JPEG，使用当前几何，不停 encoder、不触发 reconfigure。
 - [ ] 照片并发/失败准确 ack，不能污染 video 状态；still 锁放资源层，平台组合可行性另由原生验收证明。
 - [ ] 纯测试与原生真机测试分别留证。验收：不能用 mock 通过代替三 use-case 同时运行。
+  > **2026-10-10 用户确认了「无磁盘」的口径**：目的是**利用内存的速度，实现高帧率、高画质、
+  > 以及不本地存储**，所以这是**性能要求**，不只是隐私要求。**照片路径目前不满足**：
+  > `TakePictureFrameSource` 走 `takePicture()` → 临时**文件** → `readAndDelete`，每帧落盘再删。
+  > 要真正无磁盘，照片必须改走 `ImageStreamFrameSource`（`frame_source.dart` 里仍是
+  > `UnimplementedError` 占位）。见 `docs/adr/0001-dual-mode-capture-decisions.md` §4.2。
 
 ### #23 增加实测状态与可诊断失败信息
 **依赖：** #5、#11。**文件：** agent_status、协调器、状态 UI、native 统计/错误桥接。
-- [ ] 分别显示目标/选中/实际采集/编码/发送 fps，codec、硬件身份、WxH、掉帧、队列及降级原因。
-- [ ] 原生错误传到协调器/UI；不新增未定义的服务端字段、不泄漏凭据；不可达/相机失效仍有可恢复状态。
-- [ ] 验慢链路/启动失败/重启诊断。验收：能区分“相机慢、编码慢、网络慢”。
+- [x] 分别显示目标/选中/实际采集/编码/发送 fps，codec、硬件身份、WxH、掉帧、队列及降级原因。
+  > **2026-10-10 完成（队列除外）。** 新增纯 Dart `lib/src/agent/stream_diagnostics.dart`：
+  > `StreamDiagnostics`（`targetFps` / `selectedFps` / `capturedFps` / `encodedFps` / `sentFps`、
+  > `codec`、`encoderIdentity`、`width`/`height`、`droppedFrames`、`repeatedFrames`、
+  > `degradationReason`）+ `RollingRate`（加权滚动窗口）+ `classifyBottleneck`。
+  > `AgentStatus` 的单个 `fps` 拆成这五个（`fps` 字段已删除）。`VideoEncoder` 增加 `identity`
+  > 接缝（`MjpegEncoder` → `mjpeg.takePicture`；`NativeVideoEncoder` 由平台传入，未知即空）。
+  > 状态条新增两行：五档帧率；`codec · WxH · 硬件身份 · 丢 N · 重 N`。
+  > **`队列` 未做，且是有意不做**：`sendRecordingFrame` 是**同步**的，没有队列可报 ——
+  > 传输侧的真实损失改由「网关拒收」暴露（见下条），而不是一个恒为 0 的字段。
+- [x] 原生错误传到协调器/UI；不新增未定义的服务端字段、不泄漏凭据；不可达/相机失效仍有可恢复状态。
+  > **2026-10-10 完成。** `BackendGateway.sendRecordingFrame` 由 `void` 改为 **`bool`**：
+  > 链路未 live / 超 16 MiB / sink 抛错时返回 `false`，协调器据此计入 `droppedFrames` 而不是
+  > 假装送达 —— 这正是「网络慢」能被区分出来的原因（此前一律计为已发送）。
+  > 网关的 `errors` 流原本就进 `_lastError` 并显示在状态条。诊断**不进** `reportStatus()`
+  > （那是服务端字段），全部留在本地；字段里没有任何凭据。
+- [x] 验慢链路/启动失败/重启诊断。验收：能区分“相机慢、编码慢、网络慢”。
+  > **2026-10-10 完成（门禁 + 变异验证）。** `tool/verify_diagnostics.dart`（新专项，由主入口
+  > 调用）钉住 `RollingRate` 与 `classifyBottleneck`；`checkCoordinator` 用注入时钟 + fake 编码器
+  > 端到端验三种归因：相机慢（采集 < 目标）、编码慢（源序号跳了、AU 没跟上）、网络慢（网关拒收）、
+  > 以及重复帧不计采集。变异验证：采集改回「数到达」挂 4 条；拒收仍计为已发送挂 3 条；
+  > 把「线」提到「相机」之前挂 4 条；滚动窗口不裁剪挂 2 条。
+  > **启动失败 / 重启** 沿用既有 `lastError` 路径（未新增专项）。
 
 ### C. Android：首个完整交付平台
 
@@ -205,18 +322,32 @@
 
 ### G. 发布与交接
 
-### #24 许可、依赖与四端 CI 发布完整性
+### #24 许可、依赖与 CI 发布完整性（发布矩阵三端）
 **依赖：** #15、#18、#20；许可预审随各vendor/平台设计同步，最终发行审查在此收口。
 - [ ] MIT来源/版权与Android许可据真实文件核验；系统编码API和实际分发GPL组件分别审查，不机械塞ffmpeg或改许可。
 - [ ] Android ABI/minSdk/Gradle、Mac架构、Windows DLL、Linux运行依赖/lock/version核查；用户已同意GPL但义务按实际分发判定。
-- [ ] 保留 verify及原生编译门禁、现有四端构建矩阵；产物同 `release/` 且只上传 `release/*`，四端完整性明确核对。
+- [ ] 保留 verify及原生编译门禁、现有构建矩阵；产物同 `release/` 且只上传 `release/*`，各端完整性明确核对。
+  > **2026-10-10：矩阵由四端收窄为三端**（Windows / macOS / Android，用户要求移除 Linux）。
+  > release job 的完整性校验同步从四项改成三项。**verify 与原生编译门禁未动**。
+  > 加回 Linux 的完整清单写在 `docs/release.md`（矩阵条目 + 两个 Linux-only 步骤 + 校验项）。
 - [ ] Linux native功能暂停不自动取消Linux构建；任何阻塞如实记录，不绕过门禁。验收：对应源码、依赖与发布包可追溯。
 
 ### #25 同步方案、状态、验证证据与恢复交接
 **依赖：** #2、#3、#24；进度记录不是等最后才写，每个实现任务同时更新自己的状态。
 - [ ] 每项附代码/commit/实际通过的测试与机器/未验证原因；README、implementation-status、release、Android setup和Linux交接一致。
+  > **2026-10-10 随做随同步（三批都做了，不是最后统一写）**：`README.md`（状态条诊断、速率标定、
+  > 发布矩阵三端、门禁计数以实跑为准）、`docs/implementation-status.md`（#11/#23 行 + 总览 +
+  > 「明确没做的」）、本清单的勾选与注释、`docs/agents/handover.md`（§3.1/§3.2 完成详情、
+  > §4 剩余项、§6 不变量、§7 清单）、`docs/adr/0001`（§4.1.1 与 §五的**带日期修订**）、
+  > `docs/release.md`、`docs/linux-encoded-stream-status.md`。
+  > **仍未闭合**：Android setup 与 release 的端到端证据（要真机/远端 CI）。
 - [ ] 删未经核实的FPS/时长/许可证承诺，原生落地后更新“配置60与实际交付”差距，只给实测平台背书。
+  > **2026-10-10**：许可证承诺已核（camera_desktop = **MIT**，以 LICENSE 原文为准）；
+  > GPL 前提随 ffmpeg 否定而**不再自动成立**（见 `linux-encoded-stream-status.md` 第五节 T11）。
+  > 「配置 60 / 实际交付 5–10」的差距**仍是现状**，未变，仍只对实测平台背书。
 - [ ] 最终whole-branch复核代码、真实样本、打包与剩余限制。验收：后来接手的人不用猜哪些只是计划。
+  > **未做 —— 这是 A 类最后一项**，且它要求分支本身完成（原生端还没落地）。
+  > 现在做只会复核一个半成品；`handover.md` 的 §3/§4 划分已经是它的前置材料。
 
 ---
 

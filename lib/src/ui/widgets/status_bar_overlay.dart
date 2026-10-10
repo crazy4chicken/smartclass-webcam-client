@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../agent/agent_status.dart';
+import '../../agent/stream_diagnostics.dart';
 import '../../backend/backend_gateway.dart';
 
 /// `已连接` / `重连中` / `未连接` / `链路失败`.
@@ -19,6 +20,19 @@ String linkStateLabel(LinkState state) => switch (state) {
   LinkState.backoff => '重连中',
   LinkState.failed => '链路失败',
   LinkState.idle => '未连接',
+};
+
+/// The stage holding the rate down, in the operator's words.
+///
+/// Top-level for the same reason [linkStateLabel] is: the diagnostics screen
+/// and the status strip must not name the same condition differently.
+String bottleneckLabel(PipelineBottleneck bottleneck) => switch (bottleneck) {
+  PipelineBottleneck.idle => '未推流',
+  PipelineBottleneck.unknown => '测量中',
+  PipelineBottleneck.camera => '相机慢',
+  PipelineBottleneck.encoder => '编码慢',
+  PipelineBottleneck.network => '网络慢',
+  PipelineBottleneck.healthy => '正常',
 };
 
 /// Translucent status strip pinned to the top of the kiosk screen.
@@ -41,6 +55,12 @@ class StatusBarOverlay extends StatelessWidget {
 
   /// Key for tests.
   static const Key streamLineKey = Key('status-stream-line');
+
+  /// Key for tests: the five rates, shown only while a stream is running.
+  static const Key rateLineKey = Key('status-rate-line');
+
+  /// Key for tests: codec, geometry and loss counters.
+  static const Key infoLineKey = Key('status-info-line');
 
   @override
   Widget build(BuildContext context) {
@@ -82,6 +102,30 @@ class StatusBarOverlay extends StatelessWidget {
                         fontSize: 12,
                       ),
                     ),
+                    if (status.diagnostics.recording) ...[
+                      const SizedBox(height: 1),
+                      Text(
+                        _rateLine(),
+                        key: rateLineKey,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 11,
+                        ),
+                      ),
+                      const SizedBox(height: 1),
+                      Text(
+                        _infoLine(),
+                        key: infoLineKey,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white60,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
                     if (status.activeStreamId != null) ...[
                       const SizedBox(height: 1),
                       Text(
@@ -129,9 +173,51 @@ class StatusBarOverlay extends StatelessWidget {
 
   /// The capture state is **not** repeated here: the chip on the right already
   /// says it, and duplicating it made the strip say `空闲` twice.
+  ///
+  /// While a stream runs the line names the stage holding the rate down, which
+  /// is the whole point of the diagnostics: "12 fps" is not actionable, "相机慢"
+  /// is. When idle there is no rate to explain, so it shows the two numbers the
+  /// device *would* run at instead.
   String _detailLine() {
-    final parts = <String>[_linkLabel, '${status.fps} fps'];
-    if (status.framesSent > 0) parts.add('已推 ${status.framesSent} 帧');
+    final diagnostics = status.diagnostics;
+    final parts = <String>[_linkLabel];
+    if (diagnostics.recording) {
+      parts.add(bottleneckLabel(diagnostics.bottleneck));
+      if (status.framesSent > 0) parts.add('已推 ${status.framesSent} 帧');
+    } else {
+      parts
+        ..add('目标 ${diagnostics.targetFps} fps')
+        ..add('声明 ${diagnostics.selectedFps} fps');
+    }
+    return parts.join(' · ');
+  }
+
+  /// The five rates, in the order they are produced.
+  ///
+  /// Target and selected first because they are the two the device was *told*;
+  /// the other three are what it is *doing*, and reading them left to right is
+  /// reading the pipeline.
+  String _rateLine() {
+    final d = status.diagnostics;
+    String rate(int? value) => value == null ? '—' : '$value';
+    return '目标 ${d.targetFps} · 声明 ${d.selectedFps} · '
+        '采集 ${rate(d.capturedFps)} · 编码 ${rate(d.encodedFps)} · '
+        '发送 ${rate(d.sentFps)} fps';
+  }
+
+  /// What the stream is, and what it lost.
+  ///
+  /// `重` counts frames that carried no new picture — the signature of a
+  /// producer padding its output, and the one loss a rate alone cannot show.
+  String _infoLine() {
+    final d = status.diagnostics;
+    final parts = <String>[
+      if (d.codec != null) d.codec!.wireName,
+      if (d.width > 0 && d.height > 0) '${d.width}x${d.height}',
+      if (d.encoderIdentity.isNotEmpty) d.encoderIdentity,
+      '丢 ${d.droppedFrames}',
+      '重 ${d.repeatedFrames}',
+    ];
     return parts.join(' · ');
   }
 
