@@ -24,7 +24,7 @@
 | 7 | `…/2026-10-09-recording-correctness-and-native-encoder.md` | ⚠️ **Phase A（T1–T2）+ Phase B 的 Dart 侧（T3–T5、T10）完成**；T6–T9 原生端**未开始**（Linux 暂停）。Phase B 的 ffmpeg/libavcodec 架构已被 ADR 取代 | `87f6fe0` `a438a74` `604316d` `36f55a8` `6ca637c` `f2341e5` |
 | 8 | `…/2026-10-09-linux-encoded-stream.md` | ⏸ **已暂停**（Task 1–4 已写，**未编译**） | `f10f86c` `83df291` |
 | 9 | `…/2026-10-10-dual-mode-capture.md` | 🚧 **已开工**：共享 Dart 层落地（任务清单 #1/#4/#5部分/#10部分/#11部分） | 见第 10 节 |
-| 10 | `…/2026-10-10-dual-mode-task-list.md` | 🚧 **清单 #1/#4/#5(协调器侧)/#10(部分)/#11(模型+缓存+校验) 已完成**，原生平台项未动 | 见第 10 节 |
+| 10 | `…/2026-10-10-dual-mode-task-list.md` | 🚧 **清单 #1/#4/#5(协调器侧)/#10(部分)/#11(模型+缓存+校验)/#23/#9+A2/#4.1 已完成**，原生平台项（#7/#12–#13/#16–#22）未动；#24 的发布矩阵已收窄为三端 | 见第 10 节 |
 
 状态记号：✅ 按计划完成 · ⚠️ 完成但有待验证项 · ⏸ 暂停 · 📋 方案已定未开工 · ⛔ 作废 / 取代 · ❌ 未实现
 
@@ -276,7 +276,7 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | 任务 | 状态 | 内容 |
 | --- | --- | --- |
 | #1 门禁接线 | ✅ 全部 | `runAnnexBChecks` / `runEncodeBudgetChecks` 由主入口调用，不再是只写未运行；新增 `verify_default_mode.dart` 同样接入 |
-| #4 默认模式 | ✅ 2/3 | `default_mode.dart` 唯一选择器；main 的 `openConfig`、协调器 `seedModes`、`adoptInventory` 三处同源。4K→1080p、形状保持（交叉相乘）、帧率只降不升。**未闭合：无证据时的 fps 仍是 60（#26 开放决策）** |
+| #4 默认模式 | ✅ 已完成 | `default_mode.dart` 唯一选择器；main 的 `openConfig`、协调器 `seedModes`、`adoptInventory` 三处同源。4K→1080p、形状保持（交叉相乘）、帧率只降不升。**已闭合**（原「无证据时仍声明 60」见下方 #4.1）。**仍开着的只有 ADR §4.1.1 的 peak-vs-plateau 聚合策略**，不是 #4 本身 |
 | #5 协调器编码工厂 | ✅ 协调器侧 | `VideoEncoderFactory` 替代裸泵路径；`codecsForMode()` 按模式过滤（证据∩公告）；工厂拒绝 → `ack ok:false`；`isIntraOnly` 不再作可用性判据；点名 codec 不偷换 |
 | #10 AU 切分 | ⚠️ 部分 | 多 slice 合并为一个 AU（H.264/HEVC 首 slice 标志）；chunk 边界收口语义文档化；**pending 字节量有上限**（`kMaxPendingBytes` = 1 MiB，超限丢弃并计数 `pendingOverflows`/`droppedPendingBytes`，随后按下一个起始码重新同步）；残缺/非法 slice 头系统用例（无 slice 头、单字节 HEVC NAL、未知类型、相邻起始码、孤立 continuation、后缀 SEI）。**缺：真实样本解码证明（B 类）** |
 | #11 吞吐证据 | ⚠️ 模型层 | `EncodeSample` 证据模型 + `EncodeEvidence` 缓存（版本/指纹/编码器身份，损坏自愈）+ `canServeMode`/`sustainableCodecsAt` 按模式校验 + `SustainedRateMeter`（预热不计、只数新帧、窗口固定）+ `EncodeBudgetProbe` 接缝 + `SharedPrefsEncodeEvidenceStore`。**2026-10-10 补**：`rate_calibration.dart` —— 窗口标定的**判据**（*够长 ⟺ 答案不取决于窗口位置*）、`calibrateRateWindow()`、以及「取最快样本」的审查（`readRateSeries()` 分开报 peak / plateau，`peakOverstatesSustained`）。**缺：插件侧测量管线（没有任何平台实现 `EncodeBudgetProbe`），以及 peak-vs-plateau 的策略决策（ADR §4.1.1，待用户定）** |
@@ -309,11 +309,22 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | Annex B：不计数溢出 | 2 条 |
 | Annex B：把缺 slice 头当 continuation | 1 条（两个单元并成一个） |
 | Annex B：把 HEVC 后缀 SEI 当图像数据 | 10 条 |
+| 速率标定：降频序列判成「上升」 | 2 条 |
+| 速率标定：窗口右端改闭区间（帧被数两次） | 2 条 |
+| 速率标定：不收敛也返回首个候选 | 5 条 |
+| 速率标定：plateau 取整段中位数而非尾部 | 2 条 |
+| 诊断：采集改回「数到达」 | 4 条（`PipelineBottleneck.encoder` 将永不可达） |
+| 诊断：网关拒收仍计为已发送 | 3 条 |
+| 诊断：把「传输」提到「相机」之前判 | 4 条 |
+| 诊断：滚动窗口不裁剪（不衰减） | 2 条 |
 
 **明确没做的**：#7/#12–#13（Android vendor + 原生编码）、#16–#22（Windows/macOS/Linux 原生）、
-#24/#25（发布收口）。这些需要用户跑构建/真机，助手侧无法验收。
+#14 的插件事件桥接一半、#24 的远端验收、#25 的最终 whole-branch 复核。
+这些需要用户跑构建/真机，助手侧无法验收。
 （**#23 实测状态已于 2026-10-10 完成** —— 除状态条 widget 的 `flutter test` 需用户跑。
-**#24 的发布矩阵已收窄为三端**，Linux 移出。）
+**#24 的发布矩阵已收窄为三端**，Linux 移出。
+**#25 的「随做随同步」一直在做**，只剩「最终 whole-branch 复核」—— 它要求分支本身完成，
+原生端落地前只能复核到 Dart 侧，2026-10-10 的 A8 复核覆盖的就是这一层。）
 
 ---
 
@@ -327,7 +338,7 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | 人脸识别 HUD | camera-edge-probe | 设备协议里没有结果来源，移除 |
 | 采集参数进设置界面 | runtime-settings | **有意不做**（注册时 announce） |
 | 原生编码管线 / H.264 / H.265 / 无磁盘通路 | capability-probe | ~~Deferred~~ → **已开工，Linux 端暂停**（见第 8 节） |
-| Windows / macOS / Android 三端原生编码流 | recording-correctness T7–T9 | ❌ 未开始（等 Linux 端编译通过再动） |
+| Windows / macOS / Android 三端原生编码流 | recording-correctness T7–T9 | ❌ 未开始。**落地顺序已改为 Android → Windows → macOS → Linux**（ADR §五，依据是「用户能编能跑」）—— **不再是「等 Linux 编过再动」**，那条旧口径与 Linux 暂停的事实相反 |
 | iOS 构建 | 发布 | 需要付费 Apple Developer 证书 + provisioning profile |
 
 ---
@@ -336,13 +347,13 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 
 | 层 | 状态 | 说明 |
 | --- | --- | --- |
-| `dart run tool/verify_pure.dart` | ✅ **以实跑输出为准**（HEAD `c84120a` 之上新增 Annex B 专项、编码吞吐专项、默认模式专项、持续帧率专项，以及编码通道契约/生产者接线、Annex B pending 上限与残缺 slice 头；最近一次 `passed: 1071, failed: 0`） | 本机**唯一能执行**的验证层。覆盖协议、注册、两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪、地址校验、能力算术、规范顺序、能力缓存、启动编排、构造顺序回归、能力报告、Annex B 切分（含 pending 上限与残缺/非法头）、可持续帧率模型、**原生编码器 Dart 侧契约与启停生命周期** |
+| `dart run tool/verify_pure.dart` | ✅ **以实跑输出为准**（最近一次 `passed: 1173, failed: 0`） | 本机**唯一能执行**的验证层。覆盖协议、注册、两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪、地址校验、能力算术、规范顺序、能力缓存、启动编排、构造顺序回归、能力报告、Annex B 切分（含 pending 上限与残缺/非法头）、可持续帧率模型、**速率标定**、**流诊断**、**原生编码器 Dart 侧契约与启停生命周期**。七个专项 suite（Annex B / 编码吞吐 / 默认模式 / 持续帧率 / 速率标定 / 流诊断 / 编码预算）**全部由主入口 import 并调用**；每个 section 经 `guard()`，抛异常记为 FAIL 而不是中断整轮（2026-10-10 A8 复核加的） |
 | `dart format` 闸门 | ✅ 干净 | `dart format --output=none --set-exit-if-changed lib test tool` |
-| 全量类型检查 | ⚠️ **换了一条路** | `dart analyze` / `flutter analyze` 因同一个管道问题失败（`CreateFile failed 231`）。替代：**Python 驱动 `frontend_server_aot.dart.snapshot` 单次编译**（`%TEMP%\wb_check.py`），只覆盖 Dart，不覆盖任何 C++ |
+| 全量类型检查 | ⚠️ **换了一条路** | `dart analyze` / `flutter analyze` 因同一个管道问题失败（`CreateFile failed 231`）。替代：`python tool/check_compile.py`（**仓库内脚本**，驱动 `frontend_server_aot.dart.snapshot` 单次编译 `lib/` + 全部 `test/`、`tool/`），约 5 分钟。只覆盖 Dart，不覆盖任何 C++；**只编译不运行 —— 编译通过 ≠ 断言通过**（早期用过 `%TEMP%\wb_check.py`，已废弃） |
 | `flutter test` | ⚠️ **用户跑的；3 条陈旧断言已修，待重跑** | 助手跑不了（同上）。2026-10-10 用户跑出 `+354 -3`：`test/agent/agent_coordinator_test.dart` 里三条断言还写着「声明 60」，而 #4.1 之后**无证据时声明的是 `kFpsWithoutEvidence`（5）** —— 门禁那侧改对了、`test/` 这侧漏扫（同一类漏扫的第二次，第一次见 `a28d144`）。已改成具名常量。**另：`AppConfig.defaultFps` 的注释声称「设备声明 60」，也是陈旧的 —— 它是请求帧率，声明值在 `CameraMode.fps`。** |
 | `flutter build` / `run` / Linux C++ 编译 | ❌ **本机完全跑不了** | 两条独立的限制：① 助手 shell 建不了子进程管道；② Linux 的 GStreamer / GTK / `flutter_linux` 头文件在本机不存在。这就是 Linux 端暂停的原因 |
 | 真机 · Android 端到端 | ⚠️ 部分 | 基础链路跑通过一整轮（见计划 4）。**但能力探测这一轮（T8/T9）没在真机上验过**，`61504e9` 的 kiosk 修复也待重出包确认 |
-| CI 出包（三端） | ⚠️ 未确认 | `.github/workflows/release.yml` 已建，Android SDK 与 artifact 路径两个问题已修；远端已打 `v1.0.0`–`v1.0.3`，但运行结论本机看不到（GitHub API 限流、无 `gh`）。**2026-10-10 起 Linux 已移出发布**，校验项由四项变三项（本地 YAML 严格解析通过，远端未跑） |
+| CI 出包（三端） | ⚠️ 未确认 | `.github/workflows/release.yml` 已建，Android SDK 与 artifact 路径两个问题已修；远端已打 `v1.0.0`–`v1.1.2`，但运行结论本机看不到（GitHub API 限流、无 `gh`）。**2026-10-10 起 Linux 已移出发布**，校验项由四项变三项（本地 YAML 严格解析通过，远端未跑）。**另：`ci.yml` 是 2026-10-10 新增的**（分支 push + PR 触发），此前只有 `release.yml`（只认 tag），分支上的提交从来没跑过 gate |
 
 ### 变异测试（「断言有牙」的证据）
 
