@@ -1,6 +1,11 @@
 # 发布（GitHub Actions）
 
-工作流：`.github/workflows/release.yml`。**iOS 不参与**（原因见最后一节）。
+两个工作流：
+
+- **`.github/workflows/ci.yml`** —— 每次分支 push 和每个 PR，只跑 gate（见下）。
+- **`.github/workflows/release.yml`** —— 推 tag 时跑同样的 gate，然后四端并行出包。
+
+**iOS 不参与**（原因见最后一节）。
 
 ## 产出
 
@@ -28,13 +33,46 @@ git push origin v1.0.0
 
 ## 前置：一个 gate
 
-`verify` job 先跑 `dart run tool/verify_pure.dart`（断言数以实跑输出为准）和 `flutter test`，
-全绿才开始构建。任何一项挂了，四个平台都不会出包 —— 这是有意的，
-但如果你确实要在测试红的情况下出包，把 `build.needs: verify` 删掉即可。
+`verify` job 按顺序跑四件事，全绿才开始构建。任何一项挂了，四个平台都不会出包 ——
+这是有意的，但如果你确实要在测试红的情况下出包，把 `build.needs: verify` 删掉即可。
+
+| 步骤 | 命令 | 为什么 |
+| --- | --- | --- |
+| Formatting | `dart format --output=none --set-exit-if-changed lib test tool` | 项目本来就要求每个提交都过；交给 CI 就不用人眼盯 |
+| Analyze | `flutter analyze --no-fatal-infos --no-fatal-warnings` | **只卡 error**，见下 |
+| Pure Dart harness | `dart run tool/verify_pure.dart` | 断言数以实跑输出为准 |
+| Widget and unit tests | `flutter test` | `test/` 下全部 |
+
+**`flutter analyze` 为什么带那两个 flag**：这台机器上从来没跑过 analyzer（助手 shell 跑不了），
+所以 `flutter_lints` 报的 info / warning 里必然有大量早于任何一次改动的历史项。
+让它们卡构建，等于让这条流水线从第一天起就是红的 —— 而没人看的红灯等于没有红灯。
+**历史项清完之后把两个 flag 去掉**，它就变成完整的 analyzer 闸门。
+
+只卡 error 也已经值回票价：`flutter test` 只编译测试能触及的文件，
+一个没人 import 的坏文件只能在这里（或者晚得多的 `flutter build` 里）被发现。
 
 `flutter test` 会自动带上 `test/` 下的新文件，所以新增测试**不需要动流水线**；
-`tool/verify_pure.dart` 同理（它是纯 Dart，不需要 Flutter 引擎，但 job 里已经有 Flutter 了）。
-流水线里唯一写死的路径就是这两个。
+`tool/verify_pure.dart` 同理。流水线里写死的路径只有三处：`lib test tool`（format）、
+`tool/verify_pure.dart`、以及 `flutter test` 的默认范围。
+
+## 分支 / PR 也要跑同样的 gate
+
+`.github/workflows/ci.yml` 在**每次分支 push 和每个 PR** 上跑与上面**完全相同**的四步
+（触发器 `push: branches: ['**']` + `pull_request`；`concurrency` 取消同分支的旧运行）。
+
+**为什么不能只靠 release 那个 gate**：发布是推 tag 触发的，而 tag 可以指向一个从未经过 PR 的
+提交 —— 所以 release 侧不能假设 CI 已经过了，两边都得跑。
+
+**为什么必须有它**：`dart run tool/verify_pure.dart` 只覆盖纯 Dart 那一半，**它看不见 `test/`**
+（那些文件 import `package:flutter`，要引擎，要 runner）。`test/agent/agent_coordinator_test.dart`
+里曾经有三条陈旧断言在本地门禁全绿的情况下活了下来，直到用户手动跑 `flutter test` 才炸出来。
+这个 workflow 存在的意义就是让陈旧断言**在这里红**，而不是在某个人的终端上红。
+
+两个 workflow 的 `verify` 步骤列表**故意逐字相同**，各自在注释里点名对方，
+改一个就要改另一个。这是本文档里唯一一处刻意重复：GitHub Actions 里让 workflow 共享步骤需要
+`workflow_call`，而它会引入跨文件调用语义（`env` 是否继承、`concurrency` / `permissions`
+各自怎么算都要重新确认），代价大于 7 行重复。**`FLUTTER_VERSION` 同样有两份，必须同步**
+（它对应 `.metadata` 里记录的 revision）。
 
 ## 可选：Android 正式签名
 

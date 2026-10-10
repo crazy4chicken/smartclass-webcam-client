@@ -1,0 +1,81 @@
+# The gate on every branch push and every pull request.
+#
+# **Why this is separate from `release.yml`.** A release is cut by pushing a
+# tag, and a tag can point at a commit that never went through a pull request.
+# So the release workflow cannot be the only place these checks live — but the
+# two must run the *same* checks, or a release can pass while the branch does
+# not (or the reverse). The step lists are deliberately identical and each
+# names the other; if you add a step here, add it there too.
+#
+# **Why it is worth having at all.** `dart run tool/verify_pure.dart` covers
+# only the pure-Dart half of this project. It is the one gate that runs in an
+# agent shell, and it cannot see `test/` — those files import `package:flutter`,
+# so they need an engine and therefore a runner. Three stale assertions in
+# `test/agent/agent_coordinator_test.dart` survived a green local gate and only
+# surfaced when the user ran `flutter test` by hand. That is what this workflow
+# exists to stop: a stale assertion should fail here, not on someone's laptop.
+name: CI
+
+on:
+  push:
+    # Branches only. A tag push belongs to `release.yml`; running both would
+    # test and build the same commit twice.
+    branches: ['**']
+  pull_request:
+
+# A newer push to the same branch makes the older run's answer worthless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The same pin as `release.yml`, for the same reason: letting the runner take
+  # "latest stable" would make the result depend on the day it happened to run.
+  # The revision this corresponds to is the one recorded in `.metadata`.
+  FLUTTER_VERSION: '3.47.6'
+
+jobs:
+  verify:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      # The project already requires this of every commit; enforcing it here
+      # means a diff that fails it never has to be read by a human.
+      - name: Formatting
+        run: dart format --output=none --set-exit-if-changed lib test tool
+
+      # **Errors only.** This codebase has never been analyzed on this machine
+      # — the agent shell cannot run `flutter analyze` at all — so `flutter_lints`
+      # almost certainly reports infos and warnings that predate any given
+      # change. Failing on those would turn the first run of this workflow red
+      # for reasons unrelated to it, and a check that is red from day one is a
+      # check nobody reads. Drop the two flags once the existing findings are
+      # cleared, and it becomes the full analyzer gate.
+      #
+      # Even at errors-only it earns its place: `flutter test` compiles only
+      # what the tests reach, so a broken file nothing imports still gets caught
+      # here (and by `flutter build`, far later and per-platform).
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      # Pure Dart, no engine. The one gate the agent shell can run too, so a
+      # failure here is reproducible without a runner.
+      - name: Pure Dart harness
+        run: dart run tool/verify_pure.dart
+
+      - name: Widget and unit tests
+        run: flutter test

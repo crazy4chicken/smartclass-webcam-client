@@ -39,6 +39,11 @@ jobs:
   # Gate. The pure-Dart harness covers the whole protocol stack and needs no
   # engine, so it is the fastest signal; `flutter test` covers the widget and
   # mocktail suites.
+  #
+  # **These are the same steps `ci.yml` runs on every branch push**, and
+  # deliberately so: a tag can point at a commit that never went through a pull
+  # request, so this job cannot assume CI already passed. Keep the two step
+  # lists in step with each other.
   # ---------------------------------------------------------------------------
   verify:
     name: Test
@@ -54,6 +59,15 @@ jobs:
 
       - name: Resolve dependencies
         run: flutter pub get
+
+      - name: Formatting
+        run: dart format --output=none --set-exit-if-changed lib test tool
+
+      # Errors only — see the note in `ci.yml`; the codebase's existing lints
+      # have never been triaged, and a gate that is red from day one is a gate
+      # nobody reads.
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
       - name: Pure Dart harness
         run: dart run tool/verify_pure.dart
