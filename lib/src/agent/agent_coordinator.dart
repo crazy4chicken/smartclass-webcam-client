@@ -8,11 +8,14 @@ import '../backend/unrecognized_command_log.dart';
 import '../capture/camera_backend.dart';
 import '../capture/camera_capabilities.dart';
 import '../capture/camera_provider.dart';
-import '../capture/capability_report.dart';
 import '../capture/camera_resolution.dart';
+import '../capture/capability_report.dart';
 import '../capture/camera_service.dart';
+import '../capture/default_mode.dart';
+import '../capture/encode_budget.dart';
 import '../capture/frame_pump.dart';
 import '../capture/stream_settings.dart';
+import '../capture/video_encoder.dart';
 import '../config/connection_settings.dart';
 import 'agent_status.dart';
 
@@ -21,6 +24,28 @@ import 'agent_status.dart';
 /// A factory rather than an instance because a stream is created per
 /// `start_recording`, and a pump is bound to one stream for its whole life.
 typedef FramePumpFactory = FramePump Function();
+
+/// Builds the encoder for one recording, or null if it cannot make one.
+///
+/// A factory rather than an instance because a stream is created per
+/// `start_recording`, and an encoder is bound to one stream for its whole
+/// life — the server mints a stream id per recording, so nothing here
+/// outlives it.
+///
+/// **Null is a refusal, and it has to mean something.** The coordinator asks
+/// for the codec the command named (or the device's preferred one) and acks
+/// `ok:false` when it gets nothing back. It must never fall through to a
+/// different codec and report success: the server's stream row is already
+/// `active` by then, so a substituted codec leaves an operator with a stream
+/// that looks alive and bytes that are not what was asked for.
+///
+/// Must be cheap to call and must open nothing on refusal, because it is
+/// consulted while a command is being answered.
+typedef VideoEncoderFactory = VideoEncoder? Function({
+  required CaptureCodec codec,
+  required int cameraEnum,
+  required String streamId,
+});
 
 /// Builds a gateway for one set of connection settings.
 ///
@@ -38,16 +63,45 @@ typedef BackendGatewayFactory = BackendGateway Function(
   ConnectionSettings connection,
 );
 
+/// A [VideoEncoderFactory] that serves `mjpeg` and refuses everything else.
+///
+/// This is the floor every platform has: `takePicture()` already produces a
+/// JPEG, and a JPEG *is* an mjpeg frame, so nothing has to be encoded. It is
+/// also the honest refusal for every predictive codec, because producing one
+/// needs a native encoder this build does not have — and saying so is what
+/// lets the coordinator ack `ok:false` instead of quietly sending something
+/// else.
+///
+/// [camera] is a getter rather than a value because the camera is released and
+/// rebuilt on every reconfigure and re-probe; capturing one would hand an
+/// encoder a dead camera service.
+VideoEncoderFactory mjpegEncoderFactory({
+  required FramePumpFactory pumpFactory,
+  required CameraService? Function() camera,
+}) => ({required codec, required cameraEnum, required streamId}) {
+  if (codec != CaptureCodec.mjpeg) return null;
+  final service = camera();
+  if (service == null) return null;
+  return MjpegEncoder(
+    camera: service,
+    cameraEnum: cameraEnum,
+    streamId: streamId,
+    pump: pumpFactory(),
+  );
+};
+
 /// The starting mode for every announced camera.
 ///
-/// Each camera starts at its **own measured ceiling** — the highest resolution
-/// the probe saw it produce — because `resolution` is what the server
-/// snapshots into `metadata`, and "the widest picture this camera gives" is
-/// the honest default. The device still captures from exactly one camera at
-/// one geometry ([CaptureConfig], built at camera 0's ceiling by bootstrap);
-/// a camera that has never been switched to is nevertheless announced at the
-/// mode it *would* run at, and the backend clamps to it via the preset ladder
-/// when it is opened.
+/// One algorithm — [defaultModeFor] — for the initial open, for a re-probe and
+/// for anything else that has to decide what a camera runs at, because three
+/// call sites choosing a resolution independently is how a 4K camera ends up
+/// opened at 4K in one path and 1080p in another, with the announcement
+/// agreeing with only one of them.
+///
+/// The resolution is **capped at 1080p** even on a camera measured higher: 4K
+/// stays in the declared list so an operator can switch to it, but the default
+/// is the largest picture this client can actually sustain end to end. See
+/// [defaultResolutionFor] for why the camera's own shape wins over pixel count.
 ///
 /// A camera the probe could not measure — an empty entry, or an index past
 /// the list — falls back to [CaptureConfig]'s geometry, the same pair the
@@ -58,38 +112,31 @@ typedef BackendGatewayFactory = BackendGateway Function(
 /// announcements are built from and the two must agree on how many cameras
 /// exist. At least one entry always exists: a device whose probe found nothing
 /// still has a camera 0, and `switch_camera(camera=0)` must not be out of range.
+///
+/// [samples] is the device's encoding evidence. With none, [unmeasuredFps] is
+/// announced — see [defaultFpsFor]: a rate is a measurement, and there is no
+/// honest number to infer. `settings.fps` is passed here today, which means a
+/// device with no evidence still declares the configured target; that is the
+/// known, recorded gap this design has not closed, not a decision that it is
+/// fine.
 List<CameraMode> _seedModes({
   required List<CameraCapabilities> capabilities,
   required CaptureConfig config,
   required StreamSettings settings,
+  required List<EncodeSample> samples,
 }) {
   final count = capabilities.isEmpty ? 1 : capabilities.length;
   return <CameraMode>[
     for (var i = 0; i < count; i++)
-      CameraMode(
-        resolution: _seedResolutionFor(capabilities, i, config),
-        fps: settings.fps,
+      defaultModeFor(
+        measured: i < capabilities.length
+            ? capabilities[i]
+            : CameraCapabilities.empty,
+        samples: samples,
+        fallbackResolution: config.resolution,
+        unmeasuredFps: settings.fps,
       ),
   ];
-}
-
-/// The ceiling camera [cameraEnum] was measured at, or [config]'s geometry.
-///
-/// The declared lists are cached with the probe-time fallback mode already
-/// folded in, so `highestResolution` can exceed what a sub-default camera
-/// really produces (a 480p webcam whose declared max reads 1280x720). That is
-/// pre-existing behaviour and harmless: `presetForHeight` clamps to the real
-/// ceiling when the camera opens, exactly as it did when every mode was the
-/// fixed default.
-CameraResolution _seedResolutionFor(
-  List<CameraCapabilities> capabilities,
-  int cameraEnum,
-  CaptureConfig config,
-) {
-  if (cameraEnum < 0 || cameraEnum >= capabilities.length) {
-    return config.resolution;
-  }
-  return capabilities[cameraEnum].highestResolution ?? config.resolution;
 }
 
 /// Owns the camera, the command router and the frame push.
@@ -116,6 +163,8 @@ class AgentCoordinator {
     List<CaptureCodec> announcedCodecs = const <CaptureCodec>[
       CaptureCodec.mjpeg,
     ],
+    List<EncodeSample> encodeSamples = const <EncodeSample>[],
+    VideoEncoderFactory? encoderFactory,
     void Function(String message)? log,
   }) : _gatewayFactory = gatewayFactory,
        _connection = connection,
@@ -132,12 +181,23 @@ class AgentCoordinator {
              ? const <CaptureCodec>[CaptureCodec.mjpeg]
              : announcedCodecs,
        ),
+       _encodeSamples = List<EncodeSample>.unmodifiable(encodeSamples),
        _modes = _seedModes(
          capabilities: capabilities,
          config: config ?? CaptureConfig.defaults(),
          settings: settings ?? StreamSettings.defaults(),
+         samples: encodeSamples,
        ),
-       _log = log;
+       _log = log {
+    // Assigned here rather than in the initializer list because the default
+    // factory has to read `_camera`, and Dart will not let an initializer read
+    // another instance field. The closure stays lazy — the camera is released
+    // and rebuilt on every reconfigure, so capturing one would hand an encoder
+    // a dead service.
+    _encoderFactory =
+        encoderFactory ??
+        mjpegEncoderFactory(pumpFactory: pumpFactory, camera: () => _camera);
+  }
 
   final BackendGatewayFactory _gatewayFactory;
 
@@ -145,6 +205,18 @@ class AgentCoordinator {
   CameraProvider _cameraProvider;
 
   final FramePumpFactory _pumpFactory;
+
+  /// Builds the encoder for one recording. Defaults to the mjpeg floor.
+  late final VideoEncoderFactory _encoderFactory;
+
+  /// What the device measurably held, per codec and geometry.
+  ///
+  /// Evidence, not capability: a codec appears here only because it was seen
+  /// holding a rate. [EncodeEvidence.empty] means nothing was measured, which
+  /// is a different thing from "measured and held nothing" only in how it got
+  /// here — both refuse to narrow the announced list, which is why the device
+  /// still needs the factory's own answer before it acks.
+  List<EncodeSample> _encodeSamples;
 
   /// What each announced camera was measured to accept, indexed by
   /// `camera_enum`. Empty on a device whose probe found nothing, which is not a
@@ -201,8 +273,8 @@ class AgentCoordinator {
   String? _activeStreamId;
   int? _recordingCameraEnum;
 
-  FramePump? _pump;
-  StreamSubscription<CapturedFrame>? _frameSub;
+  VideoEncoder? _encoder;
+  StreamSubscription<EncodedFrame>? _frameSub;
 
   StreamSubscription<DeviceCommand>? _commandSub;
   StreamSubscription<LinkState>? _linkSub;
@@ -245,21 +317,34 @@ class AgentCoordinator {
   List<CaptureCodec> get announcedCodecs =>
       List<CaptureCodec>.unmodifiable(_announcedCodecs);
 
-  /// The codecs this pipeline can actually produce.
+  /// The codecs this device can serve at [mode], in preference order.
   ///
-  /// `CaptureCodec.isIntraOnly` is the test rather than a name comparison: the
-  /// frame pump emits one self-contained picture per frame, so a codec that
-  /// needs inter-frame state cannot be produced no matter what was announced.
-  /// Today that is `mjpeg` and nothing else — see the deferred native-encoder
-  /// work in the plan.
+  /// Two independent filters, and both are needed:
   ///
-  /// Checking this rather than membership of [_announcedCodecs] matters: an
-  /// announcement is a claim, and a wrong claim must not be able to make the
-  /// device ack a codec it cannot encode.
-  List<CaptureCodec> get _producibleCodecs => <CaptureCodec>[
-    for (final codec in _announcedCodecs)
-      if (codec.isIntraOnly) codec,
-  ];
+  /// * **measurement** — [sustainableCodecsAt] keeps only codecs that were
+  ///   seen holding *this* rate at *this* geometry. A codec that held 1080p30
+  ///   is not available at 1080p60, and publishing it as if it were is how a
+  ///   device ends up feeding a stream it cannot sustain. This is why the old
+  ///   `isIntraOnly` test is gone: it excluded every real native codec on the
+  ///   strength of the *codec's* shape rather than the device's evidence, so it
+  ///   could never have let an H.265 stream through even on hardware that
+  ///   measured fine.
+  /// * **announcement** — a codec the device never published is not one the
+  ///   operator was offered, so serving it would mean capturing in a form the
+  ///   server has no record of.
+  ///
+  /// With no evidence at all the measurement filter cannot narrow anything, so
+  /// the announced list passes through unchanged and the *factory* has the last
+  /// word — it is what actually knows whether an encoder exists.
+  List<CaptureCodec> codecsForMode(CameraMode mode) {
+    final measured = sustainableCodecsAt(
+      samples: _encodeSamples,
+      resolution: mode.resolution,
+      fps: mode.fps,
+      candidates: _announcedCodecs,
+    );
+    return _encodeSamples.isEmpty ? _announcedCodecs : measured;
+  }
 
   /// The mode the active camera is at.
   CameraMode get activeMode => _modeFor(_cameraEnum);
@@ -323,6 +408,13 @@ class AgentCoordinator {
   }
 
   StreamSettings get settings => _settings;
+
+  /// The geometry the pipeline is (re)opened at.
+  ///
+  /// Public so a caller can check that what the device captures at and what it
+  /// announced are the same thing — which is exactly the drift this class
+  /// re-derives through `defaultResolutionFor` to prevent.
+  CaptureConfig get captureConfig => _config;
 
   CameraService? get cameraService => _camera;
 
@@ -520,21 +612,23 @@ class AgentCoordinator {
       capabilities: capabilities,
       config: _config,
       settings: _settings,
+      samples: _encodeSamples,
     );
-    // The modes above already claim the fresh ceilings, and `reconfigure`
+    // The modes above already claim the fresh defaults, and `reconfigure`
     // below re-opens camera 0 through `_openCamera(_config)` — so the config
     // has to move with them, or the pipeline would come back up at the old
-    // geometry while the registration announces the new one. Quality is kept:
-    // only the geometry is re-derived.
-    final camera0Ceiling = capabilities.isEmpty
-        ? null
-        : capabilities.first.highestResolution;
-    if (camera0Ceiling != null) {
-      _config = _config.copyWith(
-        width: camera0Ceiling.width,
-        height: camera0Ceiling.height,
-      );
-    }
+    // geometry while the registration announces the new one. The same
+    // selector picks the geometry here, so an opened pipeline and its
+    // announced mode cannot disagree. Quality is kept: only the geometry is
+    // re-derived.
+    _config = _config.copyWithResolution(
+      defaultResolutionFor(
+        measured: capabilities.isEmpty
+            ? CameraCapabilities.empty
+            : capabilities.first,
+        fallback: _config.resolution,
+      ),
+    );
     _camera = null;
     _cameraEnum = 0;
 
@@ -633,12 +727,27 @@ class AgentCoordinator {
       return;
     }
 
-    // Absent means the device's preferred codec, which is the **first** entry
-    // of what was announced — not a hardcoded default that could drift from the
-    // registration.
-    final codec = command.codec ?? _announcedCodecs.first;
-    final producible = _producibleCodecs;
-    if (!producible.contains(codec)) {
+    // The mode this recording runs at, decided once and used for both the
+    // validation below and the encoder's configuration — a codec is only
+    // available *at a mode*, so asking the two questions separately would let
+    // them disagree.
+    final mode = _modeFor(command.cameraEnum);
+
+    // Absent means the device's preferred codec for this mode, which is the
+    // **first** entry of what it can serve — not a hardcoded default that
+    // could drift from the registration.
+    final codecs = codecsForMode(mode);
+    if (codecs.isEmpty) {
+      await _ack(
+        command,
+        ok: false,
+        error:
+            'no codec is available at ${mode.resolution.label} @ ${mode.fps}fps',
+      );
+      return;
+    }
+    final codec = command.codec ?? codecs.first;
+    if (!codecs.contains(codec)) {
       // The server's stream row is already `active` and nothing here rolls it
       // back, so the device has to be honest that it is not feeding it.
       // Encoding something else and acking `ok` would leave an operator with a
@@ -647,9 +756,10 @@ class AgentCoordinator {
         command,
         ok: false,
         error:
-            'codec ${codec.wireName} is not available; '
+            'codec ${codec.wireName} is not available at '
+            '${mode.resolution.label} @ ${mode.fps}fps; '
             'this device can produce '
-            '${producible.map((c) => c.wireName).join('/')}',
+            '${codecs.map((c) => c.wireName).join('/')}',
       );
       return;
     }
@@ -676,28 +786,49 @@ class AgentCoordinator {
       }
     }
 
-    final pump = _pumpFactory();
-    _pump = pump;
+    // Built only now, once the camera is actually on the one the command named:
+    // an encoder holds the camera service, and making one for a camera the
+    // device failed to move to would be building a pipeline pointed at the
+    // wrong sensor.
+    //
+    // The last word belongs to the factory: the announced list and the
+    // measurement are both claims, and this is the thing that knows whether an
+    // encoder actually exists. A refusal here is the one case where "not
+    // available" is not about the mode at all.
+    final encoder = _encoderFactory(
+      codec: codec,
+      cameraEnum: command.cameraEnum,
+      streamId: command.streamId,
+    );
+    if (encoder == null) {
+      await _ack(
+        command,
+        ok: false,
+        error: 'no ${codec.wireName} encoder is available on this device',
+      );
+      return;
+    }
+    _encoder = encoder;
 
-    // Claim the stream BEFORE starting the pump. `_onCapturedFrame` drops any
-    // frame that has no stream to belong to, so a pump that emits while
+    // Claim the stream BEFORE starting the producer. `_onEncodedFrame` drops
+    // any frame that has no stream to belong to, so an encoder that emits while
     // `start()` is still in flight would otherwise lose its first frame — and
     // the server's first segment would silently lose its head.
     _activeStreamId = command.streamId;
     _recordingCameraEnum = command.cameraEnum;
     _captureState = CaptureState.recording;
 
-    _frameSub = pump.frames.listen(_onCapturedFrame);
+    _frameSub = encoder.frames.listen(_onEncodedFrame);
 
     try {
-      await pump.start(
-        cameraEnum: command.cameraEnum,
-        streamId: command.streamId,
-        fps: _settings.fps,
+      await encoder.start(
+        width: mode.resolution.width,
+        height: mode.resolution.height,
+        fps: mode.fps,
         quality: _settings.quality,
       );
     } catch (_) {
-      // The pump never came up, so the stream must not stay claimed. The ack
+      // The encoder never came up, so the stream must not stay claimed. The ack
       // for this failure is written by `handleCommand`'s catch.
       await _stopRecording();
       rethrow;
@@ -895,7 +1026,7 @@ class AgentCoordinator {
 
   // --- media ----------------------------------------------------------------
 
-  void _onCapturedFrame(CapturedFrame frame) {
+  void _onEncodedFrame(EncodedFrame frame) {
     final streamId = _activeStreamId;
     if (streamId == null || _captureState != CaptureState.recording) return;
 
@@ -912,9 +1043,9 @@ class AgentCoordinator {
   }
 
   Future<void> _stopRecording() async {
-    final pump = _pump;
+    final encoder = _encoder;
     final subscription = _frameSub;
-    _pump = null;
+    _encoder = null;
     _frameSub = null;
 
     // Drop the stream identity first, then tear down. `cancel()` and `stop()`
@@ -924,13 +1055,18 @@ class AgentCoordinator {
     _recordingCameraEnum = null;
     _captureState = CaptureState.idle;
 
-    await subscription?.cancel();
-
+    // Stopped before cancelled, for the same reason the encoder's own `stop`
+    // does it that way: a native encoder flushes pictures it is still holding
+    // when told to stop, and cancelling first throws away the tail of the
+    // recording — which the server cannot notice, because it just sees a
+    // recording that ended a few frames early.
     try {
-      await pump?.stop();
+      await encoder?.stop();
     } catch (_) {
-      // Stopping an already-dead pump is not an error worth surfacing.
+      // Stopping an already-dead encoder is not an error worth surfacing.
     }
+
+    await subscription?.cancel();
   }
 
   // --- link -----------------------------------------------------------------

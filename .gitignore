@@ -1,7 +1,9 @@
 # See https://www.dartlang.org/guides/libraries/private-files
 
-# wordbuddy
+# AI Harness
 .workbuddy-ai/
+.zcode/
+.tooling/
 
 # Local tooling shims (a stub Android SDK so the Flutter tool skips its
 # `where aapt` probe on this machine).

@@ -20,6 +20,7 @@ import 'src/capture/camera_plugin_backend.dart';
 import 'src/capture/camera_provider.dart';
 import 'src/capture/camera_resolution.dart';
 import 'src/capture/codec_probe.dart';
+import 'src/capture/default_mode.dart';
 import 'src/capture/frame_pump.dart';
 import 'src/capture/plugin_camera_ranker.dart';
 import 'src/capture/plugin_capability_probe.dart';
@@ -183,20 +184,25 @@ Future<Widget> _startKiosk({
 }) async {
   debugPrint('[camera] inventory: $inventory');
 
-  // Open at camera 0's measured ceiling. `CaptureConfig` is the only source
-  // of truth for what the pipeline is built at, and camera 0's announced mode
-  // must agree with it or the registration would describe a geometry the
-  // device never opened. A probe that found nothing keeps the build default —
-  // the same pair the probe folded into every declared list.
-  final camera0Ceiling = inventory.capabilities.isEmpty
-      ? null
-      : inventory.capabilities.first.highestResolution;
-  final openConfig = camera0Ceiling == null
-      ? captureConfig
-      : captureConfig.copyWith(
-          width: camera0Ceiling.width,
-          height: camera0Ceiling.height,
-        );
+  // Open camera 0 at the **default mode's** resolution — not its measured
+  // ceiling — through the one selector everything else uses. `CaptureConfig`
+  // is the only source of truth for what the pipeline is built at, and camera
+  // 0's announced mode must agree with it or the registration would describe a
+  // geometry the device never opened. Seeding the modes at 1080p while opening
+  // the pipeline at the ceiling would announce one thing and capture another,
+  // which is precisely the "declared resolution ≠ delivered resolution" bug
+  // the selector exists to close. A probe that found nothing keeps the build
+  // default, as the selector's fallback does.
+  final openResolution = defaultResolutionFor(
+    measured: inventory.capabilities.isEmpty
+        ? CameraCapabilities.empty
+        : inventory.capabilities.first,
+    fallback: captureConfig.resolution,
+  );
+  final openConfig = captureConfig.copyWith(
+    width: openResolution.width,
+    height: openResolution.height,
+  );
 
   final cameraProvider = CameraProvider(
     backends: buildBackendChain(cameraOrder: inventory.order),

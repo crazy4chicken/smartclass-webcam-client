@@ -50,13 +50,25 @@ class AccessUnit {
 ///
 /// Two consequences worth knowing:
 ///
-/// * **One slice per picture.** Every VCL NAL is treated as a whole new
-///   picture. That holds here because the encoder runs without B-frames, so no
-///   picture is split into the several VCL NALs that would otherwise have to
-///   be merged back into one unit (the merge needs `first_mb_in_slice == 0` /
-///   HEVC's `first_slice_segment_in_pic_flag`, which this does not parse).
-///   Without B-frames there is also no reordering, so emission order is
-///   presentation order.
+/// * **Several slices can make one picture.** A picture is not "one VCL NAL":
+///   an encoder is free to cut a picture into several slices, and the unit the
+///   wire wants is the picture. So consecutive VCL NALs are merged into one
+///   unit until a NAL that starts a new picture arrives, which is detected
+///   from the slice header's own first-slice flag — H.264's
+///   `first_mb_in_slice == 0`, HEVC's `first_slice_segment_in_pic_flag` (see
+///   [_startsNewPicture]). A picture is therefore exactly what a decoder
+///   consumes at once, whether the encoder used one slice or eight.
+///
+///   This is **not** inferred from the absence of B-frames. No reordering is
+///   one thing; a picture arriving as several NALs is another, and the two are
+///   independent — an encoder that emits no B-frames is still free to slice.
+///   What is *not* implemented is the full H.264 rule (7.4.1.2.4), which also
+///   compares `frame_num`, `pic_parameter_set_id`, `nal_ref_idc`,
+///   `field_pic_flag` and the picture order count. The first-slice flag alone
+///   is enough for every picture a conforming stream contains, and it is
+///   deliberately the conservative test: a continuation NAL with nothing open
+///   starts a picture rather than being dropped, so a stream this misreads
+///   produces a unit a decoder can still start from, not a lost frame.
 /// * **A trailing tail with no VCL in it is dropped.** A stream can end after
 ///   the parameter sets but before the picture they belong to, and there is no
 ///   length prefix in Annex B to tell "complete" from "still arriving" — only
@@ -102,6 +114,12 @@ List<AccessUnit> splitAnnexB(Uint8List bytes, {required CaptureCodec codec}) =>
 ///   exempt — they are held as pending bytes, so a boundary inside a parameter
 ///   set is fine. Chunks are encoder packets here, which is what makes the
 ///   assumption safe.
+///
+///   The same boundary closes a *picture*: a picture whose slices span two
+///   chunks comes out as two units, not one. That is the same constraint
+///   tightened by one level, and it is what lets [add] keep its one guarantee
+///   — that the units it returns from one chunk are the pictures that chunk
+///   held, which is the count [NativeVideoEncoder] checks a packet against.
 /// * **An unclaimed run is dropped.** There is no `flush()`: pending bytes
 ///   only ever reach the caller as part of a unit, so a run the stream ends on
 ///   goes away with the splitter. That is the point — bytes with no picture
@@ -171,14 +189,35 @@ class AnnexBSplitter {
     // the next start code begins — so the pending run plus that picture is one
     // unbroken slice of the input.
     int? pendingStart;
+    // The picture being assembled: where it starts, and whether the slice that
+    // opened it was an IDR. Open pictures are what merge several slices into
+    // one unit; null means no picture is mid-assembly.
+    int? pictureStart;
+    var pictureKey = false;
+
+    void emitPicture(int end) {
+      units.add(
+        AccessUnit(
+          bytes: buffer.sublist(pictureStart!, end),
+          isKeyFrame: pictureKey,
+        ),
+      );
+      pictureStart = null;
+      pictureKey = false;
+    }
+
     for (var k = 0; k < starts.length; k++) {
       final int start = starts[k];
       final int header = headers[k];
       final int end = k + 1 < starts.length ? starts[k + 1] : buffer.length;
+
       // A start code with nothing behind it: the NAL it opens arrives in the
       // next chunk, so there is no type to read and nothing to attribute.
       // Holding the code itself is what makes those bytes land inside it.
+      // Whatever picture was open is complete — the next NAL belongs to
+      // another one, or to nothing.
       if (header >= end) {
+        if (pictureStart != null) emitPicture(start);
         pendingStart ??= start;
         continue;
       }
@@ -186,26 +225,65 @@ class AnnexBSplitter {
       final int type = hevc
           ? (buffer[header] >> 1) & 0x3F
           : buffer[header] & 0x1F;
-      if (_isVcl(type, hevc)) {
-        units.add(
-          AccessUnit(
-            bytes: buffer.sublist(pendingStart ?? start, end),
-            isKeyFrame: _isIdr(type, hevc),
-          ),
-        );
-        pendingStart = null;
-      } else {
+      if (!_isVcl(type, hevc)) {
+        // Out-of-band bytes always end the picture: parameter sets and SEI
+        // sitting after slices describe what comes next, not what came before.
+        if (pictureStart != null) emitPicture(start);
         pendingStart ??= start;
+        continue;
       }
+
+      // A continuation slice extends the picture already open. One that says
+      // it is the first slice — or one with nothing open, which a stream can
+      // only produce by starting mid-picture — opens a new one.
+      final bool startsPicture =
+          pictureStart == null || _startsNewPicture(buffer, header, end, hevc);
+      if (startsPicture) {
+        if (pictureStart != null) emitPicture(start);
+        // The pending run rides in front: whatever a decoder needs before
+        // these slices is inside the same unit as them.
+        pictureStart = pendingStart ?? start;
+        pendingStart = null;
+        pictureKey = _isIdr(type, hevc);
+      }
+      // Anything else is another slice of the open picture: nothing to do, the
+      // unit's end simply moves with the next start code.
     }
-    // Still pending: parameter sets whose picture has not arrived, or the head
-    // of a NAL this chunk ended inside. Carried into the next one; if the
-    // stream ends first, it is dropped with the splitter.
-    if (pendingStart != null) {
+
+    // The chunk boundary closes the picture, same as it closes a NAL: the last
+    // unit is emitted rather than held, so the units this returns are the
+    // pictures this chunk held.
+    if (pictureStart != null) {
+      emitPicture(buffer.length);
+    } else if (pendingStart != null) {
+      // Still pending: parameter sets whose picture has not arrived, or the
+      // head of a NAL this chunk ended inside. Carried into the next one; if
+      // the stream ends first, it is dropped with the splitter.
       _pending = buffer.sublist(pendingStart);
     }
     return units;
   }
+}
+
+/// True when the VCL NAL at [header] opens a new picture.
+///
+/// The slice header says so in its very first bit, which is why no real
+/// parsing is needed:
+///
+/// * H.264 — the header is one byte, and `first_mb_in_slice` follows as an
+///   exp-Golomb code. Zero encodes as the single bit `1`, so the flag is
+///   `first_mb_in_slice == 0` exactly when the next byte's top bit is set.
+/// * HEVC — the header is two bytes, and `first_slice_segment_in_pic_flag` is
+///   the first bit of the byte after it.
+///
+/// [end] bounds the read because a NAL can be one byte long. Such a NAL has no
+/// slice header at all, and claiming it starts a picture is the safe answer:
+/// it becomes a unit a decoder may still start from, rather than bytes folded
+/// into a picture they do not belong to.
+bool _startsNewPicture(Uint8List buffer, int header, int end, bool hevc) {
+  final int at = header + (hevc ? 2 : 1);
+  if (at >= end) return true;
+  return (buffer[at] & 0x80) != 0;
 }
 
 /// True for NAL types that carry picture data: 0-31 in HEVC, 1-5 in H.264

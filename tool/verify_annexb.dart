@@ -19,12 +19,18 @@ import 'verify_pure.dart';
 // --- NAL builders -----------------------------------------------------------
 //
 // A NAL is `start code | header | payload`. Start codes are 4-byte
-// `00 00 00 01` by default, 3-byte `00 00 01` with `three: true`. Payloads are
-// filler: this splitter never looks past the first header byte, but distinct
-// bytes make a wrong slice visible in the byte comparisons instead of hiding
-// behind a length check. No payload ends in 0x00, which the real stream
-// guarantees too (a NAL may not end in a zero byte) — otherwise a 3-byte start
-// code could be misread as a 4-byte one.
+// `00 00 00 01` by default, 3-byte `00 00 01` with `three: true`.
+//
+// Payloads are filler **except their first byte when the NAL is a slice**,
+// because the splitter reads that one: its top bit is the slice header's
+// "this slice opens a picture" flag — H.264's `first_mb_in_slice == 0`,
+// HEVC's `first_slice_segment_in_pic_flag`. So slice fixtures below start at
+// 0x80 (opens a picture) or below (continues the one before it), and the
+// [slice] / [cont] pair is what the multi-slice checks are built from.
+// Distinct bytes elsewhere make a wrong slice visible in the byte comparisons
+// instead of hiding behind a length check. No payload ends in 0x00, which the
+// real stream guarantees too (a NAL may not end in a zero byte) — otherwise a
+// 3-byte start code could be misread as a 4-byte one.
 
 List<int> nal(
   List<int> header, [
@@ -55,16 +61,22 @@ const List<int> hevcSei = <int>[0x4E, 0x01]; // type 39, prefix SEI
 
 final List<int> sps = nal(h264Sps, <int>[0x11, 0x22]);
 final List<int> pps = nal(h264Pps, <int>[0x33, 0x44]);
-final List<int> idr = nal(h264Idr, <int>[0x55, 0x66]);
-final List<int> slice = nal(h264Slice, <int>[0x77, 0x88]);
+final List<int> idr = nal(h264Idr, <int>[0x88, 0x66]);
+final List<int> slice = nal(h264Slice, <int>[0x9A, 0x88]);
+
+/// A second slice of the picture [idr] opened: top bit clear.
+final List<int> idrCont = nal(h264Idr, <int>[0x55, 0x66]);
 final List<int> aud = nal(h264Aud, <int>[0x09, 0x0A]);
 final List<int> sei = nal(h264Sei, <int>[0x0B, 0x0C]);
 
 final List<int> hSps = nal(hevcSps, <int>[0x11, 0x22]);
 final List<int> hPps = nal(hevcPps, <int>[0x33, 0x44]);
 final List<int> hVps = nal(hevcVps, <int>[0x0D, 0x0E]);
-final List<int> hIdr = nal(hevcIdr, <int>[0x55, 0x66]);
-final List<int> hSlice = nal(hevcSlice, <int>[0x77, 0x88]);
+final List<int> hIdr = nal(hevcIdr, <int>[0x80, 0x66]);
+final List<int> hSlice = nal(hevcSlice, <int>[0xC0, 0x88]);
+
+/// A second slice of the HEVC picture [hIdr] opened: top bit clear.
+final List<int> hIdrCont = nal(hevcIdr, <int>[0x55, 0x66]);
 
 // --- checks -----------------------------------------------------------------
 
@@ -88,7 +100,7 @@ void checkThreeByteStartCodes() {
   final List<int> three = <int>[
     ...nal(h264Sps, <int>[0x11, 0x22], true),
     ...nal(h264Pps, <int>[0x33, 0x44], true),
-    ...nal(h264Idr, <int>[0x55, 0x66], true),
+    ...nal(h264Idr, <int>[0x88, 0x66], true),
   ];
   final Uint8List stream = u8(three);
   final List<AccessUnit> units = splitAnnexB(stream, codec: CaptureCodec.h264);
@@ -107,8 +119,8 @@ void checkMixedStartCodes() {
   section('h264, mixed 4-byte and 3-byte start codes');
   final List<int> spsNal = nal(h264Sps, <int>[0x11, 0x22]); // 4-byte
   final List<int> ppsNal = nal(h264Pps, <int>[0x33, 0x44], true); // 3-byte
-  final List<int> idrNal = nal(h264Idr, <int>[0x55, 0x66]); // 4-byte
-  final List<int> sliceNal = nal(h264Slice, <int>[0x77, 0x88], true); // 3-byte
+  final List<int> idrNal = nal(h264Idr, <int>[0x88, 0x66]); // 4-byte
+  final List<int> sliceNal = nal(h264Slice, <int>[0x9A, 0x88], true); // 3-byte
   final Uint8List stream = u8(<int>[
     ...spsNal,
     ...ppsNal,
@@ -138,6 +150,141 @@ void checkTwoConsecutiveVcl() {
   check('non-IDR is not', !units[1].isKeyFrame);
   eqBytes('first unit is the IDR NAL', units[0].bytes, idr);
   eqBytes('second unit is the slice NAL', units[1].bytes, slice);
+}
+
+void checkMultiSliceIsOnePicture() {
+  section('a picture cut into several slices');
+
+  // The case the old "one VCL NAL is one picture" rule got wrong. Two slices
+  // of one picture must reach the server as one unit: it stores frame bodies
+  // concatenated with no container, so a half-picture is not a frame a decoder
+  // can consume, and there is nothing downstream that would notice.
+  final Uint8List stream = u8(<int>[...sps, ...pps, ...idr, ...idrCont]);
+  final List<AccessUnit> units = splitAnnexB(stream, codec: CaptureCodec.h264);
+  eq('two slices of one picture: one unit', units.length, 1);
+  // Guarded per-assertion rather than with one early return: these cases are
+  // independent, and a single `return` would hide how many of them a broken
+  // splitter gets wrong.
+  if (units.length == 1) {
+    check('and it is the key frame it opened as', units[0].isKeyFrame);
+    eqBytes('carrying every NAL, in order', units[0].bytes, stream);
+  }
+
+  // A third slice changes nothing; neither does a slice of a non-IDR picture.
+  final List<AccessUnit> three = splitAnnexB(
+    u8(<int>[...idr, ...idrCont, ...idrCont]),
+    codec: CaptureCodec.h264,
+  );
+  eq('three slices: still one unit', three.length, 1);
+
+  // Two pictures, each one slice: both open a picture, so two units.
+  final List<AccessUnit> twoPictures = splitAnnexB(
+    u8(<int>[...idr, ...slice]),
+    codec: CaptureCodec.h264,
+  );
+  eq('two one-slice pictures: two units', twoPictures.length, 2);
+
+  // The flag is per slice, so a continuation ends the picture before it:
+  // [picture A][slice of B][slice of B] is two units, not one.
+  final List<AccessUnit> thenSliced = splitAnnexB(
+    u8(<int>[...slice, ...idr, ...idrCont]),
+    codec: CaptureCodec.h264,
+  );
+  eq('a sliced picture after a plain one: two units', thenSliced.length, 2);
+  if (thenSliced.length == 2) {
+    eqBytes('the plain picture is alone', thenSliced[0].bytes, slice);
+    eqBytes('the sliced one is whole', thenSliced[1].bytes, <int>[
+      ...idr,
+      ...idrCont,
+    ]);
+  }
+
+  // Out-of-band NALs after a picture's slices belong to the *next* picture,
+  // so they close the one before them rather than being folded into it.
+  final List<AccessUnit> separated = splitAnnexB(
+    u8(<int>[...idr, ...idrCont, ...sei, ...slice]),
+    codec: CaptureCodec.h264,
+  );
+  eq('a SEI between two pictures: two units', separated.length, 2);
+  if (separated.length == 2) {
+    eqBytes('the SEI starts the second unit', separated[1].bytes, <int>[
+      ...sei,
+      ...slice,
+    ]);
+  }
+}
+
+void checkMultiSliceHevc() {
+  section('a picture cut into several slices, hevc');
+
+  // Same rule, one byte further in: the HEVC NAL header is two bytes, so
+  // `first_slice_segment_in_pic_flag` is the third byte's top bit.
+  final Uint8List stream = u8(<int>[
+    ...hVps,
+    ...hSps,
+    ...hPps,
+    ...hIdr,
+    ...hIdrCont,
+  ]);
+  final List<AccessUnit> units = splitAnnexB(stream, codec: CaptureCodec.h265);
+  eq('hevc: two slices of one picture: one unit', units.length, 1);
+  if (units.length == 1) {
+    check('hevc: and it is a key frame', units[0].isKeyFrame);
+    eqBytes('hevc: carrying every NAL', units[0].bytes, stream);
+  }
+
+  final List<AccessUnit> twoPictures = splitAnnexB(
+    u8(<int>[...hIdr, ...hSlice]),
+    codec: CaptureCodec.h265,
+  );
+  eq('hevc: two one-slice pictures: two units', twoPictures.length, 2);
+}
+
+void checkSliceFlagsAcrossChunks() {
+  section('a sliced picture does not cross a chunk boundary');
+
+  // A chunk must hold whole pictures, same as it must hold whole NALs. The
+  // boundary closes the picture rather than leaving it open — which is what
+  // lets `add` promise that the units it returns are the pictures *this chunk*
+  // carried, the count the native encoder checks a packet against. A picture
+  // spread over two packets would report zero from the first and one from the
+  // second and be dropped whole.
+  final AnnexBSplitter whole = AnnexBSplitter(codec: CaptureCodec.h264);
+  final List<AccessUnit> together = whole.add(u8(<int>[...idr, ...idrCont]));
+  eq('both slices in one chunk: one unit', together.length, 1);
+
+  final AnnexBSplitter split = AnnexBSplitter(codec: CaptureCodec.h264);
+  final List<AccessUnit> first = split.add(u8(idr));
+  eq('the first slice alone closes its picture', first.length, 1);
+  if (first.length == 1)
+    eqBytes('carrying only that slice', first[0].bytes, idr);
+  final List<AccessUnit> second = split.add(u8(idrCont));
+  eq('the second slice is a picture of its own', second.length, 1);
+  if (second.length == 1) {
+    eqBytes('carrying only its own bytes', second[0].bytes, idrCont);
+  }
+
+  // Inside one chunk a parameter-set run still waits for its picture, so the
+  // merge must not make a chunk that is nothing but slices emit early.
+  final AnnexBSplitter withSets = AnnexBSplitter(codec: CaptureCodec.h265);
+  eq(
+    'hevc: parameter sets claim nothing',
+    withSets.add(u8(<int>[...hVps, ...hSps])).length,
+    0,
+  );
+  final List<AccessUnit> sliced = withSets.add(
+    u8(<int>[...hPps, ...hIdr, ...hIdrCont]),
+  );
+  eq('hevc: the sliced picture claims them all', sliced.length, 1);
+  if (sliced.length == 1) {
+    eqBytes('into one unit, in order', sliced[0].bytes, <int>[
+      ...hVps,
+      ...hSps,
+      ...hPps,
+      ...hIdr,
+      ...hIdrCont,
+    ]);
+  }
 }
 
 void checkOutOfBandAttachesToNextUnit() {
@@ -181,7 +328,7 @@ void checkHevcNonIdr() {
   section('hevc non-IDR VCL');
   final Uint8List stream = u8(<int>[
     ...hSlice,
-    ...nal(hevcSliceN, <int>[0x99, 0xAA]),
+    ...nal(hevcSliceN, <int>[0x80, 0xAA]),
   ]);
   final List<AccessUnit> units = splitAnnexB(stream, codec: CaptureCodec.h265);
   eq('two units', units.length, 2);
@@ -192,7 +339,7 @@ void checkHevcNonIdr() {
   // The other IDR type, 20, must still count as one.
   final List<AccessUnit> radl = splitAnnexB(
     u8(<int>[
-      ...nal(hevcIdrRadl, <int>[0x55, 0x66]),
+      ...nal(hevcIdrRadl, <int>[0x80, 0x66]),
     ]),
     codec: CaptureCodec.h265,
   );
@@ -434,6 +581,9 @@ void runAnnexBChecks() {
   checkThreeByteStartCodes();
   checkMixedStartCodes();
   checkTwoConsecutiveVcl();
+  checkMultiSliceIsOnePicture();
+  checkMultiSliceHevc();
+  checkSliceFlagsAcrossChunks();
   checkOutOfBandAttachesToNextUnit();
   checkHevcKeyUnit();
   checkHevcNonIdr();

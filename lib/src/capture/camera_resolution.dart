@@ -59,6 +59,15 @@ class CaptureConfig {
         quality: quality ?? this.quality,
       );
 
+  /// [copyWith] for a whole resolution, so a caller cannot pass a width
+  /// without a matching height and end up with a geometry nobody chose.
+  CaptureConfig copyWithResolution(CameraResolution resolution) =>
+      CaptureConfig(
+        width: resolution.width,
+        height: resolution.height,
+        quality: quality,
+      );
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||

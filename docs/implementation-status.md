@@ -23,7 +23,8 @@
 | 6 | `…/2026-10-07-camera-capability-probe.md` | ✅ **已实现（T1–T9）** | `23e7495`…`8be70c7`，`8c2b709` `dbd1135` `61504e9` |
 | 7 | `…/2026-10-09-recording-correctness-and-native-encoder.md` | ⚠️ **Phase A 完成（T1–T4）、T5 完成**；Phase B 原生端进行中 | `87f6fe0` `a438a74` `604316d` `36f55a8` `6ca637c` `f2341e5` |
 | 8 | `…/2026-10-09-linux-encoded-stream.md` | ⏸ **已暂停**（Task 1–4 已写，**未编译**） | `f10f86c` `83df291` |
-| 9 | `…/2026-10-10-dual-mode-capture.md` | 📋 **方案已定，未开工** | — |
+| 9 | `…/2026-10-10-dual-mode-capture.md` | 🚧 **已开工**：共享 Dart 层落地（任务清单 #1/#4/#5部分/#10部分/#11部分） | 见第 10 节 |
+| 10 | `…/2026-10-10-dual-mode-task-list.md` | 🚧 **清单 #1/#4/#5(协调器侧)/#10(部分)/#11(模型+缓存+校验) 已完成**，原生平台项未动 | 见第 10 节 |
 
 状态记号：✅ 按计划完成 · ⚠️ 完成但有待验证项 · ⏸ 暂停 · 📋 方案已定未开工 · ⛔ 作废 / 取代 · ❌ 未实现
 
@@ -256,6 +257,36 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 
 ---
 
+### 10. `2026-10-10-dual-mode-task-list.md` — 🚧 共享 Dart 层已落地
+
+**现行决策入口是 `docs/adr/0001-dual-mode-capture-decisions.md`**，本节只记进度。
+
+2026-10-10 完成的项（全部有 `dart run tool/verify_pure.dart` 断言 + 变异验证，
+`passed: 945, failed: 0`）：
+
+| 任务 | 状态 | 内容 |
+| --- | --- | --- |
+| #1 门禁接线 | ✅ 全部 | `runAnnexBChecks` / `runEncodeBudgetChecks` 由主入口调用，不再是只写未运行；新增 `verify_default_mode.dart` 同样接入 |
+| #4 默认模式 | ✅ 2/3 | `default_mode.dart` 唯一选择器；main 的 `openConfig`、协调器 `seedModes`、`adoptInventory` 三处同源。4K→1080p、形状保持（交叉相乘）、帧率只降不升。**未闭合：无证据时的 fps 仍是 60（#26 开放决策）** |
+| #5 协调器编码工厂 | ✅ 协调器侧 | `VideoEncoderFactory` 替代裸泵路径；`codecsForMode()` 按模式过滤（证据∩公告）；工厂拒绝 → `ack ok:false`；`isIntraOnly` 不再作可用性判据；点名 codec 不偷换 |
+| #10 AU 切分 | ⚠️ 部分 | 多 slice 合并为一个 AU（H.264/HEVC 首 slice 标志）；chunk 边界收口语义文档化。**缺：pending 上限、真实样本解码证明** |
+| #11 吞吐证据 | ⚠️ 模型层 | `EncodeSample` 证据模型 + `EncodeEvidence` 缓存（版本/指纹/编码器身份，损坏自愈）+ `canServeMode`/`sustainableCodecsAt` 按模式校验 + `SharedPrefsEncodeEvidenceStore`。**缺：插件侧测量管线（没有任何平台真正写入它）** |
+
+**变异验证记录**（改坏实现 → 确认断言变红）：
+
+| 变异 | 挂 |
+| --- | --- |
+| Annex B IDR 判定改坏 | 15 条 |
+| 编码吞吐去掉「候选 ≤ 实测」 | 10 条 |
+| Annex B 退回「一个 VCL = 一幅图」 | 7 条 |
+| 协调器退回「可用性不按模式」 | 4 条 |
+| 默认模式退回「取实测上限」 | 8 条（含 main/adoptInventory 打开 4K） |
+
+**明确没做的**：#7/#12–#13（Android vendor + 原生编码）、#16–#22（Windows/macOS/Linux 原生）、
+#23（实测状态 UI）、#24/#25（发布收口）。这些需要用户跑构建/真机，助手侧无法验收。
+
+---
+
 ## 三、明确没做的（汇总）
 
 | 项 | 所属 | 性质 |
@@ -275,7 +306,7 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 
 | 层 | 状态 | 说明 |
 | --- | --- | --- |
-| `dart run tool/verify_pure.dart` | ✅ **705 项断言全绿**（HEAD `83df291`） | 本机**唯一能执行**的验证层。覆盖协议、注册、两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪、地址校验、能力算术、规范顺序、能力缓存、启动编排、构造顺序回归、能力报告、Annex B 切分、可持续帧率模型、**原生编码器 Dart 侧契约** |
+| `dart run tool/verify_pure.dart` | ✅ **以实跑输出为准**（HEAD `c84120a` 之上新增 Annex B 专项、编码吞吐专项、默认模式专项；最近一次 `passed: 940, failed: 0`） | 本机**唯一能执行**的验证层。覆盖协议、注册、两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪、地址校验、能力算术、规范顺序、能力缓存、启动编排、构造顺序回归、能力报告、Annex B 切分、可持续帧率模型、**原生编码器 Dart 侧契约** |
 | `dart format` 闸门 | ✅ 干净 | `dart format --output=none --set-exit-if-changed lib test tool` |
 | 全量类型检查 | ⚠️ **换了一条路** | `dart analyze` / `flutter analyze` 因同一个管道问题失败（`CreateFile failed 231`）。替代：**Python 驱动 `frontend_server_aot.dart.snapshot` 单次编译**（`%TEMP%\wb_check.py`），只覆盖 Dart，不覆盖任何 C++ |
 | `flutter test` | ✅ **用户跑的，全绿** | 助手跑不了（同上）。`+355 -2` 的两个失败（`a28d144` 前）已修并在 `a28d144` 之后重跑通过 |
@@ -298,6 +329,10 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | 跳过分辨率校验 | 挂 1 条 |
 | 启动时不读能力缓存 | 挂 2 条 |
 | 保留枚举顺序（不做规范排序） | 挂 5 条 |
+| Annex B：把 IDR 判定改坏 | 挂 15 条（证明专项检查真的在跑，而非只写未运行） |
+| 编码吞吐：去掉「候选 ≤ 实测上限」 | 挂 10 条 |
+| Annex B：退回「一个 VCL = 一幅图」 | 挂 7 条 |
+| 协调器：退回「codec 可用性不按模式判定」 | 挂 4 条 |
 | 跳过探测失败的退化 | 挂 3 条 |
 | `adoptInventory` 改回 `start()` | 挂 5 条 |
 | `adoptInventory` 不先释放摄像头 | 挂 1 条 |

@@ -30,7 +30,7 @@ Windows / macOS / Linux / iOS / Android 单代码库覆盖。桌面三端由 `ca
 提供（Media Foundation / AVFoundation / GStreamer+V4L2），移动端走 `camera_android_camerax`
 与 `camera_avfoundation`。**不使用 `camera_windows`**。
 
-`camera_desktop` 已 **vendor 进仓库**（`packages/camera_desktop/`，上游 2.0.0，BSD-3），
+`camera_desktop` 已 **vendor 进仓库**（`packages/camera_desktop/`，上游 2.0.0，**MIT**），
 因为高帧率只能从插件自己的采集管线里出来，而改那条管线必须碰插件源码。
 fork 的边界写在 `packages/camera_desktop/VENDORED.md`。
 
@@ -137,8 +137,12 @@ curl -X POST http://127.0.0.1:8080/api/devices \
 
 ```bash
 flutter test
-dart run tool/verify_pure.dart    # 586 项断言的纯 Dart 自检，不需要 Flutter 引擎
+dart run tool/verify_pure.dart    # 纯 Dart 自检，不需要 Flutter 引擎
 ```
+
+断言数**以实跑输出为准**（文档不写静态计数，那会立刻过期）；最近一次为
+`passed: 940, failed: 0`。专项检查（Annex B、编码吞吐、默认模式）都由主入口调用，
+不是只写未运行的文件。
 
 端到端联调（真机 × 真服务端）见 `docs/superpowers/plans/2026-10-04-android-server-e2e-test.md`，
 工具在 `tool/e2e/`：
@@ -175,7 +179,10 @@ AgentCoordinator ── 命令驱动的状态机：每条命令都 ack，没收�
         │        registration_client ── GET /ws/register（带 JSON body）
         │        health_probe ── GET /healthz（「测试连接」，无鉴权、不消耗 ticket）
         │      MockBackendGateway（离线用，下发真实协议词汇）
-        └── CameraProvider ── CameraBackend ── CameraService ── FramePump ── VideoEncoder
+        └── CameraProvider ── CameraBackend ── CameraService ── VideoEncoder
+               VideoEncoderFactory ── 每条 start_recording 建一个；拒绝 = ack ok:false
+                 MjpegEncoder ── 走 FramePump + takePicture（每平台的下限）
+                 NativeVideoEncoder ── 插件内已编码，Dart 只切 access unit
                CameraPluginBackend (camera + camera_desktop, 5 平台)
                  ├── cameraOrder ── announced enum → 物理下标的置换，**只在这个文件里存在**
                  ├── serial_lock ── 串行化「相机重建」与「抓帧」两条互斥路径
@@ -184,6 +191,9 @@ AgentCoordinator ── 命令驱动的状态机：每条命令都 ack，没收�
 摄像头能力探测（纯 Dart 的部分能在 VM 上直接跑）
   app/capability_bootstrap ── ensureInventory：枚举 → 排序 → 探测 → 缓存
   capture/camera_capabilities ── CameraCapabilities / CameraMode / declaredCapabilities
+  capture/default_mode ── defaultModeFor：1080p 封顶 + 同形状 + 帧率只降不升（唯一入口）
+  capture/encode_budget ── EncodeSample / 可持续速率 / 按模式 codec / EncodeEvidence 缓存
+  capture/annexb ── AnnexBSplitter：多 slice 合并为同一 access unit
   capture/camera_order ── canonicalCameraOrder（rear → external → front，组内按像素降序）
   capture/capability_probe ── CapabilityProbe 接口 + kProbeFramerates
   capture/plugin_camera_ranker ── 每个摄像头开一次拿上限
@@ -237,16 +247,36 @@ config (纯 Dart，不依赖 Flutter)
 
 ### 编码选择
 
-偏好链 `h265 → h264 → mjpeg`，由 `CodecProbe` 实测决定，选择逻辑在 `CodecSelector`。
+偏好链 `h265 → h264 → mjpeg`，**按模式**判定，不是按设备：某个 codec 在 30fps 可用
+不表示它在当前 60fps 可用（`canServeMode` / `sustainableCodecsAt`）。
 **当前实际落在 `mjpeg`**，这不是妥协：服务端对 `mjpeg` 的定义就是"每个 `recording.frame`
 一张 JPEG"，而 `takePicture()` 产出的正好是 JPEG，天然满足"需要时序信息"。
 
-`h265`/`h264` **正在做，方式是原生编码，不是 ffmpeg**：`takePicture()` 每帧都是一次完整
-拍照 + JPEG 编码，1080p 上限约 5–10 fps —— 把编码器接在它下游只换编码、不换上限。
+录制走 `VideoEncoder`（`MjpegEncoder` 或原生实现），由协调器的 `VideoEncoderFactory`
+创建；工厂拒绝某个 codec 时协调器 `ack ok:false`，**不偷换 codec 后报成功**。
+
+`h265`/`h264` **正在做，方式是原生编码，不是 ffmpeg**（ffmpeg 方案已否定：命令式 API、
+GPL、救不了帧率，因为瓶颈在采集）：`takePicture()` 每帧都是一次完整拍照 + JPEG 编码，
+1080p 上限约 5–10 fps —— 把编码器接在它下游只换编码、不换上限。
 所以帧必须在插件自己的管线里编码完再进 Dart（原始帧不进 Dart、不落盘）。
 Dart 侧契约 `lib/src/capture/native_video_encoder.dart` 已完成并有断言覆盖；
 Linux 的 GStreamer 分支已写完但**尚未编译**，现暂停。
 进度与交接见 `docs/linux-encoded-stream-status.md`。
+
+### 默认模式：1080p 封顶，先降帧率
+
+`defaultModeFor()`（`lib/src/capture/default_mode.dart`）是**唯一**决定"摄像头以什么模式
+打开"的地方，初始打开、重检测、`adoptInventory` 都走它 —— 三处各算一次必然漂。
+
+- 分辨率取**实测**值里 ≤1080p 且**与摄像头自身形状相同**的最大者（4K 摄像头默认 1080p，
+  4K 仍写进声明；720p 摄像头默认 720p）。形状用交叉相乘判断，**不按像素总数猜几何**。
+- 帧率取阶梯里 ≤ 实测上限且 ≤ 60 的最高档，**只向下取整**。
+- **无实测证据时不推断**：由调用方显式传入 `unmeasuredFps`。目前传的是
+  `StreamSettings.fps`（= 60），即"声明 60 但可能只交付 5–10"的缺口仍然存在，
+  这是**已知未修复状态**，不是验收豁免。
+
+现行决策入口是 **`docs/adr/0001-dual-mode-capture-decisions.md`**；旧计划里与之冲突的
+假设已被取代，不要照抄。
 
 ### 存储格式决定了不能用 mp4
 
@@ -259,7 +289,7 @@ Linux 的 GStreamer 分支已写完但**尚未编译**，现暂停。
 
 - `lib/src/backend`、`lib/src/capture`（非插件部分）、`lib/src/config` 与
   `lib/src/app/capability_bootstrap.dart` **不依赖 Flutter**，
-  所以能在纯 Dart VM 上直接跑 `tool/verify_pure.dart`（**705 项断言**，覆盖协议、注册、
+  所以能在纯 Dart VM 上直接跑 `tool/verify_pure.dart`（**断言数以实跑输出为准**，覆盖协议、注册、
   两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪与尺寸读取、能力模型与声明、
   摄像头排序、能力缓存与 `ensureInventory` 编排、地址校验与设置解析、Annex B 切分、
   可持续帧率模型、原生编码器的 Dart 侧契约）。
@@ -542,7 +572,7 @@ Android 9+ 默认禁止明文流量，而网关是 `ws://`，不开的话连接�
 
 助手侧的三条替代验证路径：
 
-1. `dart run tool/verify_pure.dart` —— 进程内执行，**705 项断言**。
+1. `dart run tool/verify_pure.dart` —— 进程内执行，**断言数以实跑输出为准**。
 2. 用 Python 直接驱动 `frontend_server_aot` 做单次编译（等价于类型检查，只覆盖 Dart）。
 3. **真机联调**：`flutter run` 起不来，但**已经装好的 debug APK 可以完全用 adb 驱动** ——
    详见 `docs/android-setup.md` 的「不用 flutter run 也能驱动真机」。

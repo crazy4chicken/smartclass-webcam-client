@@ -28,7 +28,7 @@ git push origin v1.0.0
 
 ## 前置：一个 gate
 
-`verify` job 先跑 `dart run tool/verify_pure.dart`（586 项断言）和 `flutter test`，
+`verify` job 先跑 `dart run tool/verify_pure.dart`（断言数以实跑输出为准）和 `flutter test`，
 全绿才开始构建。任何一项挂了，四个平台都不会出包 —— 这是有意的，
 但如果你确实要在测试红的情况下出包，把 `build.needs: verify` 删掉即可。
 

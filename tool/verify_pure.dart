@@ -36,6 +36,7 @@ import 'package:webcam_client/src/capture/camera_capabilities.dart';
 import 'package:webcam_client/src/capture/camera_order.dart';
 import 'package:webcam_client/src/capture/camera_provider.dart';
 import 'package:webcam_client/src/capture/camera_resolution.dart';
+import 'package:webcam_client/src/capture/default_mode.dart';
 import 'package:webcam_client/src/capture/camera_service.dart';
 import 'package:webcam_client/src/capture/capability_probe.dart';
 import 'package:webcam_client/src/capture/capability_report.dart';
@@ -47,10 +48,20 @@ import 'package:webcam_client/src/capture/native_video_encoder.dart';
 import 'package:webcam_client/src/capture/resolution_selector.dart';
 import 'package:webcam_client/src/capture/serial_lock.dart';
 import 'package:webcam_client/src/capture/stream_settings.dart';
+import 'package:webcam_client/src/capture/encode_budget.dart';
 import 'package:webcam_client/src/capture/video_encoder.dart';
 import 'package:webcam_client/src/config/app_config.dart';
 import 'package:webcam_client/src/config/capabilities_store.dart';
 import 'package:webcam_client/src/config/connection_settings.dart';
+
+// The two focused suites live in their own files but report into this
+// harness's one pass/fail count. They import `verify_pure.dart` for `check` /
+// `eq` / `eqBytes` / `section`, so this is a deliberate cycle: Dart tolerates
+// it because nothing is read at top-level initialisation time. Both are called
+// from `main` below — a suite that is never called is a suite that can rot.
+import 'verify_annexb.dart';
+import 'verify_default_mode.dart';
+import 'verify_encode_budget.dart';
 
 // --- harness ----------------------------------------------------------------
 
@@ -268,6 +279,49 @@ const BackendProbe _okProbe = BackendProbe(
 );
 
 /// A pump whose frames the test drives by hand.
+/// A [VideoEncoder] that stands in for a native one: it records what it was
+/// asked for and emits nothing.
+///
+/// The coordinator's codec checks must not depend on bytes coming out — the
+/// point of the factory is whether an encoder can be built at all.
+class _FakeVideoEncoder implements VideoEncoder {
+  _FakeVideoEncoder({required this.codec, required this.streamId});
+
+  @override
+  final CaptureCodec codec;
+
+  @override
+  final String streamId;
+
+  @override
+  int cameraEnum = 0;
+
+  int startCalls = 0;
+  int stopCalls = 0;
+  int? lastWidth;
+  int? lastHeight;
+  int? lastFps;
+
+  @override
+  Stream<EncodedFrame> get frames => const Stream<EncodedFrame>.empty();
+
+  @override
+  Future<void> start({
+    required int width,
+    required int height,
+    required int fps,
+    required int quality,
+  }) async {
+    startCalls++;
+    lastWidth = width;
+    lastHeight = height;
+    lastFps = fps;
+  }
+
+  @override
+  Future<void> stop() async => stopCalls++;
+}
+
 class _FakeFramePump implements FramePump {
   final StreamController<CapturedFrame> _controller =
       StreamController<CapturedFrame>.broadcast();
@@ -319,8 +373,11 @@ class _FakeFramePump implements FramePump {
 
 /// One H.264 NAL of [type], start code included.
 ///
-/// Only the type matters to the splitter, so `nal_ref_idc` is left at zero and
-/// [type] goes into the header byte as-is.
+/// `nal_ref_idc` is left at zero and [type] goes into the header byte as-is.
+/// The first payload byte is *not* filler any more: for a VCL NAL its top bit
+/// is `first_mb_in_slice == 0`, which is how the splitter tells one picture
+/// from the next slice of the same one. Callers that want a stand-alone
+/// picture therefore pass a payload starting at 0x80 or above.
 Uint8List _h264Nal(int type, List<int> payload, {bool fourByte = true}) =>
     Uint8List.fromList(<int>[
       if (fourByte) 0x00,
@@ -332,9 +389,18 @@ Uint8List _h264Nal(int type, List<int> payload, {bool fourByte = true}) =>
     ]);
 
 /// One HEVC NAL of [type]. The type sits in bits 1-6 of the header byte, not
-/// in the low five as in H.264.
-Uint8List _h265Nal(int type, List<int> payload) =>
-    Uint8List.fromList(<int>[0x00, 0x00, 0x00, 0x01, type << 1, ...payload]);
+/// in the low five as in H.264, and the header is **two** bytes — the second
+/// carries the layer and temporal id, so the slice header (and with it
+/// `first_slice_segment_in_pic_flag`) only starts at the third.
+Uint8List _h265Nal(int type, List<int> payload) => Uint8List.fromList(<int>[
+  0x00,
+  0x00,
+  0x00,
+  0x01,
+  type << 1,
+  0x01,
+  ...payload,
+]);
 
 Uint8List _cat(List<Uint8List> parts) =>
     Uint8List.fromList(<int>[for (final part in parts) ...part]);
@@ -3634,10 +3700,14 @@ void checkNativeVideoEncoder() {
   }
 
   fakeAsync((async) {
+    // Payloads start at 0x80 for the two VCL NALs: that top bit is
+    // `first_mb_in_slice == 0`, i.e. "this slice opens a picture". Without it
+    // the splitter would read `slice` as a second slice of `idr` and fold the
+    // two into one unit.
     final sps = _h264Nal(7, [1, 2]);
     final pps = _h264Nal(8, [3]);
-    final idr = _h264Nal(5, [4, 5, 6]);
-    final slice = _h264Nal(1, [7]);
+    final idr = _h264Nal(5, [0x84, 5, 6]);
+    final slice = _h264Nal(1, [0x87]);
 
     final channel = _FakeEncodedChannel();
     final encoder = NativeVideoEncoder(
@@ -3713,7 +3783,7 @@ void checkNativeVideoEncoder() {
 
     // The plugin flushes when told to stop, and that tail is the end of the
     // recording — cancelling first would throw it away.
-    final trailing = _h264Nal(1, [9]);
+    final trailing = _h264Nal(1, [0x89]);
     channel.onClose = () async {
       channel.emit(EncodedPacket(bytes: trailing, pictures: 1));
     };
@@ -3770,7 +3840,10 @@ void checkNativeVideoEncoder() {
     final vps = _h265Nal(32, [1]);
     final sps = _h265Nal(33, [2]);
     final pps = _h265Nal(34, [3]);
-    final idr = _h265Nal(19, [4]);
+    // 0x80 for the same reason as in the H.264 case: it is
+    // `first_slice_segment_in_pic_flag`, two bytes into the NAL because the
+    // HEVC header is two bytes long.
+    final idr = _h265Nal(19, [0x84]);
 
     final channel = _FakeEncodedChannel();
     final encoder = NativeVideoEncoder(
@@ -4789,15 +4862,18 @@ Future<void> checkCoordinator() async {
   /// its modes claimed 1920x1080 would model a device that cannot exist, and
   /// would make every bare switch look like a geometry change.
   CaptureConfig openConfigFor(List<CameraCapabilities> capabilities) {
-    final ceiling = capabilities.isEmpty
-        ? null
-        : capabilities.first.highestResolution;
-    return ceiling == null
-        ? CaptureConfig.defaults()
-        : CaptureConfig.defaults().copyWith(
-            width: ceiling.width,
-            height: ceiling.height,
-          );
+    // Mirrors `main.dart`: the pipeline opens at the default mode's resolution,
+    // not at the ceiling. A fixture that opened at the ceiling while its modes
+    // claimed 1080p would model a device that cannot exist — one whose
+    // registration and whose pipeline disagree about the geometry.
+    return CaptureConfig.defaults().copyWithResolution(
+      defaultResolutionFor(
+        measured: capabilities.isEmpty
+            ? CameraCapabilities.empty
+            : capabilities.first,
+        fallback: CaptureConfig.defaults().resolution,
+      ),
+    );
   }
 
   ({
@@ -4813,6 +4889,8 @@ Future<void> checkCoordinator() async {
     List<CaptureCodec> announcedCodecs = const <CaptureCodec>[
       CaptureCodec.mjpeg,
     ],
+    List<EncodeSample> encodeSamples = const <EncodeSample>[],
+    VideoEncoderFactory? encoderFactory,
     _FakeGatewayFactory? factory,
   }) {
     // Every camera gets `measured` unless the caller says otherwise, so the
@@ -4849,6 +4927,8 @@ Future<void> checkCoordinator() async {
       config: openConfigFor(effective),
       capabilities: effective,
       announcedCodecs: announcedCodecs,
+      encodeSamples: encodeSamples,
+      encoderFactory: encoderFactory,
     );
     return (
       coordinator: coordinator,
@@ -4873,6 +4953,62 @@ Future<void> checkCoordinator() async {
     'and a camera probed at [60, 30, 15] declares 60',
     buildWithMode().coordinator.declaredFor(0).framerates.contains(60),
   );
+
+  {
+    // A 4K camera: opened, announced and seeded at 1080p — never at 4K — while
+    // 4K stays in the declared list for an operator to switch to. This is the
+    // acceptance rule for the default mode: changing only the seeding and
+    // leaving the pipeline to open at the ceiling would announce one geometry
+    // and capture another.
+    final measured4k = CameraCapabilities.of(
+      resolutions: <CameraResolution>[
+        const CameraResolution(width: 3840, height: 2160),
+        const CameraResolution(width: 1920, height: 1080),
+        const CameraResolution(width: 1280, height: 720),
+      ],
+      framerates: <int>[60, 30, 15],
+    );
+
+    final h = buildWithMode(capabilities: <CameraCapabilities>[measured4k]);
+    eq(
+      'a 4K camera seeds its mode at 1080p',
+      h.coordinator.activeMode.resolution.label,
+      '1920x1080',
+    );
+    eq(
+      'the pipeline opens at 1080p too, not at the ceiling',
+      h.coordinator.captureConfig.resolution.label,
+      '1920x1080',
+    );
+    check(
+      'and 4K is still declared for an operator to switch to',
+      h.coordinator
+          .declaredFor(0)
+          .resolutions
+          .map((r) => r.label)
+          .contains('3840x2160'),
+    );
+
+    // Re-probing into a 4K inventory must not reopen the pipeline at the
+    // ceiling either — the same rule on the second path that can break it.
+    final from1080 = buildWithMode();
+    await from1080.coordinator.adoptInventory(
+      cameraProvider: CameraProvider(
+        backends: <CameraBackend>[_FakeBackend('stub', probeResult: _okProbe)],
+      ),
+      capabilities: <CameraCapabilities>[measured4k],
+    );
+    eq(
+      'adopting a 4K inventory re-seeds at 1080p',
+      from1080.coordinator.activeMode.resolution.label,
+      '1920x1080',
+    );
+    eq(
+      'and reopens the pipeline at 1080p',
+      from1080.coordinator.captureConfig.resolution.label,
+      '1920x1080',
+    );
+  }
 
   {
     // A declared resolution and rate are applied for real: the capture
@@ -5197,6 +5333,143 @@ Future<void> checkCoordinator() async {
     eq('so no frame can be pushed', h.gateway.frameMeta.length, 0);
   }
 
+  // --- codec selection is per mode, and the factory has the last word -------
+  //
+  // The three things that used to be one: `isIntraOnly` excluded every real
+  // native codec on the strength of the codec's shape, so an H.265 stream could
+  // never have been served even on hardware that measured fine — and a codec
+  // that held 30 was published as if it held 60.
+  {
+    const p1080 = CameraResolution(width: 1920, height: 1080);
+    // H.265 holds 1080p60; H.264 only held 1080p30 — the exact case where
+    // "H.265 works on this device" and "H.264 works" are both true and both
+    // useless as answers to "what can serve 1080p60".
+    final samples = <EncodeSample>[
+      EncodeSample(
+        codec: CaptureCodec.h265,
+        resolution: p1080,
+        measuredFps: 60,
+      ),
+      EncodeSample(
+        codec: CaptureCodec.h264,
+        resolution: p1080,
+        measuredFps: 30,
+      ),
+    ];
+    const all = <CaptureCodec>[
+      CaptureCodec.h265,
+      CaptureCodec.h264,
+      CaptureCodec.mjpeg,
+    ];
+
+    final built = <CaptureCodec>[];
+    VideoEncoderFactory factory =
+        ({required codec, required cameraEnum, required streamId}) {
+          built.add(codec);
+          return _FakeVideoEncoder(codec: codec, streamId: streamId);
+        };
+
+    final h60 = buildWithMode(
+      capabilities: <CameraCapabilities>[measured],
+      announcedCodecs: all,
+      encodeSamples: samples,
+      encoderFactory: factory,
+    );
+    eq(
+      'at 60: only the codec that held 60 is offered',
+      h60.coordinator
+          .codecsForMode(h60.coordinator.activeMode)
+          .map((c) => c.wireName)
+          .join('/'),
+      'h265',
+    );
+
+    await h60.coordinator.handleCommand(
+      const StartRecordingCommand(id: 'a', cameraEnum: 0, streamId: streamId),
+    );
+    eq(
+      'an unnamed request takes the preferred codec for the mode',
+      h60.gateway.acks.single.ok,
+      true,
+    );
+    eq(
+      'and that codec is the one that held the mode',
+      built.single,
+      CaptureCodec.h265,
+    );
+
+    // A named codec the device did not hold at this mode is refused, not
+    // silently swapped for one it did.
+    final refused = buildWithMode(
+      capabilities: <CameraCapabilities>[measured],
+      announcedCodecs: all,
+      encodeSamples: samples,
+      encoderFactory: factory,
+    );
+    await refused.coordinator.handleCommand(
+      const StartRecordingCommand(
+        id: 'b',
+        cameraEnum: 0,
+        streamId: streamId,
+        codec: CaptureCodec.h264,
+      ),
+    );
+    eq(
+      'a codec that only held 30 is refused at 60',
+      refused.gateway.acks.single.ok,
+      false,
+    );
+    check(
+      'and the refusal names the mode, not just the codec',
+      (refused.gateway.acks.single.error ?? '').contains('1920x1080 @ 60fps'),
+    );
+    eq(
+      'and nothing was built for it',
+      refused.coordinator.captureState,
+      CaptureState.idle,
+    );
+
+    // The factory's refusal is its own answer: with no native encoder on this
+    // build, even a measured codec cannot be served — and the device says so
+    // rather than falling back to mjpeg and acking ok.
+    final noEncoder = buildWithMode(
+      capabilities: <CameraCapabilities>[measured],
+      announcedCodecs: all,
+      encodeSamples: samples,
+    ); // default factory: mjpeg only
+    await noEncoder.coordinator.handleCommand(
+      const StartRecordingCommand(id: 'c', cameraEnum: 0, streamId: streamId),
+    );
+    eq(
+      'a measured codec with no encoder is refused',
+      noEncoder.gateway.acks.single.ok,
+      false,
+    );
+    check(
+      'and the refusal says there is no encoder, not that the codec is unknown',
+      (noEncoder.gateway.acks.single.error ?? '').contains('no h265 encoder'),
+    );
+
+    // mjpeg, the floor: still served, because the default factory makes one.
+    final floor = buildWithMode(
+      capabilities: <CameraCapabilities>[measured],
+      announcedCodecs: <CaptureCodec>[CaptureCodec.mjpeg],
+    );
+    await floor.coordinator.handleCommand(
+      const StartRecordingCommand(id: 'd', cameraEnum: 0, streamId: streamId),
+    );
+    eq('mjpeg is still served', floor.gateway.acks.single.ok, true);
+    eq('through a pump, as before', floor.pumps.length, 1);
+
+    // Every command above carried an id and each got exactly one ack — which
+    // is what `.single` on each list already asserts. The server does not
+    // retry, so a missing ack is a command that vanished without a trace.
+    eq('one ack per command id', h60.gateway.acks.length, 1);
+    eq('also for the refused h264', refused.gateway.acks.length, 1);
+    eq('also for the missing encoder', noEncoder.gateway.acks.length, 1);
+    eq('also for the mjpeg floor', floor.gateway.acks.length, 1);
+  }
+
   {
     // A probe that found nothing means the device published exactly the mode it
     // is in, so a switch to that same mode is a no-op rather than a refusal.
@@ -5352,6 +5625,9 @@ Future<void> main() async {
   await checkCoordinatorCapabilityReport();
   checkMjpegEncoder();
   checkNativeVideoEncoder();
+  runAnnexBChecks();
+  await runEncodeBudgetChecks();
+  runDefaultModeChecks();
   await checkCameraProvider();
   await checkFrameStore();
   await checkMockGateway();
