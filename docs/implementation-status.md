@@ -1,9 +1,10 @@
 # 计划实施状态
 
-> 覆盖 `docs/plan_v0.md` 与 `docs/superpowers/plans/` 下的五个计划。
+> 覆盖 `docs/plan_v0.md` 与 `docs/superpowers/plans/` 下的七个计划。
 > 记录每个计划**实现了什么、有意偏离了什么、明确没做什么、验证到什么程度**。
 >
-> **最后更新：2026-10-08，HEAD `61504e9`。**
+> **最后更新：2026-10-10，HEAD `83df291`。**
+> Linux 原生编码分支已**暂停**，交接见 `docs/linux-encoded-stream-status.md`。
 > 权威架构说明见 `README.md`；协议权威是后端仓库的 `smartclass-webcam-server/docs/protocol/`。
 
 ---
@@ -18,8 +19,10 @@
 | 4 | `…/2026-10-04-android-server-e2e-test.md` | ✅ **已通过（T0–T8）** | `e49be97` `9763c18` |
 | 5 | `…/2026-10-05-runtime-backend-settings.md` | ✅ **已实现（T1–T8）** | `81a0d1f` `c8262de` `95ca378` |
 | 6 | `…/2026-10-07-camera-capability-probe.md` | ✅ **已实现（T1–T9）** | `23e7495`…`8be70c7`，`8c2b709` `dbd1135` `61504e9` |
+| 7 | `…/2026-10-09-recording-correctness-and-native-encoder.md` | ⚠️ **Phase A 完成（T1–T4）、T5 完成**；Phase B 原生端进行中 | `87f6fe0` `a438a74` `604316d` `36f55a8` `6ca637c` `f2341e5` |
+| 8 | `…/2026-10-09-linux-encoded-stream.md` | ⏸ **已暂停**（Task 1–4 已写，**未编译**） | `f10f86c` `83df291` |
 
-状态记号：✅ 按计划完成 · ⚠️ 完成但有待验证项 · ⛔ 作废 / 取代 · ❌ 未实现
+状态记号：✅ 按计划完成 · ⚠️ 完成但有待验证项 · ⏸ 暂停 · ⛔ 作废 / 取代 · ❌ 未实现
 
 ---
 
@@ -189,6 +192,61 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 - **H.264 / H.265** —— 原生层接 ffmpeg（x264/x265 的 GPL 构建，或仅 H.264 的 `libopenh264`），
   硬件编码器作为同一 `NativeEncoder` 接口后的第二个后端。
 - **无磁盘帧通路** —— 依赖上一条；在此之前 `TakePictureFrameSource` 保持原位。
+  → **三条都已开工**，见下面第 7、8 节。
+
+---
+
+### 7. `2026-10-09-recording-correctness-and-native-encoder.md` — ⚠️ Phase A + T5 完成，Phase B 进行中
+
+两阶段：先修两个被 Feature 1 从「潜在」变成「活的」的录制正确性 bug，再给设备一个真编码器。
+
+| 任务 | 状态 | 产物 |
+| --- | --- | --- |
+| T1 `start_recording` 必须激活它点名的摄像头 | ✅ `604316d` | `agent_coordinator.dart` 抽出 `_activateCamera()` |
+| T2 裸切到不同上限的摄像头必须重建几何 | ✅ `6ca637c` | 比较对象从「目标摄像头自己的 mode」换成**管线实际所处的 `_config`** |
+| T3 Annex B 切分 | ✅ `36f55a8` `d910ea0` | `annexb.dart`，且从无状态函数改成有状态的 `AnnexBSplitter`（libavcodec 会把 SPS/PPS 单独打成包，无状态切分会把参数集丢了） |
+| T4 可持续帧率模型 | ✅ `a438a74` | `encode_budget.dart`：`sustainableRates` / `sustainableCodecs` / `maxSustainableFps` |
+| T5 Dart 侧编码器契约 | ✅ `f2341e5` | `native_video_encoder.dart` |
+| T6–T9 四端原生编码流 | ⏸ **Linux 已暂停**，其余未开始 | 见第 8 节 |
+| T10 协调器换 `EncoderFactory` + per-mode codec | ❌ 未开始 | 纯 Dart，可独立做 |
+| T11 许可 / 打包 / 文档 | ❌ 未开始 | 用户已确认接受 GPLv2+ |
+
+#### T5 的两处偏离（有意）
+
+1. 计划写的通道是 `Stream<Uint8List>`，实际是 `Stream<EncodedPacket>`，多一个 `pictures`。
+   因为计划自己的验收项里有「count mismatch 就整批丢」，而 **Annex B 没有长度前缀** ——
+   只有字节根本无从判断「本来该有几帧」，那条检查写不出来。native 侧一次喂一帧，所以它知道。
+2. 「`stop()` flushes」落实为 **`close()` 先于 `cancel()`，且 `_running` 要等 `close()` 完成
+   才置 false**。反过来的话插件 flush 出来的尾巴会被判成 late packet 丢掉 —— 录制少几帧，
+   而服务端完全无法察觉。另加了 `_opened` 标志：`start()` 内部会先调 `stop()`，
+   没开过的 channel 不该被 close。
+
+#### Feature 1（用户自己的提交 `bf998a8`，我补了测试）
+
+默认分辨率 = 各摄像头实测上限。提交时是红的（三条断言还写着旧的 720p 播种值），
+`87f6fe0` 改成 `1920x1080`。**依据不是"让测试变绿"，而是 fixture 注释本身就写着
+「The device seeds at the measured ceiling — 1920x1080 @ 5fps」** —— 断言与 fixture
+互相矛盾，改的是断言。
+
+> ⚠️ 2026-10-10 补记：同一条根因在 `test/` 下还留了两条（`a28d144`），
+> 因为当时只扫了 `tool/verify_pure.dart`。**改播种/默认值的提交必须两处一起扫。**
+
+---
+
+### 8. `2026-10-09-linux-encoded-stream.md` — ⏸ 已暂停
+
+> **完整交接见 `docs/linux-encoded-stream-status.md`。** 本节只是总览。
+
+- **已落地**：`441df72` vendor `camera_desktop` 进仓库（`packages/camera_desktop/`）、
+  `f10f86c` 编码器可用性探测、`83df291` 编码分支本体 + 字节交给 Dart + 接进 `Camera`。
+- **停在这里的原因**：这一批全是 Linux C++，而本机（Windows）编译不了 ——
+  `flutter build` / `analyze` / `test` 在助手 shell 里全部失败，Linux 的 GStreamer 与
+  `flutter_linux` 头文件在本机也不存在。**一行都没有编译过。**
+- **为什么不再往下写另外三端**：上游计划 T6 Step 1 那个闸就是为这个设的 ——
+  攒一批没人编译过的原生代码，等于把成本推给后面。
+- **恢复时先查四件事**（详见交接文档）：`h264parse config-interval=-1` 的语义、
+  `queue leaky=2` 的丢帧方向、`fl_value_new_uint8_list` 的签名（**唯一会直接挡住编译的**）、
+  caps 是否真的协商上了（断言没写）。
 
 ---
 
@@ -201,7 +259,8 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | ffmpeg 编码通道（T9） | smartclass-integration | **有意不做**，接入点已留 |
 | 人脸识别 HUD | camera-edge-probe | 设备协议里没有结果来源，移除 |
 | 采集参数进设置界面 | runtime-settings | **有意不做**（注册时 announce） |
-| 原生编码管线 / H.264 / H.265 / 无磁盘通路 | capability-probe | Deferred |
+| 原生编码管线 / H.264 / H.265 / 无磁盘通路 | capability-probe | ~~Deferred~~ → **已开工，Linux 端暂停**（见第 8 节） |
+| Windows / macOS / Android 三端原生编码流 | recording-correctness T7–T9 | ❌ 未开始（等 Linux 端编译通过再动） |
 | iOS 构建 | 发布 | 需要付费 Apple Developer 证书 + provisioning profile |
 
 ---
@@ -210,10 +269,11 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 
 | 层 | 状态 | 说明 |
 | --- | --- | --- |
-| `dart run tool/verify_pure.dart` | ✅ **652 项断言全绿** | 本机**唯一能执行**的验证层。覆盖协议、注册、两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪、地址校验、能力算术、规范顺序、能力缓存、启动编排、构造顺序回归、能力报告 |
+| `dart run tool/verify_pure.dart` | ✅ **705 项断言全绿**（HEAD `83df291`） | 本机**唯一能执行**的验证层。覆盖协议、注册、两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪、地址校验、能力算术、规范顺序、能力缓存、启动编排、构造顺序回归、能力报告、Annex B 切分、可持续帧率模型、**原生编码器 Dart 侧契约** |
 | `dart format` 闸门 | ✅ 干净 | `dart format --output=none --set-exit-if-changed lib test tool` |
-| 全量类型检查 | ✅ 干净 | 37 个编译单元，Python 驱动 `frontend_server_aot` 单次编译 |
-| `flutter test` | ⚠️ **本机跑不了** | Dart VM 在助手 shell 里创建不了子进程。最后一次运行 `+333 -2`，两个失败已在 `dbd1135` 修掉并镜像进 harness，**修后未再跑** |
+| 全量类型检查 | ⚠️ **换了一条路** | `dart analyze` / `flutter analyze` 因同一个管道问题失败（`CreateFile failed 231`）。替代：**Python 驱动 `frontend_server_aot.dart.snapshot` 单次编译**（`%TEMP%\wb_check.py`），只覆盖 Dart，不覆盖任何 C++ |
+| `flutter test` | ✅ **用户跑的，全绿** | 助手跑不了（同上）。`+355 -2` 的两个失败（`a28d144` 前）已修并在 `a28d144` 之后重跑通过 |
+| `flutter build` / `run` / Linux C++ 编译 | ❌ **本机完全跑不了** | 两条独立的限制：① 助手 shell 建不了子进程管道；② Linux 的 GStreamer / GTK / `flutter_linux` 头文件在本机不存在。这就是 Linux 端暂停的原因 |
 | 真机 · Android 端到端 | ⚠️ 部分 | 基础链路跑通过一整轮（见计划 4）。**但能力探测这一轮（T8/T9）没在真机上验过**，`61504e9` 的 kiosk 修复也待重出包确认 |
 | CI 四端出包 | ⚠️ 未确认 | `.github/workflows/release.yml` 已建，Android SDK 与 artifact 路径两个问题已修；远端已打 `v1.0.0`–`v1.0.3`，但运行结论本机看不到（GitHub API 限流、无 `gh`） |
 
@@ -241,8 +301,9 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 
 ## 五、已知缺口 / 下一步
 
-1. **`flutter test` 未在 `dbd1135` 之后重跑。** 这是当前最该做的一步 —— 它也是 CI 的
-   `verify` job 第一次真跑的入口。
+1. **Linux 原生编码分支暂停中**（第 8 节）。恢复的前置条件是一台 Linux 机器 +
+   `flutter build linux`。交接文档 `docs/linux-encoded-stream-status.md` 里列了
+   「恢复时先查的四件事」。
 2. **能力探测的真机验收未做。** 重点：插拔一个摄像头 → 点「重新检测」→ 摄像头顺序与
    声明列表应随之改变；以及 `switch_camera` 带 `resolution` / `fps` 时服务端
    `metadata` 快照应跟着更新（这需要重新注册，已实现但未验）。
@@ -250,7 +311,11 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
    「链路失败」且不再重试 → 改回正确令牌 → 保存 → 必须能重新连上。
 4. **CI 四端出包的成功与否未确认**，且 Android 产物是否已随 artifact 路径修复正常进入
    Release 也未确认。
-5. 三个 Deferred 项（原生编码管线 / H.264·H.265 / 无磁盘通路）需要各自的计划。
+5. **Phase B 剩下的纯 Dart 部分可以先做**（不依赖 Linux）：Task 10 协调器换
+   `EncoderFactory` + per-mode `supported_codec`。它独立于原生端，而且没有它，
+   即使原生端通了，per-mode 的 codec 菜单也不会重算。
+6. Windows / macOS / Android 三端原生编码流（T7–T9）等 Linux 端编译通过再动。
+   用户已确认 **Android 这一轮要做**。
 
 > 关于计划文件里的 `- [ ]` 复选框：这些计划是**一次性执行**的，复选框未逐个勾选，
 > **执行状态以本文档为准**（逐个勾选会把「跑 `flutter test` 期望 PASS」这类

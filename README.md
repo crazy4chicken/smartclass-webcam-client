@@ -30,6 +30,10 @@ Windows / macOS / Linux / iOS / Android 单代码库覆盖。桌面三端由 `ca
 提供（Media Foundation / AVFoundation / GStreamer+V4L2），移动端走 `camera_android_camerax`
 与 `camera_avfoundation`。**不使用 `camera_windows`**。
 
+`camera_desktop` 已 **vendor 进仓库**（`packages/camera_desktop/`，上游 2.0.0，BSD-3），
+因为高帧率只能从插件自己的采集管线里出来，而改那条管线必须碰插件源码。
+fork 的边界写在 `packages/camera_desktop/VENDORED.md`。
+
 ## 运行
 
 ```bash
@@ -234,9 +238,15 @@ config (纯 Dart，不依赖 Flutter)
 ### 编码选择
 
 偏好链 `h265 → h264 → mjpeg`，由 `CodecProbe` 实测决定，选择逻辑在 `CodecSelector`。
-**v1 实际落在 `mjpeg`**，这不是妥协：服务端对 `mjpeg` 的定义就是"每个 `recording.frame`
+**当前实际落在 `mjpeg`**，这不是妥协：服务端对 `mjpeg` 的定义就是"每个 `recording.frame`
 一张 JPEG"，而 `takePicture()` 产出的正好是 JPEG，天然满足"需要时序信息"。
-`h265`/`h264` 需要编码器（计划中的 T9，走 `ffmpeg_kit_flutter_new`），尚未实现。
+
+`h265`/`h264` **正在做，方式是原生编码，不是 ffmpeg**：`takePicture()` 每帧都是一次完整
+拍照 + JPEG 编码，1080p 上限约 5–10 fps —— 把编码器接在它下游只换编码、不换上限。
+所以帧必须在插件自己的管线里编码完再进 Dart（原始帧不进 Dart、不落盘）。
+Dart 侧契约 `lib/src/capture/native_video_encoder.dart` 已完成并有断言覆盖；
+Linux 的 GStreamer 分支已写完但**尚未编译**，现暂停。
+进度与交接见 `docs/linux-encoded-stream-status.md`。
 
 ### 存储格式决定了不能用 mp4
 
@@ -249,9 +259,10 @@ config (纯 Dart，不依赖 Flutter)
 
 - `lib/src/backend`、`lib/src/capture`（非插件部分）、`lib/src/config` 与
   `lib/src/app/capability_bootstrap.dart` **不依赖 Flutter**，
-  所以能在纯 Dart VM 上直接跑 `tool/verify_pure.dart`（**586 项断言**，覆盖协议、注册、
+  所以能在纯 Dart VM 上直接跑 `tool/verify_pure.dart`（**705 项断言**，覆盖协议、注册、
   两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪与尺寸读取、能力模型与声明、
-  摄像头排序、能力缓存与 `ensureInventory` 编排、地址校验与设置解析）。
+  摄像头排序、能力缓存与 `ensureInventory` 编排、地址校验与设置解析、Annex B 切分、
+  可持续帧率模型、原生编码器的 Dart 侧契约）。
   新增代码请保持这条边界：一旦引入 `package:flutter/*`，该模块就再也无法在本机验证。
   这条边界直接决定了三个接口放在哪里：`CameraRanker` 放在纯的 `camera_order.dart`、
   `CapabilityProbe` 放在纯的 `capability_probe.dart`、`CameraEnumerator` 放在纯的
@@ -510,12 +521,34 @@ Android 9+ 默认禁止明文流量，而网关是 `ws://`，不开的话连接�
 
 ### 关于本机 Flutter CLI
 
-`C:\Users\Lhui\AppData\Local\flutter` 可正常使用。另注：在**助手工具的 shell** 里 Dart VM 无法
-创建子进程（`ProcessException: All pipe instances are busy`，`process_win.cc:744`），
-所以 `flutter run/test/analyze` 在那个 shell 里会失败；用户自己的终端不受影响，与项目无关。
-助手侧改用三条替代路径验证：
+`C:\Users\Lhui\AppData\Local\flutter` 在**用户自己的终端**里可正常使用。
 
-1. `dart run tool/verify_pure.dart` —— 进程内执行，586 项断言。
-2. 用 Python 直接驱动 `frontend_server_aot` 做单次编译（等价于 `flutter test` 的类型检查）。
+在**助手工具的 shell** 里，任何会**开子进程管道**的命令都失败
+（`ProcessException: All pipe instances are busy`，`errno = 231`）。所以：
+
+| 命令 | 助手 shell |
+| --- | --- |
+| `flutter pub get` | ✅ **唯一能跑的 flutter 子命令**（只做网络 IO）—— 但见下面警告 |
+| `flutter run` / `build` / `test` / `analyze`、`dart analyze` | ❌ 失败 |
+| `dart run tool/verify_pure.dart`、`dart format` | ✅ 进程内执行 |
+
+> ⚠️ **Windows 上绝不要用助手 shell 跑 `flutter pub get`。** 它会重建
+> `{windows,linux}/flutter/ephemeral/.plugin_symlinks/*`，但在那个沙箱里 `Link.createSync`
+> **不报错却造出一个空目录**。Flutter 判 `link.existsSync()` 对普通目录返回 **false**，
+> 于是下一次真的 `flutter run` 走到 `createSync` 撞 ERROR_ALREADY_EXISTS(183) 直接失败。
+> 修法：`rm -rf {windows,linux}/flutter/ephemeral/.plugin_symlinks`（纯生成物），
+> 然后由用户自己的终端重跑。**这条踩过一次。**
+
+助手侧的三条替代验证路径：
+
+1. `dart run tool/verify_pure.dart` —— 进程内执行，**705 项断言**。
+2. 用 Python 直接驱动 `frontend_server_aot` 做单次编译（等价于类型检查，只覆盖 Dart）。
 3. **真机联调**：`flutter run` 起不来，但**已经装好的 debug APK 可以完全用 adb 驱动** ——
    详见 `docs/android-setup.md` 的「不用 flutter run 也能驱动真机」。
+
+### Linux
+
+**本机编不了 Linux。** 除了上面的管道问题，Linux 的 GStreamer / GTK / `flutter_linux`
+头文件在这台 Windows 机器上根本不存在。所以 `packages/camera_desktop/linux/` 下的任何改动
+都必须在一台 Linux 机器上 `flutter build linux` 验证。
+这也是 Linux 原生编码分支暂停的原因 —— 进度见 `docs/linux-encoded-stream-status.md`。
