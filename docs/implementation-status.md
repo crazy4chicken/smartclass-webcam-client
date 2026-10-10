@@ -276,11 +276,11 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | 任务 | 状态 | 内容 |
 | --- | --- | --- |
 | #1 门禁接线 | ✅ 全部 | `runAnnexBChecks` / `runEncodeBudgetChecks` 由主入口调用，不再是只写未运行；新增 `verify_default_mode.dart` 同样接入 |
-| #4 默认模式 | ✅ 已完成 | `default_mode.dart` 唯一选择器；main 的 `openConfig`、协调器 `seedModes`、`adoptInventory` 三处同源。4K→1080p、形状保持（交叉相乘）、帧率只降不升。**已闭合**（原「无证据时仍声明 60」见下方 #4.1）。**仍开着的只有 ADR §4.1.1 的 peak-vs-plateau 聚合策略**，不是 #4 本身 |
+| #4 默认模式 | ✅ 已完成 | `default_mode.dart` 唯一选择器；main 的 `openConfig`、协调器 `seedModes`、`adoptInventory` 三处同源。4K→1080p、形状保持（交叉相乘）、帧率只降不升。**三块都闭合了**：① 分辨率封顶与形状；② 帧率只降不升；③ **无实测证据时声明什么** —— 早先这条没定，协调器直接把**请求**帧率（`AppConfig.defaultFps` = 60）当成**声明**帧率传下去，于是一台没测过的设备会声明 60 而实际只能交付 5–10。这一条后来单独立成 #4.1（见下）并已修复：无证据时声明 `kFpsWithoutEvidence`（5）。**跟 #4 已无关系、仍开着的只有 ADR §4.1.1 的 peak-vs-plateau** —— 那是「有多份证据时怎么聚合」，不是「没有证据时怎么办」 |
 | #5 协调器编码工厂 | ✅ 协调器侧 | `VideoEncoderFactory` 替代裸泵路径；`codecsForMode()` 按模式过滤（证据∩公告）；工厂拒绝 → `ack ok:false`；`isIntraOnly` 不再作可用性判据；点名 codec 不偷换 |
 | #10 AU 切分 | ⚠️ 部分 | 多 slice 合并为一个 AU（H.264/HEVC 首 slice 标志）；chunk 边界收口语义文档化；**pending 字节量有上限**（`kMaxPendingBytes` = 1 MiB，超限丢弃并计数 `pendingOverflows`/`droppedPendingBytes`，随后按下一个起始码重新同步）；残缺/非法 slice 头系统用例（无 slice 头、单字节 HEVC NAL、未知类型、相邻起始码、孤立 continuation、后缀 SEI）。**缺：真实样本解码证明（B 类）** |
 | #11 吞吐证据 | ⚠️ 模型层 | `EncodeSample` 证据模型 + `EncodeEvidence` 缓存（版本/指纹/编码器身份，损坏自愈）+ `canServeMode`/`sustainableCodecsAt` 按模式校验 + `SustainedRateMeter`（预热不计、只数新帧、窗口固定）+ `EncodeBudgetProbe` 接缝 + `SharedPrefsEncodeEvidenceStore`。**2026-10-10 补**：`rate_calibration.dart` —— 窗口标定的**判据**（*够长 ⟺ 答案不取决于窗口位置*）、`calibrateRateWindow()`、以及「取最快样本」的审查（`readRateSeries()` 分开报 peak / plateau，`peakOverstatesSustained`）。**缺：插件侧测量管线（没有任何平台实现 `EncodeBudgetProbe`），以及 peak-vs-plateau 的策略决策（ADR §4.1.1，待用户定）** |
-| #23 实测状态 | ✅ 已完成 | `stream_diagnostics.dart`：`AgentStatus` 的单个 `fps` 拆成目标/声明/采集/编码/发送五档 + codec + 硬件身份 + WxH + 丢/重 + 降级原因；`classifyBottleneck` 按管线顺序归因（相机→编码→传输）。`BackendGateway.sendRecordingFrame` 改返回 `bool`（拒收 → 计入丢帧），采集取自**源序号前进量**。状态条新增两行。**状态条 widget 的用例要用户跑 `flutter test`** |
+| #23 实测状态 | ✅ 已完成 | `stream_diagnostics.dart`：`AgentStatus` 的单个 `fps` 拆成目标/声明/采集/编码/发送五档 + codec + 硬件身份 + WxH + 丢/重 + 降级原因；`classifyBottleneck` 按管线顺序归因（相机→编码→传输）。`BackendGateway.sendRecordingFrame` 改返回 `bool`（拒收 → 计入丢帧），采集取自**源序号前进量**。状态条新增两行。**状态条 widget 的用例（`test/ui/status_bar_overlay_test.dart`）已由用户跑 `flutter test` 通过（2026-10-10）** |
 | #4.1 声明帧率 | ✅ 已修复 | 声明帧率与请求帧率拆开：请求 60（泵不节流），声明在有证据时取实测、**无证据时取下限 5**（不再声明 60）。探针给不出这个数——它只测「接受」不测「持续」，已写进 ADR |
 | #9 编码通道契约 | ⚠️ 2/3 | `EncodedPacket` 增加 `sourceSeq`/`sourcePts`/`sessionGeneration`/`isEos`；`EncodedStreamChannel.open()` 增加 `sessionGeneration`；`EncodedFrame` 增加 `sourceSeq`/`sourcePts`。`start`/`stop` 走 `SerialLock`，`open` 失败回滚，旧 run 的包按代次丢弃（`stalePackets`）。**缺：bitrate（协议无此字段）、`close()` 超时兜底** |
 | #9/A2 生产者接线 | ✅ 已完成 | `measureDeliveredRate()`（`sustained_rate.dart`）把编码器交付流喂给 `SustainedRateMeter`，喂 `sourceSeq` 而非 `seq`。门禁用**真实 `NativeVideoEncoder`** + 重复源序号证明「重复不算交付」。**注意：生产侧暂无调用者** —— 它是各平台 `EncodeBudgetProbe` 的公共身体，而那些实现都还没有 |
@@ -321,7 +321,7 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 **明确没做的**：#7/#12–#13（Android vendor + 原生编码）、#16–#22（Windows/macOS/Linux 原生）、
 #14 的插件事件桥接一半、#24 的远端验收、#25 的最终 whole-branch 复核。
 这些需要用户跑构建/真机，助手侧无法验收。
-（**#23 实测状态已于 2026-10-10 完成** —— 除状态条 widget 的 `flutter test` 需用户跑。
+（**#23 实测状态已于 2026-10-10 完成**，含状态条 widget 的 `flutter test`（用户跑的，全过）。
 **#24 的发布矩阵已收窄为三端**，Linux 移出。
 **#25 的「随做随同步」一直在做**，只剩「最终 whole-branch 复核」—— 它要求分支本身完成，
 原生端落地前只能复核到 Dart 侧，2026-10-10 的 A8 复核覆盖的就是这一层。）
@@ -338,7 +338,7 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | 人脸识别 HUD | camera-edge-probe | 设备协议里没有结果来源，移除 |
 | 采集参数进设置界面 | runtime-settings | **有意不做**（注册时 announce） |
 | 原生编码管线 / H.264 / H.265 / 无磁盘通路 | capability-probe | ~~Deferred~~ → **已开工，Linux 端暂停**（见第 8 节） |
-| Windows / macOS / Android 三端原生编码流 | recording-correctness T7–T9 | ❌ 未开始。**落地顺序已改为 Android → Windows → macOS → Linux**（ADR §五，依据是「用户能编能跑」）—— **不再是「等 Linux 编过再动」**，那条旧口径与 Linux 暂停的事实相反 |
+| Windows / macOS / Android 三端原生编码流 | recording-correctness T7–T9 | ❌ 未开始。**Linux 暂停**（原生采集暂停、`linux/**` 那批 C++ 一行都没编译过；见第 8 节，并已于 2026-10-10 移出发布矩阵）。落地顺序 **Android → Windows → macOS → Linux**（ADR §五，依据是「用户能编能跑」）—— **不再是「等 Linux 编过再动」** |
 | iOS 构建 | 发布 | 需要付费 Apple Developer 证书 + provisioning profile |
 
 ---
@@ -350,7 +350,8 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 | `dart run tool/verify_pure.dart` | ✅ **以实跑输出为准**（最近一次 `passed: 1173, failed: 0`） | 本机**唯一能执行**的验证层。覆盖协议、注册、两个网关、采集管线、协调器状态机、串行锁、JPEG 裁剪、地址校验、能力算术、规范顺序、能力缓存、启动编排、构造顺序回归、能力报告、Annex B 切分（含 pending 上限与残缺/非法头）、可持续帧率模型、**速率标定**、**流诊断**、**原生编码器 Dart 侧契约与启停生命周期**。七个专项 suite（Annex B / 编码吞吐 / 默认模式 / 持续帧率 / 速率标定 / 流诊断 / 编码预算）**全部由主入口 import 并调用**；每个 section 经 `guard()`，抛异常记为 FAIL 而不是中断整轮（2026-10-10 A8 复核加的） |
 | `dart format` 闸门 | ✅ 干净 | `dart format --output=none --set-exit-if-changed lib test tool` |
 | 全量类型检查 | ⚠️ **换了一条路** | `dart analyze` / `flutter analyze` 因同一个管道问题失败（`CreateFile failed 231`）。替代：`python tool/check_compile.py`（**仓库内脚本**，驱动 `frontend_server_aot.dart.snapshot` 单次编译 `lib/` + 全部 `test/`、`tool/`），约 5 分钟。只覆盖 Dart，不覆盖任何 C++；**只编译不运行 —— 编译通过 ≠ 断言通过**（早期用过 `%TEMP%\wb_check.py`，已废弃） |
-| `flutter test` | ⚠️ **用户跑的；3 条陈旧断言已修，待重跑** | 助手跑不了（同上）。2026-10-10 用户跑出 `+354 -3`：`test/agent/agent_coordinator_test.dart` 里三条断言还写着「声明 60」，而 #4.1 之后**无证据时声明的是 `kFpsWithoutEvidence`（5）** —— 门禁那侧改对了、`test/` 这侧漏扫（同一类漏扫的第二次，第一次见 `a28d144`）。已改成具名常量。**另：`AppConfig.defaultFps` 的注释声称「设备声明 60」，也是陈旧的 —— 它是请求帧率，声明值在 `CameraMode.fps`。** |
+| `flutter test` | ✅ **用户跑的，全过（2026-10-10）** | 助手跑不了（同上）。2026-10-10 用户跑出 `+354 -3`：`test/agent/agent_coordinator_test.dart` 里三条断言还写着「声明 60」，而 #4.1 之后**无证据时声明的是 `kFpsWithoutEvidence`（5）** —— 门禁那侧改对了、`test/` 这侧漏扫（同一类漏扫的第二次，第一次见 `a28d144`）。已改成具名常量，用户重跑**全绿**。**另：`AppConfig.defaultFps` 的注释声称「设备声明 60」，也是陈旧的 —— 它是请求帧率，声明值在 `CameraMode.fps`。** |
+| `test/` 的类型检查 | ✅ 干净 | `python tool/check_compile.py`：最近一次 `compiled: 44, failed: 0`。**它只编译不运行** —— 它能发现写坏的 `test/` 文件（门禁看不见那一层），但不能替代上面那一行 |
 | `flutter build` / `run` / Linux C++ 编译 | ❌ **本机完全跑不了** | 两条独立的限制：① 助手 shell 建不了子进程管道；② Linux 的 GStreamer / GTK / `flutter_linux` 头文件在本机不存在。这就是 Linux 端暂停的原因 |
 | 真机 · Android 端到端 | ⚠️ 部分 | 基础链路跑通过一整轮（见计划 4）。**但能力探测这一轮（T8/T9）没在真机上验过**，`61504e9` 的 kiosk 修复也待重出包确认 |
 | CI 出包（三端） | ⚠️ 未确认 | `.github/workflows/release.yml` 已建，Android SDK 与 artifact 路径两个问题已修；远端已打 `v1.0.0`–`v1.1.2`，但运行结论本机看不到（GitHub API 限流、无 `gh`）。**2026-10-10 起 Linux 已移出发布**，校验项由四项变三项（本地 YAML 严格解析通过，远端未跑）。**另：`ci.yml` 是 2026-10-10 新增的**（分支 push + PR 触发），此前只有 `release.yml`（只认 tag），分支上的提交从来没跑过 gate |

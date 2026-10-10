@@ -125,9 +125,9 @@
 - `classifyBottleneck` 按**管线顺序**判：相机 → 编码 → 传输，**第一个不达标的赢**。
 - **`队列` 有意未做**：`sendRecordingFrame` 是同步的，没有队列可报。不要为了凑字段加一个恒为 0 的。
 
-> ⚠️ **A4 未验的部分**：状态条是 Flutter widget，`test/ui/status_bar_overlay_test.dart` 已按新  
-> 字段重写，但**助手跑不了 `flutter test`** —— 那份用例由用户跑。助手侧只做了  
-> `tool/check_compile.py` 类型检查（**编译 ≠ 断言**）。
+> ✅ **A4 已验完**：状态条是 Flutter widget，`test/ui/status_bar_overlay_test.dart` 已按新  
+> 字段重写，**用户跑 `flutter test` 全过（2026-10-10，整套 `+354 -3` 后无失败）**。  
+> 助手侧此前只能做 `tool/check_compile.py` 类型检查（**编译 ≠ 断言**），现已由真跑结果取代。
 
 ### 3.2 第三批（2026-10-10 更晚）
 
@@ -178,11 +178,13 @@
 
 复核**验到的**：门禁 `1173/0`、`dart format` 干净（103 文件）、`check_compile.py`
 `compiled: 44, failed: 0`、§6 的九条不变量逐条对到行号全部落实。
+**用户随后跑 `flutter test` 全过** —— 连 `check_compile.py` 只能"编译"的那一层也补上了。
 
-复核**验不到的**：原生代码（无编译证据）、`flutter test`、远端 CI（无 `gh` + API 限流）。
+复核**验不到的**：原生代码（无编译证据）、远端 CI（无 `gh` + API 限流）。
 
-**留给用户的四件事**（报告 §4）：`outputs/dual-mode-task-list.md` 这个重复副本是否删、
-ADR §4.1.1 的 peak-vs-plateau、本地 `87d6eb2` 未推送、两份 `test/` 要你跑。
+**当时留给用户的事，后来的结果**：已推送（`d25c89d` 起在远端）；`outputs/` 副本按用户
+要求删除（提交里删，不重写远端历史）；两份 `test/` 已跑且全过。
+**仍开着的只剩 ADR §4.1.1 的 peak-vs-plateau**（见 §5.5）。
 
 ---
 
