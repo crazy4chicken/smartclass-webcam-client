@@ -5,67 +5,58 @@
 
 ## 当前状态
 
-- **git：`793a418`（`feat(capture): assemble the start-up path from evidence, not from claims`），
-  ⚠️ 尚未推送 —— 需要用户 `git push`。** 上一个远端一致点是 `2117dcc`。
-- 门禁 `passed: 1216, failed: 0`（上一轮 1173，本轮 +43）；`dart format` 干净（105 文件）；
-  `check_compile.py` `compiled: 45, failed: 0`。
-- **`flutter test` 本轮还没跑**（改了 `lib/` 的公开形状：协调器构造参数、`adoptInventory`
-  参数、`main.dart` 装配）→ **请用户跑一次**。助手跑不了，只做到「类型检查通过」。
-- **#14 的 Dart 侧做完了**（启动装配，见下）；**#14 的插件事件桥接那一半仍待办**，要等原生侧。
-- A 类（纯 Dart）此前已全部完成；B 类（要真机/构建）仍全在用户那一步。
-
-## 本轮做了什么（#14 Dart 侧）
-
-新增 `lib/src/app/capture_bootstrap.dart`（Flutter-free，门禁直接跑）：
-
-- `ensureEncodeEvidence()` —— 命中缓存就不测；**没有探针就不测、也不写缓存**（"没问过"≠"测过为零"）；
-  探针抛错、或答的是别的摄像头/编码器 → 空证据，**不把别人的速率当成自己的**。
-- `announcedCodecsFor()` —— **公告 = 平台声称 ∩ 实测**，且实测**按模式**判定
-  （`canServeMode`），所以「H.265 在 30 可用」永远不会变成「1080p60 可用」。永不返回空列表。
-- `planCapture()` —— **几何（来自 inventory）→ 在该几何上实测 → 声明帧率（来自实测）→ 公告
-  codec（两者都要）**，一条顺序。
-- `claimedCodecs()` —— 「声称集合」的唯一定义，探针问什么、播种模式用什么、能发什么，三处同源。
-
-`main.dart`：按这条顺序装配（plan → 开管线 → 同源注册）；「重新检测」强制重测后重 plan 再
-`adoptInventory`；gateway 的 codec 列表改成**每次注册时**按 `coordinator.activeMode` 重算
-（`switch_camera` 走 `_reregister` → 「切模式 → 重算 → 注册」自然成立）。协调器新增
-`codecCandidates`，`adoptInventory` 新增 `encodeSamples`/`announcedCodecs`。
-
-**今天行为逐字不变**：没有任何平台实现 `EncodeBudgetProbe`，`main.dart` 传 `probe: null`
-→ 计划恒为 `mjpeg` @ `kFpsWithoutEvidence`。不支持原生编码的平台照旧预览 / 照片 / mjpeg 流。
-
-门禁新增 `tool/verify_capture_bootstrap.dart`（+43 条）；**8 个变异全部变红**
-（详见 `docs/implementation-status.md` 的变异表）。
+- **git：`60d9c7c` 已推送**（#14 Dart 侧 + handover）；本轮新增的计划文件
+  `docs/superpowers/plans/2026-10-10-android-encoded-stream.md`，已提交。
+- 门禁 `passed: 1216, failed: 0`；`dart format` 干净（105 文件）；
+  `check_compile.py` `compiled: 45, failed: 0`。**本轮只写文档，没动代码。**
+- **#14 的 Dart 侧已完成**（启动装配：`planCapture` / `announcedCodecsFor` /
+  `ensureEncodeEvidence`）。**#14 的插件事件桥接那一半，已并入下面这份计划。**
+- **Android 真机已接上并读过特征**：vivo V2405A / mt6991 / Android 16（API 36）。
+  完整实测表在计划文件的「目标真机的实测事实」一节 —— **别重复测**。
+  关键两条：`aeAvailableTargetFpsRanges` 含 `[60,60]`（普通 session 就能请求 60fps）；
+  硬件编码器是 `c2.mtk.hevc.encoder` / `c2.mtk.avc.encoder`。
 
 ## 下一步任务
 
-**全部是 B 类：需要用户跑构建 / 真机。助手侧的实质工作仍然没有。**
+**用户正在审查 `docs/superpowers/plans/2026-10-10-android-encoded-stream.md`。
+审查通过后按该计划的 Task 1 起执行；Task 1 的第一步是用户跑 `flutter pub get`。**
 
-1. **#7** vendor `camera_android_camerax` 0.7.5+1 —— 用户 `flutter pub get` + 编 APK。
-2. **#12** Android 采集/编码能力验证（Camera2 帧率 range、高速 session、MediaCodec HEVC）。
-3. **#13** Android native H.265/H.264 编码流（最大一块）。
-4. **#14 剩下的那一半**：插件事件统一通道（不重复注册 method handler）+ fake 接口与
-   Flutter bridge 分层测 —— **要等 #13 才有东西可接**。
-5. **第一个 `EncodeBudgetProbe` 实现**：`main.dart` 里 `probe: null` 是**唯一**的插入点；
-   接上它，声明帧率、公告 codec 与默认模式会一起动（这是设计目标，不是巧合）。
-6. 之后 Windows（`windows/record_handler.cpp:114` 已有进程内 MF H.264）→ macOS → Linux（暂停）。
+计划的 7 个任务（每个都有独立可验的交付物）：
+
+1. **Task 1**（#7）vendor `camera_android_camerax` 0.7.5+1 → root path 依赖 → 基线不回归。
+   源码已在**本机 pub cache**（`camera_android_camerax-0.7.5+1`，171 文件，Java，CameraX 1.6.2），
+   不用联网。
+2. **Task 2**（#12 设计）读源码核实三条事实 + 写 ADR 0002 + **冻结 Dart↔native 通道协议**。
+3. **Task 3** Dart 侧适配器（`EncodedStreamTransport` / `AndroidEncodedStreamChannel` /
+   `PlatformCodecProbe`，全部 Flutter-free）**进门禁 + 变异验证**。`sourceSeq` 的
+   distinct-PTS 去重规则在这一层，因为只有这层本机能自动跑。
+4. **Task 4**（#13 主体）native `EncodedStreamVideoOutput` + `EncodedStreamPlugin` +
+   Flutter 薄壳 → **真机上第一次看到 AU**（≥55fps 才算过，只有 30 就停下查）。
+5. **Task 5**（#13 收口）`EncodedStreamSource` + `encoderFactory` 接进 app，
+   物理下标留在 `CameraPluginBackend` 内。
+6. **Task 6**（#14 收口）`AndroidEncodeBudgetProbe` + `main.dart` 的 `probe:` 由 `null` 换成真实探针。
+7. **Task 7**（#15）真机端到端 + 长稳验收，三层计数分开统计。
+
+之后才是 Windows（`windows/record_handler.cpp:114` 已有进程内 MF H.264）→ macOS。
 
 ## 卡点
 
-- **原生编码实现一个都没有**（Android / Windows / macOS 未开始；Linux 写了但一行都没编译过，
-  且已移出发布矩阵）。
-- **没有任何平台实现 `EncodeBudgetProbe`** → `samples` 恒空 → 所有设备声明
-  `kFpsWithoutEvidence`(5)、只公告 `mjpeg`。承载字段与装配都齐了，只差平台去填。
-  没有任何平台填 `sourcePts`；`close()` 无超时兜底。
+- **一行原生编码代码都还没写**（本轮只产出计划）。计划里所有"期望值"都还是纸面的，
+  **Task 4 Step 6 的 ≥55fps 是真机上第一次能证伪的地方**。
+- **HEVC 在 1080p 的实测速率未知**：`media_codecs_performance.xml` 只给了 720p（53–117）与
+  4K（13–29）两档，1080p 靠外推（约 52–116）。**外推不是证据**，要 Task 6 实测。
+- **AVC 的 1080p 档是 30–66**，60 够得着但贴着上限 → 长稳掉到 30 是有可能的，Task 7 要量。
+- **Task 2 的三条事实未经源码核实**（`VideoOutput` 能否与 Preview/ImageCapture 同时绑定是最大
+  的不确定性）。若不成立，计划里给了备选路线 C 的判据，**不要现场发明第三条**。
 - **peak-vs-plateau 未定**（ADR §4.1.1，唯一开着的决策）。当前 inert。
 - **远端 CI 绿不绿看不到**：无 `gh`，`api.github.com` 对当前出口 IP 限流。
 
 ## 生效约束（仅本任务范围）
 
-- 不引入新依赖。
-- **`main.dart` 与插件层助手跑不了**：改完只能靠 `check_compile.py`（只编译不运行）+
-  用户 `flutter test`。别声称跑过。
-- 60fps 相关的任何承诺必须有真机实测数字；**不承诺所有真机必达 60**。
+- 不引入新依赖（vendor 插件不算：它是既有 `camera` 依赖的本地实现）。
+- **助手绝不在自己的 shell 里跑 `flutter pub get`**（假 symlink 会毁掉下一次 `flutter run`）；
+  `flutter test` / 构建 / 真机一律用户跑。`main.dart` 助手跑不了，只能 `check_compile.py` 类型检查。
+- 60fps 相关的任何承诺必须有真机实测数字；**不承诺所有真机必达 60**，只对 vivo V2405A 背书。
 - 段时长的误差方向**从未查证**，别引用旧文档里的倍数；它**不用于计费**。
 - 改「声明帧率 / 默认模式 / 公告 codec」必须同时扫 `tool/` 与 `test/`（**已踩两次**）。
-- 原生端落地后，A8 剩下的「最终 whole-branch 复核」才做得了。
+- 新断言必须做过变异验证；新增独立检查文件时**接线与变异验证同一次做完**。
