@@ -1,9 +1,11 @@
 # 计划实施状态
 
-> 覆盖 `docs/plan_v0.md` 与 `docs/superpowers/plans/` 下的七个计划。
+> 覆盖 `docs/plan_v0.md` 与 `docs/superpowers/plans/` 下的八个计划。
 > 记录每个计划**实现了什么、有意偏离了什么、明确没做什么、验证到什么程度**。
 >
-> **最后更新：2026-10-10，HEAD `83df291`。**
+> **最后更新：2026-10-10。**
+> 双模式取画面（照片 + 编码视频流）的整体方案见
+> `docs/superpowers/plans/2026-10-10-dual-mode-capture.md`；
 > Linux 原生编码分支已**暂停**，交接见 `docs/linux-encoded-stream-status.md`。
 > 权威架构说明见 `README.md`；协议权威是后端仓库的 `smartclass-webcam-server/docs/protocol/`。
 
@@ -21,8 +23,9 @@
 | 6 | `…/2026-10-07-camera-capability-probe.md` | ✅ **已实现（T1–T9）** | `23e7495`…`8be70c7`，`8c2b709` `dbd1135` `61504e9` |
 | 7 | `…/2026-10-09-recording-correctness-and-native-encoder.md` | ⚠️ **Phase A 完成（T1–T4）、T5 完成**；Phase B 原生端进行中 | `87f6fe0` `a438a74` `604316d` `36f55a8` `6ca637c` `f2341e5` |
 | 8 | `…/2026-10-09-linux-encoded-stream.md` | ⏸ **已暂停**（Task 1–4 已写，**未编译**） | `f10f86c` `83df291` |
+| 9 | `…/2026-10-10-dual-mode-capture.md` | 📋 **方案已定，未开工** | — |
 
-状态记号：✅ 按计划完成 · ⚠️ 完成但有待验证项 · ⏸ 暂停 · ⛔ 作废 / 取代 · ❌ 未实现
+状态记号：✅ 按计划完成 · ⚠️ 完成但有待验证项 · ⏸ 暂停 · 📋 方案已定未开工 · ⛔ 作废 / 取代 · ❌ 未实现
 
 ---
 
@@ -244,6 +247,9 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
   `flutter_linux` 头文件在本机也不存在。**一行都没有编译过。**
 - **为什么不再往下写另外三端**：上游计划 T6 Step 1 那个闸就是为这个设的 ——
   攒一批没人编译过的原生代码，等于把成本推给后面。
+- **⚠️ 顺序已改**（2026-10-10）：原顺序 Linux → Windows → macOS → Android 是错的 ——
+  它把**谁都编不了**的 Linux 排在了第一站。新顺序 **Android → Windows → macOS → Linux**，
+  依据是"用户能编能跑"：Android 有真机、Windows 就是这台机器。详见第 9 个计划。
 - **恢复时先查四件事**（详见交接文档）：`h264parse config-interval=-1` 的语义、
   `queue leaky=2` 的丢帧方向、`fl_value_new_uint8_list` 的签名（**唯一会直接挡住编译的**）、
   caps 是否真的协商上了（断言没写）。
@@ -301,9 +307,12 @@ v0 草案，**技术选型每一条都已被推翻**，仅作历史留档：`cam
 
 ## 五、已知缺口 / 下一步
 
-1. **Linux 原生编码分支暂停中**（第 8 节）。恢复的前置条件是一台 Linux 机器 +
-   `flutter build linux`。交接文档 `docs/linux-encoded-stream-status.md` 里列了
-   「恢复时先查的四件事」。
+1. **原生编码流的第一站改成 Android**（不是 Linux）。顺序 **Android → Windows →
+   macOS → Linux**，依据是"用户能编能跑"。Android 需要先 vendor 第二个插件
+   `camera_android_camerax`（CameraX 采集 + MediaCodec 编码），真机 V2405A 可测。
+   整体方案见第 9 个计划 `docs/superpowers/plans/2026-10-10-dual-mode-capture.md`。
+   Linux 排最后：本机没有 GStreamer/GTK/`flutter_linux` 头文件，**谁都编不了**；
+   设计 + 代码已写但未编译，有 WSL2 可随时验证。
 2. **`defaultFps` 已按要求改成 60（`b242541`），但当前帧泵交付不了 60。**
    帧泵每帧一张 `takePicture()`，单并发锁会把"上一次还没拍完就来的 tick"直接丢掉，
    1080p 实测约 5–10 fps。而服务端是**用 `fps` 估段时长**的，所以现在会**高估**每段
