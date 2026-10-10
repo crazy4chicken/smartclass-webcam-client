@@ -55,7 +55,9 @@ void runSustainedRateChecks() {
     eq('with the 10 warm-up frames set aside', result?.warmupFrames, 10);
     eq('and nothing duplicated', result?.duplicateFrames, 0);
     eq('over the counted window only', result?.window.inSeconds, 2);
-    check('and it held something', result!.heldAnything);
+    // `?.` and not `!`: a null here is a failure to report, not a crash. The
+    // whole gate used to die on one of these — see `guard` in verify_pure.
+    check('and it held something', result?.heldAnything ?? false);
   }
 
   // --- warm-up is excluded, and exclusion is not re-counting ---------------
@@ -127,7 +129,7 @@ void runSustainedRateChecks() {
     eq('the warm-up frame is not counted as new', result?.newFrames, 0);
     eq('it is counted as a repeat', result?.duplicateFrames, 1);
     eq('so the rate is zero', result?.fps, 0);
-    check('and nothing was held', !result!.heldAnything);
+    check('and nothing was held', !(result?.heldAnything ?? true));
   }
 
   // --- a stall still produces a measurement --------------------------------

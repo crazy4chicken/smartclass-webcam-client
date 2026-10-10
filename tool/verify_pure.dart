@@ -101,6 +101,25 @@ void eqBytes(String name, List<int> actual, List<int> expected) {
 
 void section(String name) => print(name);
 
+/// Runs one section and turns a thrown error into a recorded failure.
+///
+/// This is load-bearing, not defensive decoration. A section used to be called
+/// bare, so a single `!` on a null — or a `.single` on an empty list — escaped
+/// as an uncaught error: `main` died where it stood, printed no
+/// `passed/failed` line, and every section after it was skipped without a
+/// trace. One null-assertion could therefore hide a hundred failures and still
+/// leave the gate looking like it had never run. Now the throw *is* the
+/// failure for that section, and the run goes on to report the rest.
+Future<void> guard(String name, FutureOr<void> Function() body) async {
+  try {
+    await body();
+  } catch (error, stack) {
+    final where = stack.toString().split('\n').first.trim();
+    check('$name threw: $error', false);
+    print('        at $where');
+  }
+}
+
 /// Lets queued microtasks and zero-delay timers run.
 Future<void> settle([int turns = 20]) async {
   for (var i = 0; i < turns; i++) {
@@ -6146,45 +6165,50 @@ Future<void> checkCoordinator() async {
 }
 
 Future<void> main() async {
-  checkResolutionSelection();
-  checkStreamSettings();
-  checkWireCodec();
-  checkCommandParsing();
-  checkDeviceMessages();
-  checkBinaryFraming();
-  checkBaseUrlValidation();
-  checkConnectionSettings();
-  checkResolveConnectionSettings();
-  checkCredentials();
-  checkRegistrationRequest();
-  checkUriHelpers();
-  checkUnrecognizedLog();
-  checkCodecSelection();
-  await checkFramePump();
-  checkSerialLock();
-  checkJpegTrim();
-  checkJpegSize();
-  checkCameraCapabilities();
-  checkCameraOrder();
-  checkCapabilityCache();
-  await checkCapabilityBootstrap();
-  await checkGatewayCameraList();
-  checkCapabilityReport();
-  await checkCoordinatorCapabilityReport();
-  checkMjpegEncoder();
-  checkNativeVideoEncoder();
-  checkDeliveredRateFromEncoder();
-  runAnnexBChecks();
-  await runEncodeBudgetChecks();
-  runDefaultModeChecks();
-  runSustainedRateChecks();
-  runRateCalibrationChecks();
-  runDiagnosticsChecks();
-  await checkCameraProvider();
-  await checkFrameStore();
-  await checkMockGateway();
-  await checkSmartClassGateway();
-  await checkCoordinator();
+  // Every section goes through [guard]. See it for why: an uncaught throw
+  // here used to kill the run before the summary line existed.
+  await guard('resolution selection', checkResolutionSelection);
+  await guard('stream settings', checkStreamSettings);
+  await guard('wire codec', checkWireCodec);
+  await guard('command parsing', checkCommandParsing);
+  await guard('device messages', checkDeviceMessages);
+  await guard('binary framing', checkBinaryFraming);
+  await guard('base url validation', checkBaseUrlValidation);
+  await guard('connection settings', checkConnectionSettings);
+  await guard('resolved connection settings', checkResolveConnectionSettings);
+  await guard('credentials', checkCredentials);
+  await guard('registration request', checkRegistrationRequest);
+  await guard('uri helpers', checkUriHelpers);
+  await guard('unrecognized log', checkUnrecognizedLog);
+  await guard('codec selection', checkCodecSelection);
+  await guard('frame pump', checkFramePump);
+  await guard('serial lock', checkSerialLock);
+  await guard('jpeg trim', checkJpegTrim);
+  await guard('jpeg size', checkJpegSize);
+  await guard('camera capabilities', checkCameraCapabilities);
+  await guard('camera order', checkCameraOrder);
+  await guard('capability cache', checkCapabilityCache);
+  await guard('capability bootstrap', checkCapabilityBootstrap);
+  await guard('gateway camera list', checkGatewayCameraList);
+  await guard('capability report', checkCapabilityReport);
+  await guard(
+    'coordinator capability report',
+    checkCoordinatorCapabilityReport,
+  );
+  await guard('mjpeg encoder', checkMjpegEncoder);
+  await guard('native video encoder', checkNativeVideoEncoder);
+  await guard('delivered rate from encoder', checkDeliveredRateFromEncoder);
+  await guard('annex b', runAnnexBChecks);
+  await guard('encode budget', runEncodeBudgetChecks);
+  await guard('default mode', runDefaultModeChecks);
+  await guard('sustained rate', runSustainedRateChecks);
+  await guard('rate calibration', runRateCalibrationChecks);
+  await guard('diagnostics', runDiagnosticsChecks);
+  await guard('camera provider', checkCameraProvider);
+  await guard('frame store', checkFrameStore);
+  await guard('mock gateway', checkMockGateway);
+  await guard('smartclass gateway', checkSmartClassGateway);
+  await guard('coordinator', checkCoordinator);
 
   print('');
   print('passed: $_passed, failed: ${_failures.length}');
