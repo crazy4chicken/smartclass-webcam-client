@@ -16,7 +16,12 @@
 - **代码就位情况（以文件系统为准）**：`EncodedStreamVideoOutput.java`、`EncodedStreamPlugin.java`、
   `lib/src/capture/camera_plugin_encoded_transport.dart`、`lib/src/app/android_encoded_stream.dart`、
   `lib/src/capture/encoded_stream_transport.dart` 全在。**没写**：`main.dart` 的临时冒烟入口
-  （Task 4 step 3）、`AndroidEncodeBudgetProbe`（Task 6）。
+  （Task 4 step 3）。
+- **⚠️ 工作区另有一份未提交、且非本次会话所写的 Task 6 草稿**：`lib/src/app/android_encode_probe.dart`
+  （新文件，12:40 写入）+ `main.dart` / `android_encoded_stream.dart` 的接线。
+  **未验证、未提交、归属不明** —— 接手第一件事是确认它是不是别人正在做的一半，**别当它不存在，
+  也别替它背书**（没跑过门禁、没跑过 `check_compile.py`、更没上过真机）。
+  本文件其余各处「Task 6 未做」的表述，指的是 **HEAD 里的状态**。
 - **真机仍在**（vivo V2405A / mt6991 / Android 16 / arm64-v8a）。实测特征表在 ADR 0002 §七，
   **别重测**。
 - **两条已经论证完、不要再重新论证的结论**：
@@ -33,7 +38,7 @@
    **它存在的意义就是被删掉** —— 证据拿到后移除。
 2. **Task 6 的 `AndroidEncodeBudgetProbe`**：用真管线测持续帧率并写进 `EncodeEvidence`。
    **这是唯一能合法抬升「声明帧率」、并把 h265/h264 送进公告的路** —— 没有它，编码流接得再好
-   也永远不会被服务器点名。
+   也永远不会被服务器点名。（工作区可能已有一份未提交草稿，见「当前状态」那条 ⚠️。）
 3. **Task 7**：真机端到端 + 长稳。
 
 **验收（Task 4 Step 6）**：10 秒内 AU ≥ 550（≥55fps）、选中的是 `c2.mtk.hevc.encoder`、
