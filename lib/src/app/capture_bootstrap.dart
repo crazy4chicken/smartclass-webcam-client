@@ -56,9 +56,10 @@ class CapturePlan {
 /// Three ways out, and only one of them measures anything:
 ///
 /// * **cache hit** — the stored evidence still describes this camera *and*
-///   this encoder, so nothing is opened and nothing is measured. A kiosk's
-///   second launch costs the same as its first boot whether or not it has a
-///   hardware encoder.
+///   this encoder **and holds at least one sample**, so nothing is opened and
+///   nothing is measured. A kiosk's second launch costs the same as its first
+///   boot whether or not it has a hardware encoder. A stored answer with no
+///   sample is a miss rather than a hit: see the `measured` case below.
 /// * **no probe** — nothing can be measured, so [EncodeEvidence.empty] is
 ///   returned and **nothing is stored**: an unanswered question is not the same
 ///   as the answer "held nothing", and caching the first would keep a device
@@ -66,8 +67,12 @@ class CapturePlan {
 ///   today's state on every platform, and it is why the floor is what gets
 ///   announced.
 /// * **measured** — the probe runs and its answer is stored, but only when it
-///   describes *this* camera and *this* encoder. Evidence for a different
-///   fingerprint is a miss, never a partial hit: see [EncodeEvidence.matches].
+///   describes *this* camera, *this* encoder, and holds **at least one
+///   sample**. Evidence for a different fingerprint is a miss, never a partial
+///   hit: see [EncodeEvidence.matches]. An answer with no sample at all is not
+///   stored either — it means the probe got no frame from any codec, which is
+///   an unanswered question rather than the answer "held nothing", and storing
+///   it would make the first failure permanent.
 ///
 /// Must never throw. A start-up that dies because a cache or a probe misbehaved
 /// is a kiosk that never comes up.
@@ -94,9 +99,20 @@ Future<EncodeEvidence> ensureEncodeEvidence({
       // outcome here is a device that will not start.
       log?.call('[evidence] the cache could not be read: $error');
     }
-    if (cached != null) {
+    if (cached != null && cached.samples.isNotEmpty) {
       log?.call('[evidence] cached: $cached (nothing measured)');
       return cached;
+    }
+    if (cached != null) {
+      // A stored answer that holds no sample at all is not an answer: it is
+      // what a probe leaves behind when it never got a single frame. Honouring
+      // it would make the first failure permanent — the device would never
+      // measure again, so an encoder that arrived with a driver update could
+      // never be noticed. The same reasoning as the `probe == null` branch
+      // below, one level further in. Treat it as a miss and measure.
+      log?.call(
+        '[evidence] the cached answer holds no sample: measuring again',
+      );
     }
   }
 
@@ -130,6 +146,19 @@ Future<EncodeEvidence> ensureEncodeEvidence({
     // real but they are not about this device, and using them would put a rate
     // nothing here ever held into the registration.
     log?.call('[evidence] the probe answered for something else: $measured');
+    return EncodeEvidence.empty;
+  }
+
+  if (measured.samples.isEmpty) {
+    // A probe that ran and produced **no sample at all** measured nothing —
+    // every codec either refused to be built, failed to open, or delivered no
+    // frame. That is the same unanswered question as having no probe, and the
+    // gate names the invariant: "measured and held nothing reads like never
+    // measured". So it is reported and **not cached**: caching it would let
+    // the first failure answer for every launch after it. A codec that really
+    // was measured and really held nothing is a different thing — it produces
+    // a sample whose `fps` is 0, and that is worth caching.
+    log?.call('[evidence] the probe measured nothing; not cached');
     return EncodeEvidence.empty;
   }
 

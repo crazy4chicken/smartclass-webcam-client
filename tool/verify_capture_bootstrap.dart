@@ -225,8 +225,9 @@ Future<void> runCaptureBootstrapChecks() async {
 
   section('measured and held nothing reads like never measured');
   {
+    final store = InMemoryEncodeEvidenceStore();
     final plan = await _plan(
-      store: InMemoryEncodeEvidenceStore(),
+      store: store,
       probe: _FakeProbe(_evidence(_fp, _enc, const <EncodeSample>[])),
       available: _withNative,
       measured: _caps(<CameraResolution>[_p1080]),
@@ -236,6 +237,38 @@ Future<void> runCaptureBootstrapChecks() async {
       'the floor is published',
       plan.codecs.map((c) => c.wireName).join(','),
       'mjpeg',
+    );
+    // "Reads like never measured" has to include the cache, or the first
+    // failure answers for every launch after it: a probe that got no frame
+    // from any codec would be remembered as the device's final word, and an
+    // encoder that arrived with a driver update could never be noticed.
+    check('an answer with no sample is not stored', store.value == null);
+  }
+
+  section('a stored answer with no sample does not stop a re-measure');
+  {
+    // The state a device is left in by the failure above, written by an older
+    // build. It must heal on its own: honouring it would leave the device
+    // announcing the floor forever with no way back.
+    final store = InMemoryEncodeEvidenceStore()
+      ..value = _evidence(_fp, _enc, const <EncodeSample>[]);
+    final probe = _FakeProbe(
+      _evidence(_fp, _enc, <EncodeSample>[
+        _sample(CaptureCodec.h265, _p1080, 60),
+      ]),
+    );
+    final plan = await _plan(
+      store: store,
+      probe: probe,
+      available: _withNative,
+      measured: _caps(<CameraResolution>[_p1080]),
+    );
+    eq('the empty answer is treated as a miss', probe.calls, 1);
+    eq('so the measured rate is declared', plan.fps, 60);
+    eq(
+      'and the real answer replaces it',
+      plan.codecs.map((c) => c.wireName).join(','),
+      'h265',
     );
   }
 
