@@ -5,6 +5,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'src/agent/agent_coordinator.dart';
+import 'src/app/android_encode_probe.dart';
 import 'src/app/android_encoded_stream.dart';
 import 'src/app/capability_bootstrap.dart';
 import 'src/app/capture_bootstrap.dart';
@@ -220,28 +221,35 @@ Future<Widget> _startKiosk({
   // that geometry, the declared rate from the evidence, the codec list from
   // both. See `planCapture`.
   //
-  // No platform implements `EncodeBudgetProbe` yet (tasks #12 / #13 / #16 /
-  // #20), so the plan comes out as the floor — `mjpeg` at
-  // `kFpsWithoutEvidence` — and nothing downstream changes. That is the point
-  // of wiring it now: a device with no encoder still previews, still takes
-  // photos and still streams mjpeg, and the moment a platform probe is
-  // constructed here every number below moves with it instead of being
-  // recomputed in three places.
+  // Android measures what its encoder chain actually delivers; every other
+  // platform still has no probe, so the plan comes out as the floor — `mjpeg`
+  // at `kFpsWithoutEvidence` — exactly as before. That asymmetry is the point:
+  // a device with no encoder still previews, still takes photos and still
+  // streams mjpeg, and the first real measurement moves every number below
+  // instead of being recomputed in three places.
   //
-  // The encoder identity is part of the evidence cache key, so it has to name
-  // the encoder that will actually run. Today that is the mjpeg floor; a
-  // platform that ships a native encoder passes its own name here.
+  // The identity is part of the evidence cache key, so it has to name the
+  // encoder that will actually run: the mjpeg floor on platforms that have no
+  // native encoder, and the hardware encoders' own names on Android. A driver
+  // update that changes one of those has to change the key with it, or a rate
+  // measured before the update would answer for the hardware after it.
+  final claimedCodecList = claimedCodecs(available);
+  final androidProbe = encodedStream.isSupported
+      ? AndroidEncodeBudgetProbe(factory: encodedStream, log: debugPrint)
+      : null;
   final plan = await planCapture(
     measured: inventory.capabilities.isEmpty
         ? CameraCapabilities.empty
         : inventory.capabilities.first,
     available: available,
     store: evidenceStore,
-    probe: null,
+    probe: androidProbe,
     cameraFingerprint: cameraFingerprint(<String>[
       for (final descriptor in inventory.descriptors) descriptor.name,
     ]),
-    encoderIdentity: kMjpegEncoderIdentity,
+    encoderIdentity: androidProbe == null
+        ? kMjpegEncoderIdentity
+        : encodedStream.evidenceIdentity(claimedCodecList),
     fallbackResolution: captureConfig.resolution,
     log: debugPrint,
   );
@@ -281,7 +289,9 @@ Future<Widget> _startKiosk({
   // The claim set, in the one definition the plan also used. Passed to the
   // coordinator so the mode it seeds and the codecs it publishes are derived
   // from the same device the plan described.
-  final claimed = claimedCodecs(available);
+  // The same list the plan used — computed once above, so the evidence cache
+  // key and the codecs the mode is seeded from cannot drift apart.
+  final claimed = claimedCodecList;
 
   // The gateway and the coordinator refer to each other: the gateway needs the
   // coordinator's live state for its periodic `status`, and the coordinator

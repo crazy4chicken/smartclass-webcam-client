@@ -19,11 +19,17 @@
   `lib/src/capture/camera_plugin_encoded_transport.dart`、`lib/src/app/android_encoded_stream.dart`、
   `lib/src/capture/encoded_stream_transport.dart` 全在。**没写**：`main.dart` 的临时冒烟入口
   （Task 4 step 3）。
-- **⚠️ 工作区另有一份未提交、且非本次会话所写的 Task 6 草稿**：`lib/src/app/android_encode_probe.dart`
-  （新文件，12:40 写入）+ `main.dart` / `android_encoded_stream.dart` 的接线。
-  **未验证、未提交、归属不明** —— 接手第一件事是确认它是不是别人正在做的一半，**别当它不存在，
-  也别替它背书**（没跑过门禁、没跑过 `check_compile.py`、更没上过真机）。
-  本文件其余各处「Task 6 未做」的表述，指的是 **HEAD 里的状态**。
+- **Task 6 的实现已经有了**（`AndroidEncodeBudgetProbe`）：`lib/src/app/android_encode_probe.dart`
+  + `main.dart` 把 `probe:` 从 `null` 换成它、`android_encoded_stream.dart` 新增
+  `evidenceIdentity()` 作缓存键。
+  - **这份代码不是本会话写的**（12:40 由他人写入），本会话只补了一个**缺 import 的编译错误**：
+    它用了 `EncodedFrame` 却没有 `import '../capture/video_encoder.dart'` —— `sustained_rate.dart`
+    在 `measureDeliveredRate` 的签名里**用到**这个类型但**不 re-export** 定义它的文件，所以名字
+    不在作用域里。修好后：`check_compile.py` `compiled: 46, failed: 0`、门禁 `passed: 1290,
+    failed: 0`、`dart format` 干净。
+  - **仍然没有任何真机证据**：探针从未在设备上跑过，所以**不能**说它测得出数字、更不能说
+    1080p60 可达。`planCapture` 会拿它返回的东西去决定声明帧率与公告 codec —— 第一次真机运行
+    就是第一次验证。
 - **真机仍在**（vivo V2405A / mt6991 / Android 16 / arm64-v8a）。实测特征表在 ADR 0002 §七，
   **别重测**。
 - **两条已经论证完、不要再重新论证的结论**：
@@ -33,14 +39,13 @@
 
 ## 下一步任务
 
-按依赖顺序，只剩「把它跑起来证明」：
+**代码已经全部写完了**（Task 4 / 5 / 6 的实现都在仓里）。剩下的**只有一件事：上真机把它跑起来**。
 
 1. **`main.dart` 的临时冒烟入口**（`--dart-define=ENCODED_STREAM_SMOKE=true`）：绕过协调器，
    直接 `AndroidEncodedStreamFactory.encoderFor(codec: h265, ...)` 开 1080p60，10 秒数 AU。
-   **它存在的意义就是被删掉** —— 证据拿到后移除。
-2. **Task 6 的 `AndroidEncodeBudgetProbe`**：用真管线测持续帧率并写进 `EncodeEvidence`。
-   **这是唯一能合法抬升「声明帧率」、并把 h265/h264 送进公告的路** —— 没有它，编码流接得再好
-   也永远不会被服务器点名。（工作区可能已有一份未提交草稿，见「当前状态」那条 ⚠️。）
+   **它存在的意义就是被删掉** —— 证据拿到后移除。这是唯一还没写的代码。
+2. **真机跑一次**（用户跑 `flutter run` / 构建安装）：走一遍 `planCapture` → `AndroidEncodeBudgetProbe`
+   → `EncodeEvidence` → 公告。**这是 Task 6 的第一次验证**，它至今没在任何设备上跑过。
 3. **Task 7**：真机端到端 + 长稳。
 
 **验收（Task 4 Step 6）**：10 秒内 AU ≥ 550（≥55fps）、选中的是 `c2.mtk.hevc.encoder`、

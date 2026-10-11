@@ -108,6 +108,31 @@ class AndroidEncodedStreamFactory {
   CodecProbe codecProbe() =>
       PlatformCodecProbe(transport: _transport, log: log);
 
+  /// The identity of the encoder *set* behind [codecs], for the evidence cache.
+  ///
+  /// `EncodeEvidence` is cached and validated under `encoderIdentity`, and the
+  /// key has to name the encoders the numbers came from: a driver update that
+  /// swaps `c2.mtk.hevc.encoder` for something slower must invalidate a cached
+  /// rate, and it can only do that if the identity changed with it. One string
+  /// because the evidence covers every measured codec at once, so it lists all
+  /// of them — `h265=c2.mtk.hevc.encoder,h264=c2.mtk.avc.encoder`.
+  ///
+  /// Empty when [prime] has not run or failed, which is the same "the platform
+  /// did not say" that [VideoEncoder.identity] documents; callers that need the
+  /// mjpeg floor's identity use `kMjpegEncoderIdentity` instead of this.
+  String evidenceIdentity(List<CaptureCodec> codecs) {
+    if (_claims == null) return '';
+    final parts = <String>[];
+    for (final codec in codecs) {
+      final name = _identityFor(codec);
+      // `unknown` rather than an empty field: a codec the platform would not
+      // name still has to occupy its slot, or two different devices would
+      // produce the same key for different hardware.
+      parts.add('${codec.wireName}=${name.isEmpty ? 'unknown' : name}');
+    }
+    return parts.join(',');
+  }
+
   /// The coordinator's encoder factory, or null off Android.
   ///
   /// Null is deliberate and load-bearing: the coordinator only falls back to
