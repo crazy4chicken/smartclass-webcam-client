@@ -345,3 +345,77 @@ Dart 必须自己调 `VideoCapture.withOutput` 并参与绑定；而插件今天
    → 退机制 3。
 
 **不会证伪本选择的：** HEVC 实测只到 30fps。那是速率结论（§八末），与「VideoOutput 怎么进绑定」无关。
+
+---
+
+## 十、补遗（2026-10-11）：`VideoOutput` 在 1.6.2 的真实契约 —— 首次编译暴露的事实
+
+> 本节由第一次真编译（`flutter run` → `:camera_android_camerax:compileDebugJavaWithJavac`，4 个 error）产生。
+> 所有结论都来自对 **camera-video / camera-core 1.6.2 的 classes.jar** 跑 `javap`（不是猜）。
+
+### 10.1 `StreamInfo` 是**封闭**的 —— 自定义 `VideoOutput` **不能**自己造一个
+
+`androidx.camera.video.StreamInfo` 的 `of(...)` 工厂、`STREAM_ID_ANY`（值 = 0）以及
+`StreamInfo.StreamState` 枚举**全部是包级私有**；`androidx.camera.video` 之外的类型无法构造
+`StreamInfo`。而 `VideoOutput.getStreamInfo()` 在 1.6.2 返回 `Observable<StreamInfo>`（不再是
+`StreamInfo`）。
+
+| 事实 | 来源 |
+| --- | --- |
+| `getStreamInfo()` 返回 `Observable<StreamInfo>`，且是 **default 方法** | `javap androidx.camera.video.VideoOutput` |
+| 该 default 直接返回 `StreamInfo.ALWAYS_ACTIVE_OBSERVABLE` | 同一命令的字节码：`getstatic ALWAYS_ACTIVE_OBSERVABLE; areturn` |
+| `ALWAYS_ACTIVE_OBSERVABLE` = `ConstantObservable.withValue(StreamInfo.of(0 /* ANY */, ACTIVE))` | `javap -p -c StreamInfo` 的 `<clinit>` |
+| `StreamInfo.of`、`STREAM_ID_ANY`、`StreamState` 均非 public | `javap -p StreamInfo`（只有 `getId()` 等三个 getter 是 public） |
+
+**结论（已落地）：`getStreamInfo()` 不覆写**，继承默认即可 —— 那正好是"永远 ACTIVE"的流状态，
+也正是原来手写 override 想表达的意思。文件里已留注释禁止再把它加回来。
+
+### 10.2 `getMediaSpec()` **必须非空**，否则绑定即抛
+
+| 事实 | 来源 |
+| --- | --- |
+| `VideoCapture.onMergeConfig()` → `updateCustomOrderedResolutionsByQuality()` 开头就调 `getMediaSpecOrThrow()`，null 时抛 `IllegalArgumentException("MediaSpec can't be null")` | `javap -p -c VideoCapture`：`getMediaSpecOrThrow` 的 `ifnonnull` / `athrow` |
+| 流规格更新路径里对 `getMediaSpec()` 的返回值直接 `Objects.requireNonNull` | 同一 dump：`invokevirtual getMediaSpec` 紧跟 `invokestatic Objects.requireNonNull` |
+
+**结论（已落地）：覆写 `getMediaSpec()`，返回默认 `MediaSpec.builder().build()`。** 内容保持默认 ——
+几何 / 帧率 / 码率一律来自调用方给的 `MediaFormat`，不走 CameraX 的 quality 协商。
+
+### 10.3 `getMediaCapabilities()` 的默认值不能直接用
+
+默认返回 `VideoCapabilities.EMPTY`，它的 `getSupportedDynamicRanges()` **返回空集**（`EMPTY` 的匿名
+实现里就是 `new HashSet<>()`）。`VideoCapture.getSupportedDynamicRanges()` 会把它与其它 use case 求交 ——
+空集没有可交的东西。
+
+**结论（已落地）：覆写为「只报 SDR + 不报任何 `Quality`」。** 报空 quality 表是**故意**的：
+`VideoCapture` 会打一行 `Can't find any supported quality on the device.` 然后跳过 quality 驱动的
+分辨率表（该分支不抛异常，只 log —— 只有 high-speed session 才抛），于是分辨率改由调用方在
+`VideoCapture.Builder` 上设的 `ResolutionSelector` 决定。**这必须是唯一的分辨率来源**：编码器是按
+`MediaFormat` 里的宽高 `configure` 的，若 CameraX 给的 surface 尺寸与之不同，画面就是坏的。
+
+### 10.4 其余 default 可以不动
+
+`Recorder`（CameraX 自带的唯一实现）只覆写了 `onSurfaceRequested` / `getMediaSpec` /
+`getStreamInfo` / `isSourceStreamRequired` / `onSourceStateChanged` / `getMediaCapabilities`；
+它**没有**覆写 `getEncoderProfilesResolver` 与 `isQualitySelectorDefault`。既然官方实现靠默认活着，
+我们也不动它们。`isSourceStreamRequired()` 默认 false 对我们无害：本 output 的流恒为 ACTIVE。
+
+### 10.5 给 Task 4 的硬约束（`EncodedStreamPlugin.java` 建 `VideoCapture` 时）
+
+1. **必须** `setResolutionSelector(...)`，目标尺寸 = `MediaFormat` 的宽高（当前目标 1920×1080），
+   带 fallback 规则。不设 → 分辨率由 CameraX 默认挑，可能与编码器几何不一致。
+2. **必须** `setTargetFrameRate(new Range<>(60, 60))`（`VideoCapture.Builder` 有这个方法）。
+3. 不要再给 `VideoCapture.Builder` 设 `setCustomOrderedResolutions()`：它会与 quality 路径的
+   `Preconditions` 检查打架（`isQualitySelectorDefault()` 必须为 true）。
+
+### 10.6 本机可以编 Java（推翻「本机编不了 Java」的旧说法）
+
+不需要 Gradle 也能验证单文件：
+
+- `android.jar`：`C:/Users/Lhui/AppData/Local/Android/Sdk/platforms/android-36/android.jar`
+- CameraX：从 `~/.gradle/caches/modules-2/files-2.1/androidx.camera/<module>/1.6.2/*.aar` 里
+  取 `classes.jar`；再加 guava / `androidx.annotation` / `androidx.core` 的 jar
+- `javac -proc:none -cp "<上列用分号分隔>" -d out <文件>`
+
+已用它**先复现了用户那 4 个 error、再确认修完为 0**。以后改 `packages/*/android/**/*.java`
+都应先跑这个，别再拿用户的一次 Gradle 构建当第一次检查。
+（`kotlin.*` 相关的 warning 是因为这条精简 classpath 没有 kotlin stdlib，Gradle 里不会出现。）

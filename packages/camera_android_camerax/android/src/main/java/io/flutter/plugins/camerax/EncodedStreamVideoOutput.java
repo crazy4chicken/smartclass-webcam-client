@@ -16,12 +16,23 @@ import android.os.HandlerThread;
 import android.view.Surface;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.camera.core.CameraInfo;
+import androidx.camera.core.DynamicRange;
 import androidx.camera.core.SurfaceRequest;
-import androidx.camera.video.StreamInfo;
+import androidx.camera.core.impl.Observable;
+import androidx.camera.video.MediaSpec;
+import androidx.camera.video.Quality;
+import androidx.camera.video.VideoCapabilities;
 import androidx.camera.video.VideoOutput;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
 import java.nio.ByteBuffer;
+import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -55,6 +66,39 @@ public final class EncodedStreamVideoOutput implements VideoOutput {
   private static final long EOS_TIMEOUT_MS = 5_000L;
   private static final String HEVC_MIME = "video/hevc";
   private static final String AVC_MIME = "video/avc";
+
+  /**
+   * The capabilities this output reports to {@code VideoCapture}: SDR only, no {@link Quality}.
+   *
+   * <p>The dynamic range is the load-bearing half. {@code VideoCapture} intersects these with the
+   * other bound use cases, and the {@link VideoOutput} default ({@link VideoCapabilities#EMPTY})
+   * reports an empty set, so there is nothing left to intersect. The quality list is deliberately
+   * empty so
+   * that {@code VideoCapture} skips its quality-driven resolution table (it logs "Can't find any
+   * supported quality on the device" and returns): this encoder takes its geometry from the
+   * {@link android.media.MediaFormat} it was constructed with, so the only thing allowed to pick a
+   * resolution is the {@code ResolutionSelector} the caller sets on the {@code VideoCapture.Builder}.
+   */
+  private static final VideoCapabilities SDR_ONLY_CAPABILITIES =
+      new VideoCapabilities() {
+        @NonNull
+        @Override
+        public Set<DynamicRange> getSupportedDynamicRanges() {
+          return Collections.singleton(DynamicRange.SDR);
+        }
+
+        @NonNull
+        @Override
+        public List<Quality> getSupportedQualities(@NonNull DynamicRange dynamicRange) {
+          return Collections.emptyList();
+        }
+
+        @Override
+        public boolean isQualitySupported(
+            @NonNull Quality quality, @NonNull DynamicRange dynamicRange) {
+          return false;
+        }
+      };
 
   @NonNull private final MediaFormat format;
   @NonNull private final String mimeType;
@@ -94,10 +138,32 @@ public final class EncodedStreamVideoOutput implements VideoOutput {
     return encoderName;
   }
 
+  // getStreamInfo() is deliberately NOT overridden.
+  //
+  // CameraX 1.6.2 closed StreamInfo off: StreamInfo.of(...), STREAM_ID_ANY and even the
+  // StreamState enum are package-private, so no type outside androidx.camera.video can build one;
+  // that is why the hand-written override this comment replaces did not compile. The default returns
+  // StreamInfo.ALWAYS_ACTIVE_OBSERVABLE, i.e. StreamInfo.of(STREAM_ID_ANY, StreamState.ACTIVE):
+  // exactly the "this output always consumes frames" state that override was trying to declare.
+  // (Read off camera-video-1.6.2's classes.jar.) Do not reinstate an override here.
+
+  /**
+   * A non-null {@link MediaSpec}. {@code VideoCapture} throws {@code IllegalArgumentException}
+   * ("MediaSpec can't be null") from {@code onMergeConfig()} and runs the value through
+   * {@code Objects.requireNonNull} on stream-spec updates, so the interface default (null) is not
+   * survivable. The content stays at the default: geometry, frame rate and bit rate come from the
+   * caller's {@link android.media.MediaFormat}, not from CameraX quality negotiation.
+   */
   @NonNull
   @Override
-  public StreamInfo getStreamInfo() {
-    return StreamInfo.of(StreamInfo.STREAM_ID_ANY);
+  public Observable<MediaSpec> getMediaSpec() {
+    return FixedObservable.of(MediaSpec.builder().build());
+  }
+
+  @NonNull
+  @Override
+  public VideoCapabilities getMediaCapabilities(@NonNull CameraInfo cameraInfo, int sessionType) {
+    return SDR_ONLY_CAPABILITIES;
   }
 
   @Override
@@ -256,6 +322,40 @@ public final class EncodedStreamVideoOutput implements VideoOutput {
       if (t != null) {
         t.quitSafely();
       }
+    }
+  }
+
+  /**
+   * The smallest possible {@link Observable}: one value, handed to every observer on registration.
+   * CameraX's own {@code ConstantObservable} behaves the same but sits in an
+   * {@code @RestrictTo(LIBRARY_GROUP)} package; this keeps the fork off it.
+   */
+  private static final class FixedObservable<T> implements Observable<T> {
+    @NonNull private final T value;
+
+    static <T> Observable<T> of(@NonNull T value) {
+      return new FixedObservable<>(value);
+    }
+
+    private FixedObservable(@NonNull T value) {
+      this.value = value;
+    }
+
+    @NonNull
+    @Override
+    public ListenableFuture<T> fetchData() {
+      return Futures.immediateFuture(value);
+    }
+
+    @Override
+    public void addObserver(
+        @NonNull Executor executor, @NonNull Observable.Observer<? super T> observer) {
+      executor.execute(() -> observer.onNewData(value));
+    }
+
+    @Override
+    public void removeObserver(@NonNull Observable.Observer<? super T> observer) {
+      // A constant value has nothing to unregister.
     }
   }
 
