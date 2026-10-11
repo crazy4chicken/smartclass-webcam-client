@@ -5,14 +5,17 @@
 
 ## 当前状态
 
-- **git：`HEAD == origin/master == 01453f7`（已推送）。** 上一版 handover 说的"两个提交未推送"
-  是过期的，**别再当真**。工作区现有 2 个**未提交**改动：
-  - `packages/camera_android_camerax/.../EncodedStreamVideoOutput.java`（本次修复）
-  - `docs/adr/0002-android-encoded-stream-seam.md`（新增 §十）
-- **Android 编码流 Task 4 的第一块代码第一次被真正编译**（`flutter run` →
-  `:camera_android_camerax:compileDebugJavaWithJavac`，**4 个 error**）。已修完，并且
-  **本机用 `javac` 先复现那 4 个 error、再确认修到 0 error**（命令见 ADR 0002 §10.6）。
-  **真机 `flutter run` 还没再跑过** —— 需要你跑。
+- **git：`HEAD = 09d1d52`，`origin/master = 01453f7` → 有 1 个提交未推送**（`fix(android): a
+  custom VideoOutput cannot build a StreamInfo on CameraX 1.6.2`）。工作区干净。**接手第一件事
+  建议：`git push`。**
+- **Android 编码流 Task 4 的第一块代码已经过真机 Gradle 编译**：先是 4 个 javac error，
+  修完后**用户跑 `flutter run -d 10AF5R29MC004Y6` 通过**（这是它第一次被真正编译 + 装到真机）。
+  修的过程里**本机用 `javac` 先复现那 4 个 error、再确认修到 0 error**（命令见 ADR 0002 §10.6）。
+- **Task 4 的文件现状（以文件系统为准）**：已有 `EncodedStreamVideoOutput.java`、
+  `lib/src/capture/encoded_stream_transport.dart`；**待写** `EncodedStreamPlugin.java` 与
+  `lib/src/capture/camera_plugin_encoded_transport.dart`。另：本文早先写的
+  `windows/record_handler.cpp` 是**错路径**，实际是
+  `packages/camera_desktop/windows/record_handler.cpp`。
 - 门禁 `passed: 1290, failed: 0`（本轮实跑）。`dart format` / `check_compile.py` 本轮未跑
   （本次没动 Dart）。
 - `docs/superpowers/plans/2026-10-10-android-encoded-stream.md` 的 7 个任务：
@@ -22,10 +25,9 @@
 
 ## 下一步任务
 
-0. **你跑一次 `flutter run -d 10AF5R29MC004Y6`** —— 确认 `:camera_android_camerax` 编译过了。
-   这是本轮唯一还没验的事。
+（编译这一步已完成，直接往下做。）
 
-**然后 Task 4 剩下的三块**（顺序即依赖）：
+**Task 4 剩下的三块**（顺序即依赖）：
 
 1. `EncodedStreamPlugin.java`：注册 `MethodChannel('smartclass/encoded_stream')` +
    `EventChannel('smartclass/encoded_stream/packets')`；`open` 里由 `cameraId` 推出 `CameraSelector`、
@@ -41,7 +43,8 @@
 **Task 4 Step 6 验收**：10 秒内 AU ≥ 550（≥55fps）、选中的是 `c2.mtk.hevc.encoder`、
 同期拍照仍成功。**只有 30 上下就停下查帧率协商，不许带着 30fps 往下做。**
 
-之后才是 Windows（`windows/record_handler.cpp:114` 已有进程内 MF H.264）→ macOS。
+之后才是 Windows（`packages/camera_desktop/windows/record_handler.cpp:114` 已有进程内 MF H.264）
+→ macOS。
 
 ## 卡点
 
