@@ -32,6 +32,15 @@
     就是第一次验证。
 - **真机仍在**（vivo V2405A / mt6991 / Android 16 / arm64-v8a）。实测特征表在 ADR 0002 §七，
   **别重测**。
+- **真机第一次跑的结果（2026-10-11，从设备 SharedPreferences 里读出来的，不是猜的）**：
+  `flutter.encode_evidence = {…,"encoder":"h265=c2.mtk.hevc.encoder,h264=c2.mtk.avc.encoder,
+  mjpeg=unknown","samples":[]}`。
+  - ✅ **通道通了**：`encoders` 枚举成功，两个目标硬件编码器都找到且被判为硬件。
+  - ❌ **探针跑了但一条样本都没有**（`samples: []`）：h265/h264 各开了一次相机，两次都没拿到交付。
+    **失败点还没定** —— 需要 `[probe] …` 那一行（`run failed: <异常>` vs `nothing was delivered`）。
+  - ⚠️ **设备现在被卡住了**：这份"空结果"被当成有效答案缓存，每次启动都命中、**永不重测**。
+    重测前必须清掉 `flutter.encode_evidence` 这一个键（**别 `pm clear`** —— 会连 device_token /
+    base_url 一起清掉）。见「卡点」。
 - **两条已经论证完、不要再重新论证的结论**：
   1. **4K60 在这台机器上不存在** —— HEVC 3840×2160 实测只有 13–29fps，是 SoC 硬件编码器的档位墙，
      换采集方式救不了；现实目标是 **1080p60**（4K 最多 30 以下）。
@@ -56,6 +65,11 @@
 
 ## 卡点
 
+- **⚠️ 探针的失败被当成答案缓存了**：`EncodeEvidence.isInvalid` 只看 `version < 0`，所以
+  「`samples: []`」（一次都没测到）与「测出来是 0」在缓存层**无法区分** —— 于是第一次失败的
+  结果被永久缓存，设备再也不会重测，h265 永远进不了公告。探针自己明明区分了这两件事
+  （没测到 → 不产生样本；测出 0 → 产生 fps 0 的样本），**是缓存那一层把它们混为一谈了**。
+  修的方向：一条样本都没有的探针结果不写缓存 / 不命中缓存。**改之前先问，这是 Task 6 的设计决定。**
 - **一道闸门卡住全部**：公告 = 平台声称 ∩ 实测证据（`announcedCodecsFor`）。平台声称已经有了
   （Android 硬件编码器探针），**证据恒空** —— 没有任何平台实现 `EncodeBudgetProbe`，
   `main.dart` 至今传 `probe: null` → `EncodeEvidence.empty`（**刻意不写缓存**：没测 ≠ 测出是 0）
