@@ -5,6 +5,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'src/agent/agent_coordinator.dart';
+import 'src/app/android_encoded_stream.dart';
 import 'src/app/capability_bootstrap.dart';
 import 'src/app/capture_bootstrap.dart';
 import 'src/app/lifecycle_controller.dart';
@@ -128,13 +129,24 @@ Future<void> _bootstrap() async {
     );
   }
 
-  // Which codecs this device can produce is measured, not assumed. Today the
-  // only probe is the baseline one — JPEG from the still-picture path — so the
-  // claim set is `mjpeg`, which the server defines as exactly that. What may be
-  // *announced* is decided later and more narrowly, from evidence: see
-  // `planCapture`.
+  // Android is the only platform with a native encoder behind it today, so the
+  // hardware probe is consulted there and nowhere else. Everywhere else the
+  // list comes out exactly as it did before — `{mjpeg}` — with no channel call
+  // and no new log line.
+  final encodedStream = AndroidEncodedStreamFactory(log: debugPrint);
+  if (encodedStream.isSupported) await encodedStream.prime();
+
+  // Which codecs this device can produce is measured, not assumed. The claim
+  // set is what the platform says it has; what may be *announced* is decided
+  // later and more narrowly, from evidence: see `planCapture`. A claim is not
+  // evidence, so adding the platform probe here does not by itself publish
+  // anything new — with no measurement behind it, `announcedCodecsFor` still
+  // floors to `mjpeg`.
   final available = await CompositeCodecProbe(
-    probes: [const BaselineCodecProbe()],
+    probes: <CodecProbe>[
+      const BaselineCodecProbe(),
+      if (encodedStream.isSupported) encodedStream.codecProbe(),
+    ],
   ).availableCodecs();
   debugPrint('[codec] available=${available.map((c) => c.wireName).join(",")}');
 
@@ -172,6 +184,7 @@ Future<void> _bootstrap() async {
         settings: settings,
         available: available,
         captureConfig: captureConfig,
+        encodedStream: encodedStream,
       ),
     ),
   );
@@ -193,8 +206,14 @@ Future<Widget> _startKiosk({
   required StreamSettings settings,
   required Set<CaptureCodec> available,
   required CaptureConfig captureConfig,
+  required AndroidEncodedStreamFactory encodedStream,
 }) async {
   debugPrint('[camera] inventory: $inventory');
+
+  // The encoder chain needs the physical camera id behind each `camera_enum`,
+  // and the inventory is the only place that mapping exists. A re-probe can
+  // renumber it, so `applyInventory` hands the newer one over as well.
+  encodedStream.inventory = inventory;
 
   // What to open, what to declare and what to publish — decided in one place
   // and in one order: the geometry from the inventory, the evidence measured at
@@ -347,6 +366,12 @@ Future<Widget> _startKiosk({
     announcedCodecs: plan.codecs,
     encodeSamples: plan.samples,
     codecCandidates: claimed,
+    // Android only: the native H.264/H.265 path. Null on every other platform,
+    // which leaves the coordinator on its own mjpeg floor exactly as today.
+    // Supplying it does not change what is declared — that still comes from
+    // evidence — it only decides what an `h265` recording is built from if the
+    // server ever asks for one.
+    encoderFactory: encodedStream.encoderFactory,
     // The server never waits for an ack and records nothing about most
     // commands, so the console is the only place a refusal is visible. Without
     // this, a device that acks `ok:false` looks identical to one that ignored
@@ -417,6 +442,7 @@ Future<Widget> _startKiosk({
 
     currentInventory = fresh;
     currentEvidence = freshPlan.evidence;
+    encodedStream.inventory = fresh;
     await coordinator.adoptInventory(
       cameraProvider: CameraProvider(
         backends: buildBackendChain(cameraOrder: fresh.order),

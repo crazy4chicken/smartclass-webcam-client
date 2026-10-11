@@ -33,11 +33,13 @@ public final class CameraAndroidCameraxPlugin implements FlutterPlugin, Activity
             binding.getApplicationContext(),
             binding.getTextureRegistry());
     proxyApiRegistrar.setUp();
+    EncodedStreamPlugin.register(binding.getBinaryMessenger(), proxyApiRegistrar);
   }
 
   @Override
   public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
     if (proxyApiRegistrar != null) {
+      EncodedStreamPlugin.unregister();
       proxyApiRegistrar.setIgnoreCallsToDart(true);
       proxyApiRegistrar.tearDown();
       proxyApiRegistrar.getInstanceManager().stopFinalizationListener();
