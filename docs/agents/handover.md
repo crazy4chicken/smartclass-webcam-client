@@ -96,6 +96,13 @@
   `CameraAndroidCameraxPlugin.java` 的两行注册，rebase 时手工重放。
 - **助手绝不在自己的 shell 里跑 `flutter pub get`**（假 symlink 会毁掉下一次 `flutter run`）；
   `flutter test` / 构建 / 真机一律用户跑。
+- **助手的 shell 里 `flutter logs` 也跑不了**（`CreateFile failed 231`，与 test/build 同因），
+  而 **`debugPrint` 的输出不落 logcat**（真机 logcat 里查不到本 App 任何一行）。
+  所以要看运行日志，只能让用户 `flutter run … 2>&1 | tee run.log` 再把文件给助手。
+  **替代诊断手段（adb 可用）**：`dumpsys media.camera`（CONNECT/DISCONNECT 时间线 + 设备状态）、
+  `dumpsys SurfaceFlinger --list`（预览层在不在）、`cat /proc/<pid>/task/*/comm`（线程名 ——
+  `EncodedStreamPl` 说明插件收到了方法调用，`CodecLooper` 说明动过 MediaCodec）、
+  以及在本机 `build/app/outputs/flutter-apk/app-debug.apk` 的 dex 里 grep 插件字符串。
 - 60fps 相关的任何承诺必须有真机实测数字；**只对 vivo V2405A 背书**。
 - 改「声明帧率 / 默认模式 / 公告 codec」必须同时扫 `tool/` 与 `test/`（**已踩两次**）；
   改默认几何还要记住 `defaultResolutionFor` 的三个调用点（`main.dart` 的 `openConfig`、
